@@ -16,7 +16,9 @@
   const DAYS = window.OF_DATA_DAYS || {};
   const CLIM = window.OF_DATA_CLIM || null;
   const BASE = window.OF_DATA_BASE || null;
+  const SST = window.OF_DATA_SST || {};
   const SORTED_DATES = Object.keys(DAYS).sort();
+  const SST_DATES = Object.keys(SST).sort();
 
   const BAND_KIND = { front: "front_band_rle", coldwarm: "cold_side_rle", cold: "cold_side_rle", warm: "warm_side_rle" };
 
@@ -119,6 +121,32 @@
       };
     },
 
+    // ---- 海表温度（NOAA GHRSST，0.5 °C 分箱游程；没有导出的日期返回 null） ----
+    sstDates: function () { return SST_DATES.slice(); },
+    hasSst: function (iso) { return Object.prototype.hasOwnProperty.call(SST, iso); },
+    sst: function (iso) { return SST[iso] || null; },
+    sstStats: function (iso) { return SST[iso] ? SST[iso].stats : null; },
+    sstBinC: function () {
+      return (META && META.availability && META.availability.sst && META.availability.sst.bin_c) || 0.5;
+    },
+    // 某个经纬度落在哪一档海温：直接在真实游程里查，不做插值
+    sstCell: function (iso, lon, lat) {
+      const day = SST[iso];
+      if (!day) return null;
+      const g = day.grid;
+      const col = Math.round((lon - g.lon0) / g.dlon);
+      const row = Math.round((lat - g.lat0) / g.dlat);
+      if (col < 0 || col >= g.nx || row < 0 || row >= g.ny) return { inGrid: false, valueC: null, bin: null };
+      const runs = day.runs || [];
+      for (let i = 0; i < runs.length; i++) {
+        const run = runs[i];
+        if (run[0] === row && col >= run[1] && col < run[1] + run[2]) {
+          return { inGrid: true, valueC: Math.round(run[3] * day.bin_c * 10) / 10, bin: run[3] };
+        }
+      }
+      return { inGrid: true, valueC: null, bin: null };  // 这一格没有有效海温
+    },
+
     // ---- 明确「还没有」的东西：一律返回 false，让界面说清楚 ----
     sstAvailable: function () { return !!(META && META.status && META.status.sst === "real"); },
     intensityAvailable: function () { return !!(META && META.status && META.status.intensity === "real"); },
@@ -142,6 +170,7 @@
         region: META.region,
         grid: META.grid,
         days: META.availability.days,
+        sst: META.availability.sst || null,
         clim: META.availability.clim,
         basemap: META.availability.basemap,
         status: META.status,

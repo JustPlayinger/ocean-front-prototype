@@ -5,7 +5,7 @@
  * 这些断言的意义：原型里所有数字都必须能追溯到 data/ 文件，
  * 所以这里既查结构（字段/取值），也查自洽（RLE 还原出的像元数必须等于 quality 里的统计）。
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,9 +28,9 @@ const BBOX = META.region.bbox;
 check("锋面产品与许可写明（Zenodo 20356239 · CC BY 4.0）",
   META.product.doi === "10.5281/zenodo.20356239" && META.product.license === "CC BY 4.0",
   META.product.doi + " / " + META.product.license);
-check("已接入的图层标成 real，没接入的标成 not_available",
-  ["front_line", "cold_side", "warm_side", "front_objects"].every((k) => META.status[k] === "real") &&
-  ["sst", "intensity", "forecast", "sea_state", "fishing_grounds"].every((k) => META.status[k] === "not_available"),
+check("已接入的图层标成 real（锋面 + 海温），没接入的标成 not_available",
+  ["front_line", "cold_side", "warm_side", "front_objects", "sst"].every((k) => META.status[k] === "real") &&
+  ["intensity", "forecast", "sea_state", "fishing_grounds"].every((k) => META.status[k] === "not_available"),
   JSON.stringify(META.status));
 check("窗口 / 锚点 / 找鱼范围写清楚",
   BBOX.length === 4 && META.region.anchor.length === 2 && META.region.ranges_km.join(",") === "10,20,30",
@@ -95,11 +95,69 @@ for (const file of dayFiles) {
   const objPixels = day.objects.reduce((sum, o) => sum + o.pixel_count, 0);
   check(tag + "对象像元数不超过锋面线像元总数", objPixels <= day.quality.front_line_cells,
     objPixels + " ≤ " + day.quality.front_line_cells);
-  check(tag + "没接入的变量不冒充真实值（has_sst / has_intensity = false）",
+  check(tag + "锋面文件里没有 SST / 强度，不冒充（has_sst / has_intensity = false；海温在 sst/ 里单独存）",
     day.has_sst === false && day.has_intensity === false, "sst=" + day.has_sst + " intensity=" + day.has_intensity);
   const kb = statSync(join(DATA, "day", file)).size / 1024;
   check(tag + "单日文件体积可控（< 300 KB）", kb < 300, kb.toFixed(1) + " KB");
 }
+
+// ===== 海表温度（NOAA GHRSST，0.5 °C 分档游程） =====
+const sstDir = join(DATA, "sst");
+const sstFiles = existsSync(sstDir) ? readdirSync(sstDir).filter((f) => f.endsWith(".js")).sort() : [];
+const sstDeclared = (META.availability.sst && META.availability.sst.days) || [];
+check("海温文件与 meta 声明一致（天数与日期都对得上）",
+  sstFiles.map((f) => f.replace(".js", "")).join(",") === sstDeclared.slice().sort().join(","),
+  sstFiles.length + " 天 / 声明 " + sstDeclared.length + " 天");
+check("海温产品与许可写明（NOAA GHRSST，免账号、可离线留存）",
+  /GHRSST/.test(META.availability.sst.product.citation) &&
+  /free and open/.test(META.availability.sst.product.license) &&
+  /不同源/.test(META.availability.sst.product.note),
+  META.availability.sst.product.name_zh);
+
+let sstBad = null;
+for (const file of sstFiles) {
+  const iso = file.replace(".js", "");
+  const payload = readJs(join("sst", file)).run().OF_DATA_SST[iso];
+  const tag = "SST " + iso + ": ";
+  if (!payload || payload.date !== iso) { sstBad = tag + "日期不符"; break; }
+  if (payload.bin_c !== 0.5) { sstBad = tag + "分档不是 0.5 °C"; break; }
+  const g = payload.grid;
+  if (g.dlon !== 0.05 || g.dlat !== 0.05) { sstBad = tag + "网格不是 0.05°"; break; }
+  if (!inBox([g.lon0, g.lat0], BBOX) || g.nx < 150 || g.ny < 130) { sstBad = tag + "网格不在导出窗口内"; break; }
+  const cells = decoded(payload.runs);
+  if (cells !== payload.stats.valid_cells) {
+    sstBad = tag + "RLE 还原 " + cells + " ≠ 统计 " + payload.stats.valid_cells; break;
+  }
+  if (payload.runs.some((r) => r[3] * payload.bin_c < 0 || r[3] * payload.bin_c > 40)) {
+    sstBad = tag + "有越界的温度档位"; break;
+  }
+  if (payload.runs.some((r) => r[0] < 0 || r[0] >= g.ny || r[1] < 0 || r[1] + r[2] > g.nx)) {
+    sstBad = tag + "有游程越出网格"; break;
+  }
+  if ([payload.stats.vmin_c, payload.stats.vmax_c, payload.stats.mean_c]
+    .some((v) => typeof v !== "number" || Number.isNaN(v))) { sstBad = tag + "统计值有 NaN"; break; }
+  const kb = statSync(join(DATA, "sst", file)).size / 1024;
+  if (kb > 200) { sstBad = tag + "体积过大 " + kb.toFixed(1) + " KB"; break; }
+}
+check("海温文件自洽（RLE 还原 = 统计值、档位与网格合法、无 NaN）", sstBad === null, sstBad || sstFiles.length + " 天全部通过");
+
+if (sstFiles.includes("2024-08-05.js")) {
+  const probe = readJs(join("sst", "2024-08-05.js")).run().OF_DATA_SST["2024-08-05"];
+  const g = probe.grid;
+  const col = Math.round((124.525 - g.lon0) / g.dlon);
+  const row = Math.round((30.025 - g.lat0) / g.dlat);
+  const hit = (probe.runs || []).find((r) => r[0] === row && col >= r[1] && col < r[1] + r[2]);
+  check("海温与数据源单点值对得上（NOAA ERDDAP 2024-08-05 @ 124.525°E/30.025°N = 30.69 °C）",
+    !!hit && Math.abs(hit[3] * probe.bin_c - 30.69) <= 0.26,
+    hit ? hit[3] * probe.bin_c + " °C（档位 " + hit[3] + "）" : "该格没有海温");
+}
+
+// ===== 数据清单（页面按 days.js 注入 <script>，不再手写日期标签） =====
+const INDEX = readJs("days.js").run().OF_DATA_INDEX;
+check("days.js 清单与目录一致（加日期不用改 HTML）",
+  INDEX.days.join(",") === dayFiles.map((f) => f.replace(".js", "")).join(",") &&
+  (INDEX.sst || []).join(",") === sstFiles.map((f) => f.replace(".js", "")).join(","),
+  INDEX.days.length + " 天 / 海温 " + (INDEX.sst || []).length + " 天");
 
 // ===== 底图 =====
 const baseWin = readJs(join("base", "basemap.js")).run();
@@ -153,6 +211,10 @@ check("生成文件里没有 NaN / Infinity 之类的脏值",
   dayFiles.every((f) => !/NaN|Infinity/.test(readJs(join("day", f)).text)), "已扫描全部生成文件");
 
 // ===== 汇总 =====
-console.log(results.join("\n"));
-console.log("\nFAIL 总数 = " + results.filter((r) => r.startsWith("FAIL")).length + " / " + results.length);
-process.exit(0);
+// 数据天数多起来之后（60+ 天 × 每天 14 项）逐条打印会淹掉结果，
+// 默认只打失败项；需要看全部用 VERBOSE=1
+const verbose = process.env.VERBOSE === "1";
+const failed = results.filter((r) => r.startsWith("FAIL"));
+console.log(verbose ? results.join("\n") : (failed.length ? failed.join("\n") : "全部通过"));
+console.log("\nFAIL 总数 = " + failed.length + " / " + results.length);
+process.exit(failed.length ? 1 : 0);

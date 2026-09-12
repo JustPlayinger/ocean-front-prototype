@@ -11,9 +11,11 @@
 | 数据 | 来源 | 许可 | 分辨率 / 覆盖 |
 |---|---|---|---|
 | 锋面位置（核心） | Zenodo **20356239** · 《A global daily mesoscale front dataset from satellite observations》 | **CC BY 4.0**（需署名） | 0.05° 逐日，全球 3600×7200，1982—2024 |
+| 海表温度 | NOAA CoastWatch / GHRSST `noaacwBLENDEDCsstDaily`（Geo-Polar Blended 夜间融合 L4，免账号） | GHRSST **free and open** | 0.05° 逐日、度 C，2002—至今（本演示取 2024-07-01 ~ 08-31） |
 | 底图（陆地 / 海岸线 / 等深线） | **Natural Earth 1:10m**（`ne_10m_land` / `ne_10m_coastline` / `ne_10m_bathymetry_K_200` / `J_1000`） | **公有领域**（无需署名，可商用） | 1:10m 矢量 |
 
-没有接入、也**不会**用示例值冒充的：海表温度、锋面强度、海况（风/浪/涌）、预报、渔场分布。这些在 `meta.status` 里统一标成 `not_available`。
+没有接入、也**不会**用示例值冒充的：锋面强度、海况（风/浪/涌）、预报、渔场分布。这些在 `meta.status` 里统一标成 `not_available`。
+海表温度**已接入真实数据**（NOAA GHRSST 0.05° 逐日，与锋面数据集不同源，见 §3.4），`meta.status.sst = "real"`。
 
 > 锋面文件里的 `-128` 同时表示**陆地、湖泊、云与缺测**，数据集无法区分「没有锋面」和「没有观测」——页面一律说「没有观测数据」。
 
@@ -22,14 +24,16 @@
 ## 2. 生成流程
 
 ```powershell
-# ① 单日图层（真实锋面 → 对象中心线 / 冷暖侧 RLE）
+# ① 拉数据 + 单日图层（真实锋面 → 对象中心线 / 冷暖侧 RLE；真实海温 → 分档游程）
 cd Ocean\backend
-.\.venv\Scripts\python.exe scripts\export_prototype_data.py --dates 2024-08-05 2024-08-06 2024-08-07
+.\.venv\Scripts\python.exe scripts\fetch_zenodo_front_samples.py 2024-08-05 2024-08-06   # 锋面（Zenodo Range 抽取）
+.\.venv\Scripts\python.exe scripts\fetch_sst_samples.py 2024-08-05 2024-08-06           # 海温（NOAA ERDDAP 子集，免账号）
+.\.venv\Scripts\python.exe scripts\export_prototype_data.py                             # 扫 raw 全量导出（含海温）
 
-# ② 往年同期统计（扫 data/raw/front 下所有已下载日期）
-.\.venv\Scripts\python.exe scripts\export_prototype_data.py --mode clim
+# ③ 往年同期统计（显式给取样日期；不给就扫 raw 全量，会把整月也算进“同期”）
+.\.venv\Scripts\python.exe scripts\export_prototype_data.py --mode clim --clim-dates 2015-08-05 2015-08-06 ...
 
-# ③ 底图（Natural Earth 公有领域 → 裁剪 + 抽稀）
+# ④ 底图（Natural Earth 公有领域 → 裁剪 + 抽稀）
 cd ..\..\ocean-front-prototype
 node tools\build-basemap.mjs
 ```
@@ -39,7 +43,7 @@ node tools\build-basemap.mjs
   `.\.venv\Scripts\python.exe scripts\fetch_zenodo_front_samples.py 2019-08-05 2019-08-06`
 - 出参全部落在本仓 `data/`，可离线双击 `prototype-fishing.html` 直接跑（`<script>` 引入，不走 fetch，无 CORS 问题）
 
-**参数**：`--bbox 120,27,128,34`（东海窗口）、`--anchor 124.5,30.2`（往年同期锚点＝顶栏定位点）、`--ranges 10,20,30`（找鱼范围）、`--clim-radii 10,20,30,50,100`（同期统计半径，含参照用大半径）、`--tolerance-km 6`（中心线抽稀）、`--min-length-km 20`（对象最短长度）。
+**参数**：`--bbox 120,27,128,34`（东海窗口）、`--anchor 124.5,30.2`（往年同期锚点＝顶栏定位点）、`--ranges 10,20,30`（找鱼范围）、`--clim-radii 10,20,30,50,100`（同期统计半径，含参照用大半径）、`--tolerance-km 6`（中心线抽稀）、`--min-length-km 20`（对象最短长度）、`--sst-raw-dir`（海温原始目录）、`--no-sst`（只出锋面）。
 
 ---
 
@@ -48,11 +52,24 @@ node tools\build-basemap.mjs
 ```
 data/
 ├── meta.js                  window.OF_DATA_META    产品/许可/可用日期/缺什么
-├── day/<日期>.js             window.OF_DATA_DAYS    单日真实图层（每天一个文件）
+├── days.js                  window.OF_DATA_INDEX   清单：有哪些天（页面按它注入 <script>）
+├── day/<日期>.js             window.OF_DATA_DAYS    单日真实锋面图层（每天一个文件）
+├── sst/<日期>.js             window.OF_DATA_SST     单日真实海温（0.5 °C 分档游程）
 ├── clim/same-period.js      window.OF_DATA_CLIM    往年同期统计（唯一口径）
 ├── base/basemap.js          window.OF_DATA_BASE    陆地/海岸线/等深线
 └── README.md
 ```
+
+> **加日期不用改 HTML**：`prototype-fishing.html` 只引入 `data/days.js`，
+> 页面按清单用 `document.write` 同步注入 `data/day/*.js` 与 `data/sst/*.js`
+> （file:// 下同样可用，不依赖 fetch）。数据变了只需要重跑导出脚本。
+
+> **海温来自另一个产品**：`sst/` 是 NOAA CoastWatch ERDDAP 的
+> `noaacwBLENDEDCsstDaily`（GHRSST Geo-Polar Blended 夜间融合，0.05° 逐日、度 C），
+> 与锋面数据集用的 ESA CCI / C3S SST **不是同一产品**；两者网格还错开半格
+> （NOAA 格点是 120.025/27.025… 这种 .025 结尾），页面上按各自的真实经纬度绘制。
+> 温度按 0.5 °C 分箱落成 `[row, start, count, bin]` 游程（`bin = round(T / 0.5)`），
+> 页面只做「档位 → 颜色」映射，不插值，也不参与把握评分。
 
 ### 3.1 `meta.js`
 
@@ -101,7 +118,24 @@ probability  = 有锋面的天数 / 有效天数
 
 > 为什么会看 100 km：锋面在海上分布很散，只盯 10–30 km 会经常出现 0%，看不出年份差别；页面把大半径当参照，用户选的找鱼范围仍按原样展示。
 
-### 3.4 `base/basemap.js`
+### 3.4 `sst/<日期>.js`
+
+真实海温（NOAA GHRSST 0.05° 逐日，度 C），按 **0.5 °C 分箱**落成逐行游程，页面只做「档位 → 颜色」映射：
+
+```js
+{ date, source_file,
+  product: { id: "noaacwBLENDEDCsstDaily", name_zh, license, url, note: "与锋面数据集不同源", ... },
+  grid: { lon0, lat0, dlon: 0.05, dlat: 0.05, nx, ny },
+  bin_c: 0.5,
+  runs: [[row, startCol, count, bin], ...],   // bin = round(T / 0.5)
+  stats: { vmin_c, vmax_c, mean_c, valid_cells, missing_cells } }
+```
+
+- 只存有效格点（陆地 / 冰 / 缺测不进 `runs`）；`sum(run.count) === stats.valid_cells` 由 `data-check` 断言
+- 海温网格的起点是 `.025` 结尾（如 120.025 / 27.025），与锋面网格错开半格，绘制时各按自己的真实坐标
+- `OFData.sstCell(iso, lon, lat)` 直接在这份游程里查那一格的真实档位温度（不插值）
+
+### 3.5 `base/basemap.js`
 
 `layers.{land|coastline|isobath200|isobath1000}.chains`（经纬度折线数组，已裁剪到 `bbox` 并抽稀，陆地多边形丢弃内环/湖面）。
 
@@ -120,14 +154,15 @@ probability  = 有锋面的天数 / 有效天数
 | `OFData.cellInfo(iso, lon, lat)` | 某一格到底是什么：缺测 / 锋面线（含编码）/ 冷侧 / 暖侧 |
 | `OFData.quality(iso)` / `grid(iso)` | 观测覆盖、网格信息 |
 | `OFData.clim` / `climReady()` | 往年同期统计 |
-| `OFData.attribution()` | 「依据」页的数据来源、许可、已知问题 |
+| `OFData.sst(iso)` / `sstStats(iso)` / `sstCell(iso, lon, lat)` | 真实海温：游程、统计值、某格真实档位温度（无则 `valueC = null`） |
+| `OFData.attribution()` | 「依据」页的数据来源、许可、已知问题（含海温产品与「不同源」说明） |
 | `OFData.sstAvailable()` 等 | 明确「还没有」的东西一律返回 false |
 
 ---
 
 ## 5. 已知问题（页面「依据」页同步展示）
 
-1. 锋面文件不含 SST；本地那份 SST 样例是**合成**的，没有当真实数据使用。
+1. 锋面文件本身不含 SST；海温另用 **NOAA GHRSST 融合产品**（0.05° 逐日，见 §3 说明），两者**不是同一产品**，同屏出现时属于两个来源的观测；温度按 0.5 °C 分档展示、不插值、不参与评分。
 2. `-128` 无法区分陆地、湖泊、云与缺测。
 3. 锋面线编码 `-10/10/30` 的物理语义在数据集说明里仍有歧义，原型不解释其含义，只按「锋面线」统一呈现并在指针查询里如实显示编码。
 4. 锋面文件时间坐标单位错误（`days since 0000-00-00`），日期以文件名为准。
@@ -135,15 +170,16 @@ probability  = 有锋面的天数 / 有效天数
 6. `frontal_intensity` 尚未下载（约 100 GB，43 个分年包），契约里已写对数还原公式。
 7. 底图为 Natural Earth 1:10m（公里级精度，World Data Bank 2 来源在某些海岸约 7 km 误差）；国内正式发布需换成带审图号的合规底图。
 8. 渔场/船位数据缺失；地图上的「值得去的水域」是示例占位，不参与把握评分。
+9. 海温虽是真实数据，但来自 NOAA GHRSST 融合产品（与锋面数据集用的 ESA CCI/C3S 不同源，且融合产品云下是分析值）；页面按 0.5 °C 分档显示，温度不参与把握评分。
 
 ---
 
 ## 6. 校验
 
 ```bash
-node tools/data-check.mjs     # 数据文件结构与自洽（59 项）
+node tools/data-check.mjs     # 数据文件结构与自洽（每个数据天 14 项 + 海温/清单断言；VERBOSE=1 打全部）
 node tools/e2e-check.mjs      # 页面端到端（63 项，含「没有编造数值」断言）
 node tools/layout-check.mjs   # 布局（20 项，1680/1280 两档）
 ```
 
-`data-check` 会校验：网格与窗口一致、对象编号唯一且有序、中心线在窗口内、RLE 结构合法并且**还原出的像元数等于 `quality` 里的统计**、`has_sst/has_intensity` 为 false、生成文件里没有 `NaN/Infinity`。
+`data-check` 会校验：网格与窗口一致、对象编号唯一且有序、中心线在窗口内、RLE 结构合法并且**还原出的像元数等于 `quality` 里的统计**、`has_sst/has_intensity` 为 false、生成文件里没有 `NaN/Infinity`；海温另有：与 `meta` 声明一致、`bin_c=0.5`、游程还原数 = `valid_cells`、档位落在 0~40 °C、与数据源单点值对得上（2024-08-05 @124.525°E/30.025°N = 30.69 °C）；并校验 `days.js` 清单与目录一致。

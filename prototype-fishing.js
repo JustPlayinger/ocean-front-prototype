@@ -1,14 +1,15 @@
 /* 渔场向导 · 交互原型
  *
- * 数据：真实锋面数据（Zenodo 20356239，CC BY 4.0，0.05° 逐日）+ 公有领域底图（Natural Earth 1:10m）。
+ * 数据：真实锋面数据（Zenodo 20356239，CC BY 4.0，0.05° 逐日）+ 真实海温（NOAA GHRSST 0.05° 逐日，与锋面不同源）
+ *       + 公有领域底图（Natural Earth 1:10m）。
  *       生成脚本：Ocean/backend/scripts/export_prototype_data.py、tools/build-basemap.mjs。
  *       页面只通过 prototype-data.js（window.OFData）取数，不直接读原始文件。
  *
- * 没有真实数据的地方（海表温度 / 锋面强度 / 海况 / 预报 / 渔场）一律显式标成「待接入」或「示例」，
+ * 没有真实数据的地方（锋面强度 / 海况 / 预报 / 渔场）一律显式标成「待接入」或「示例」，
  * 不插值、不哈希、不用示例值冒充实测值（需求 FR-7「无数据不编造」）。
  *
  * 信息架构（三层）：
- *   L0 顶栏      ① 从哪出发 ② 找多远 ③ 找什么鱼 ④ 出海日 —— 全局唯一真源
+ *   L0 顶栏      ① 从哪出发 ② 找多远 ③ 出海日 —— 全局唯一真源（目标鱼种本期不做，见需求 FR-10）
  *   L1 结论层    hero 常驻：这天值不值得去 + 去哪个锋面对象 + 为什么
  *   L2 页签      现在（观测）/ 未来（预报未接入） ｜ 往年同期 / 依据
  *
@@ -34,32 +35,25 @@ const TODAY = AVAILABLE_DATES.indexOf(DEMO_TODAY) >= 0 ? DEMO_TODAY : OFData.fir
 const DATE_MIN = OFData.firstDate();
 const DATE_MAX = OFData.lastDate();
 
-const SPECIES = {
-  hairtail:      { label: "带鱼",       prefer: "any",  sst: [16, 28] },
-  yellowcroaker: { label: "小黄鱼",     prefer: "cold", sst: [14, 22] },
-  chubmackerel:  { label: "鲐鱼",       prefer: "warm", sst: [17, 25] },
-  squid:         { label: "剑尖枪乌贼", prefer: "warm", sst: [19, 27] },
-};
-
 // ==================== 状态（唯一真源） ====================
 const state = {
   lon: 124.5, lat: 30.2,                   // ① 从哪出发
   range: 20,                               // ② 找多远（km）
-  species: "hairtail",                     // ③ 找什么鱼
-  date: TODAY,                             // ④ 出海日（唯一时间控件）
-  layers: { band: true, front: true, coldwarm: true, nodata: true, fishing: true },
+  date: TODAY,                             // ③ 出海日（唯一时间控件）
+  layers: { sst: true, band: true, front: true, coldwarm: true, nodata: true, fishing: true },
   select: null,                            // 被选中的对象 {type, id}
   probe: null,                             // 钉住的地图点 {lon, lat}
   tab: "now",
   climMode: "day",                         // 往年同期页：day（这一天）
   zoom: 1,
+  view: { cx: 500, cy: 320 },              // 视窗中心（SVG 坐标）：滚轮缩放/拖拽平移用
 };
 
 const $ = (id) => document.getElementById(id);
 const SELECT_LABEL = { front: "锋面对象", coldwarm: "冷侧 / 暖侧", fishing: "值得去的水域（示例）" };
 const SELECT_LAYERS = { front: ["band", "front"], coldwarm: ["coldwarm"], fishing: ["fishing"] };
-const LAYER_META = [["band", "锋面带"], ["front", "锋面线"], ["coldwarm", "冷侧 / 暖侧"],
-  ["nodata", "没有观测"], ["fishing", "值得去的水域（示例）"]];
+const LAYER_META = [["sst", "海表温度（真实 · 0.5 °C 分档）"], ["band", "锋面带"], ["front", "锋面线"],
+  ["coldwarm", "冷侧 / 暖侧"], ["nodata", "没有观测"], ["fishing", "值得去的水域（示例）"]];
 const DIRS16 = ["正北", "东北偏北", "东北", "东北偏东", "正东", "东南偏东", "东南", "东南偏南",
   "正南", "西南偏南", "西南", "西南偏西", "正西", "西北偏西", "西北", "西北偏北"];
 
@@ -177,9 +171,8 @@ function seaState(date) {
   return { wind, wave, swell, level: wind <= 5 && wave <= 1.5 ? "seaworthy" : wind <= 6 && wave <= 1.8 ? "marginal" : "unsafe" };
 }
 
-// ==================== 把握怎么加出来的（每项都用真实数据；温度项因未接入不计分） ====================
+// ==================== 把握怎么加出来的（每一项都来自真实数据） ====================
 function scoreBreakdown(fronts, inRange, cell, quality) {
-  const sp = SPECIES[state.species];
   const objects = fronts.filter((f) => f.isObject);
   const inRangeObjects = objects.filter((f) => f.inRange);
   const items = [];
@@ -190,16 +183,8 @@ function scoreBreakdown(fronts, inRange, cell, quality) {
   s += objScore;
   items.push(["找鱼范围内有 " + inRangeObjects.length + " 个锋面对象（每个 +12，最多算 3 个）", objScore]);
 
+  // 冷暖侧照实展示（数据里的 -20 / 20 编码原样用），但本期没有目标鱼种，侧别不参与评分
   const side = cell ? cell.side : null;
-  const preferText = sp.prefer === "any" ? "冷暖交汇都行" : sp.prefer === "cold" ? "偏好冷侧" : "偏好暖侧";
-  let sideScore = 0;
-  if (side) {
-    if (sp.prefer === "any") sideScore = 6;
-    else if ((sp.prefer === "cold" && side === "冷侧") || (sp.prefer === "warm" && side === "暖侧")) sideScore = 15;
-    else sideScore = -5;
-  }
-  s += sideScore;
-  items.push(["你落在" + (side || "锋区外") + "（" + sp.label + preferText + "）", sideScore]);
 
   const nearest = fronts[0] || null;
   const nearScore = !nearest ? 0 : nearest.km <= 10 ? 8 : nearest.km <= 20 ? 4 : 0;
@@ -259,22 +244,49 @@ function el(name, attrs, parent) {
 }
 // 经纬度折线 → SVG path
 function pathOf(pts) { return pts.map((p, i) => (i ? "L " : "M ") + xy(p[0], p[1]).join(",")).join(" "); }
+// 显示层平滑（Catmull-Rom → 三次贝塞尔）：只影响画线，数据点、距离、命中判定仍用原始点
+function smoothPathOf(pts) {
+  if (pts.length < 3) return pathOf(pts);
+  const p = pts.map((q) => xy(q[0], q[1]));
+  let d = "M" + p[0][0].toFixed(1) + "," + p[0][1].toFixed(1);
+  for (let i = 0; i < p.length - 1; i++) {
+    const p0 = p[i - 1] || p[i], p1 = p[i], p2 = p[i + 1], p3 = p[i + 2] || p[i + 1];
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += " C" + c1x.toFixed(1) + "," + c1y.toFixed(1) + " " + c2x.toFixed(1) + "," + c2y.toFixed(1) +
+      " " + p2[0].toFixed(1) + "," + p2[1].toFixed(1);
+  }
+  return d;
+}
 // 多条折线合成一个 path（一个 DOM 节点，几千段也不卡）
 function chainsPath(chains) { return chains.map((pts) => pathOf(pts) + " Z").join(" "); }
 function chainLinesPath(chains) { return chains.map((pts) => pathOf(pts)).join(" "); }
 
 // 逐行 RLE 还原成矩形（每格一个矩形，合成一个 path；不插值、不放大）
+// 相邻行里起止相同的 run 会合并成一个矩形，避免 0.05° 格子拼出"马赛克 + 缝"
 function rlePath(runs, grid) {
   const w = grid.dlon * PX_LON;
   const h = grid.dlat * PX_LAT;
   let d = "";
+  let open = null;   // { x, row, count, rows }
+  const flush = () => {
+    if (!open) return;
+    const x = 500 + (grid.lon0 + open.col * grid.dlon - ANCHOR.lon) * PX_LON;
+    const yTop = 320 - (grid.lat0 + (open.row + open.rows) * grid.dlat - ANCHOR.lat) * PX_LAT;
+    d += "M" + x.toFixed(1) + "," + yTop.toFixed(1) + "h" + (open.count * w).toFixed(1) +
+      "v" + (open.rows * h).toFixed(1) + "h" + (-open.count * w).toFixed(1) + "z";
+    open = null;
+  };
   for (let i = 0; i < runs.length; i++) {
     const run = runs[i];
-    const x = 500 + (grid.lon0 + run[1] * grid.dlon - ANCHOR.lon) * PX_LON;
-    const yTop = 320 - (grid.lat0 + (run[0] + 1) * grid.dlat - ANCHOR.lat) * PX_LAT;
-    d += "M" + x.toFixed(1) + "," + yTop.toFixed(1) + "h" + (run[2] * w).toFixed(1) + "v" + h.toFixed(1)
-      + "h" + (-run[2] * w).toFixed(1) + "z";
+    if (open && run[0] === open.row + open.rows && run[1] === open.col && run[2] === open.count) {
+      open.rows += 1;
+    } else {
+      flush();
+      open = { row: run[0], col: run[1], count: run[2], rows: 1 };
+    }
   }
+  flush();
   return d;
 }
 
@@ -291,44 +303,112 @@ function drawBackground(svg) {
   const base = OFData.basemap;
   el("rect", { x: -400, y: -400, width: 1800, height: 1440, fill: "#0d2135" }, svg);
   if (!base) return;
-  const landPath = chainsPath(base.layers.land.chains);
-  el("path", { d: landPath, fill: "#16283c", stroke: "none" }, svg);
-  if (state.layers.nodata) {
-    el("path", { d: landPath, fill: "rgba(126,146,166,0.30)", stroke: "none" }, svg);
-  }
-  el("path", { d: chainLinesPath(base.layers.coastline.chains), fill: "none",
-    stroke: "rgba(150,200,235,0.75)", "stroke-width": 1.3 }, svg);
   el("path", { d: chainLinesPath(base.layers.isobath200.chains), fill: "none",
-    stroke: "rgba(120,190,215,0.45)", "stroke-width": 1, "stroke-dasharray": "7 5" }, svg);
+    stroke: "rgba(120,190,215,0.42)", "stroke-width": 1, "stroke-dasharray": "7 5" }, svg);
   el("path", { d: chainLinesPath(base.layers.isobath1000.chains), fill: "none",
-    stroke: "rgba(90,150,205,0.35)", "stroke-width": 1, "stroke-dasharray": "3 6" }, svg);
-  for (let i = 0; i <= 20; i++) {
-    el("line", { x1: (i / 20) * 1000, y1: 0, x2: (i / 20) * 1000, y2: 640, stroke: "rgba(150,200,230,0.06)" }, svg);
+    stroke: "rgba(90,150,205,0.34)", "stroke-width": 1, "stroke-dasharray": "3 6" }, svg);
+}
+
+// 当前视窗（SVG 坐标），缩放后也能把经纬网标到可见边上
+function currentView() {
+  const raw = ($("mapSvg").getAttribute("viewBox") || "0 0 1000 640").trim().split(/\s+/).map(Number);
+  return { x: raw[0], y: raw[1], w: raw[2] || 1000, h: raw[3] || 640 };
+}
+
+// 真实经纬网：按整数度画线并标度数（原来是无标签的等分格网，看不出这是哪儿）
+function drawGraticule(host) {
+  const g = host;
+  const box = currentView();
+  const lonMin = geoOfXY(box.x, 0)[0], lonMax = geoOfXY(box.x + box.w, 0)[0];
+  const latMax = geoOfXY(0, box.y)[1], latMin = geoOfXY(0, box.y + box.h)[1];
+  const tag = (text, x, y) => {
+    const t = el("text", { x, y, fill: "rgba(186,214,235,0.6)", "font-size": 10.5,
+      "paint-order": "stroke", stroke: "rgba(6,14,24,0.85)", "stroke-width": 3 }, g);
+    t.textContent = text;
+  };
+  for (let lon = Math.ceil(lonMin); lon <= Math.floor(lonMax); lon++) {
+    const x = xy(lon, 0)[0];
+    el("line", { x1: x, y1: box.y, x2: x, y2: box.y + box.h, stroke: "rgba(150,200,230,0.10)" }, g);
+    if (lon % 2 === 0) tag(lon + "°E", x + 3, box.y + 12);
   }
-  for (let i = 0; i <= 12; i++) {
-    el("line", { x1: 0, y1: (i / 12) * 640, x2: 1000, y2: (i / 12) * 640, stroke: "rgba(150,200,230,0.06)" }, svg);
+  for (let lat = Math.ceil(latMin); lat <= Math.floor(latMax); lat++) {
+    const y = xy(0, lat)[1];
+    el("line", { x1: box.x, y1: y, x2: box.x + box.w, y2: y, stroke: "rgba(150,200,230,0.10)" }, g);
+    if (lat % 2 === 0) tag(lat + "°N", box.x + 4, y - 3);
   }
 }
 
-// 数据图层：一切按数据原样画，不做平滑、不外推
+// 海温色带：按数据里的 0.5 °C 档位取色（不插值，只是给档位配颜色）
+const SST_RAMP = [[16, "#2b3f8f"], [20, "#2f7fc1"], [23, "#37b3b8"], [25, "#7ecb6a"],
+  [27, "#e8d75a"], [29, "#f0a341"], [31, "#e2694a"], [33, "#b52f3f"]];
+function mixHex(a, b, t) {
+  const pa = [1, 3, 5].map((i) => parseInt(a.substr(i, 2), 16));
+  const pb = [1, 3, 5].map((i) => parseInt(b.substr(i, 2), 16));
+  return "rgb(" + pa.map((v, i) => Math.round(v + (pb[i] - v) * t)).join(",") + ")";
+}
+function sstColor(c) {
+  if (c <= SST_RAMP[0][0]) return SST_RAMP[0][1];
+  for (let i = 1; i < SST_RAMP.length; i++) {
+    if (c <= SST_RAMP[i][0]) {
+      const t = (c - SST_RAMP[i - 1][0]) / (SST_RAMP[i][0] - SST_RAMP[i - 1][0]);
+      return mixHex(SST_RAMP[i - 1][1], SST_RAMP[i][1], t);
+    }
+  }
+  return SST_RAMP[SST_RAMP.length - 1][1];
+}
+
+// 真实海表温度场（NOAA GHRSST）：按档位分组后画，档位内相邻行会合并，看起来是连续温度场
+function drawSst(svg, iso) {
+  if (!state.layers.sst) return;
+  const day = OFData.sst(iso);
+  if (!day) return;
+  const binC = day.bin_c;
+  const byBin = new Map();
+  (day.runs || []).forEach((run) => {
+    if (!byBin.has(run[3])) byBin.set(run[3], []);
+    byBin.get(run[3]).push(run);
+  });
+  byBin.forEach((runs, bin) => {
+    el("path", { d: rlePath(runs, day.grid), "data-layer": "sst", fill: sstColor(bin * binC),
+      stroke: "none", "shape-rendering": "crispEdges",
+      opacity: 0.52 * (state.select && state.select.type !== "sst" ? 0.35 : 1) }, svg);
+  });
+}
+
+// 陆地画在数据层之上：海上的"没有观测"用斜线纹理，陆地保持实色
+// （数据里的 -128 同时包含陆地与云，之前直接铺灰会让陆地也变成"缺测"）
+function drawLand(svg) {
+  const base = OFData.basemap;
+  if (!base) return;
+  el("path", { d: chainsPath(base.layers.land.chains), fill: "#16283c", stroke: "none" }, svg);
+  el("path", { d: chainLinesPath(base.layers.coastline.chains), fill: "none",
+    stroke: "rgba(150,200,235,0.75)", "stroke-width": 1.3 }, svg);
+}
+
+// 海上没有观测的像元（云 / 未观测；数据里 -128 与陆地共用编码）
+function drawNodata(svg, iso, grid) {
+  const day = OFData.day(iso);
+  if (!day || !state.layers.nodata) return;
+  el("path", { d: rlePath(day.nodata_rle || [], grid), "data-layer": "nodata",
+    fill: "url(#nodataHatch)", stroke: "none", "shape-rendering": "crispEdges", opacity: 0.5 }, svg);
+}
+
+
+// 数据图层：一切按数据原样画，不做外推（锋面线只在显示层平滑，几何与距离仍用原始点）
 function drawDataLayers(svg, snap, iso, grid, sel) {
   const dim = (k) => (sel && sel.type !== k ? 0.16 : 1);
   const entries = frontEntries();
   const selected = sel && sel.type === "front" && sel.id ? entries.find((e) => e.id === sel.id) : null;
-  const day = OFData.day(iso);
-
-  // 没有观测的像元（陆地 / 云 / 未观测在数据里都是 -128，无法区分）
-  if (state.layers.nodata && day) {
-    el("path", { d: rlePath(day.nodata_rle || [], grid), fill: "rgba(150,166,182,0.34)", stroke: "none" }, svg);
-  }
 
   // 冷侧 / 暖侧：数据里的 -20 / 20 编码，一格不改
   if (state.layers.coldwarm) {
     const on = !!sel && sel.type === "coldwarm";
-    el("path", { d: rlePath(OFData.bandRuns(iso, "cold"), grid), fill: "rgba(38,104,178,0.42)",
-      stroke: "none", opacity: dim("coldwarm") }, svg);
-    el("path", { d: rlePath(OFData.bandRuns(iso, "warm"), grid), fill: "rgba(198,88,58,0.40)",
-      stroke: "none", opacity: dim("coldwarm") }, svg);
+    el("path", { d: rlePath(OFData.bandRuns(iso, "cold"), grid), "data-layer": "cold",
+      fill: "rgba(38,104,178,0.42)", stroke: "none", "shape-rendering": "crispEdges",
+      opacity: dim("coldwarm") }, svg);
+    el("path", { d: rlePath(OFData.bandRuns(iso, "warm"), grid), "data-layer": "warm",
+      fill: "rgba(198,88,58,0.40)", stroke: "none", "shape-rendering": "crispEdges",
+      opacity: dim("coldwarm") }, svg);
     if (on) {
       el("path", { d: rlePath(OFData.bandRuns(iso, "cold"), grid), fill: "none",
         stroke: "#5cb4ff", "stroke-width": 1.6 }, svg);
@@ -339,8 +419,9 @@ function drawDataLayers(svg, snap, iso, grid, sel) {
 
   // 锋面带：数据里的 -10 / 10 / 30 像元原样画；编码含义有歧义，图上不解释
   if (state.layers.band) {
-    el("path", { d: rlePath(OFData.bandRuns(iso, "front"), grid), fill: "rgba(255,236,170,0.5)",
-      stroke: "none", opacity: 0.9 * dim("front") }, svg);
+    el("path", { d: rlePath(OFData.bandRuns(iso, "front"), grid), "data-layer": "band",
+      fill: "rgba(255,236,170,0.5)", stroke: "none", "shape-rendering": "crispEdges",
+      opacity: 0.9 * dim("front") }, svg);
   }
 
   // 锋面线：对象中心线 + 未编号短段
@@ -349,21 +430,32 @@ function drawDataLayers(svg, snap, iso, grid, sel) {
       const isSel = !!(selected && entry.isObject && entry.id === selected.id);
       const stroke = isSel ? "#4dd4c6" : entry.isObject ? "#ffffff" : "rgba(255,255,255,0.55)";
       const width = isSel ? 3.4 : entry.isObject ? 2.3 : 1.3;
+      const d = smoothPathOf(entry.points);
+      el("path", { d, fill: "none", stroke: "rgba(6,14,24,0.6)", "stroke-width": width + 2.4,
+        opacity: (entry.isObject ? 0.85 : 0.55) * dim("front"), "stroke-linecap": "round" }, svg);
       if (isSel) {
-        el("path", { d: pathOf(entry.points), fill: "none", stroke: "#4dd4c6", "stroke-width": 9,
+        el("path", { d, fill: "none", stroke: "#4dd4c6", "stroke-width": 9,
           opacity: 0.28, "stroke-linecap": "round" }, svg);
       }
-      el("path", { d: pathOf(entry.points), fill: "none", stroke, "stroke-width": width,
+      el("path", { d, "data-layer": "front-line", fill: "none", stroke, "stroke-width": width,
         opacity: (entry.isObject ? 0.95 : 0.7) * dim("front"), "stroke-linecap": "round" }, svg);
     });
+    // 编号只给对象；放不下就跳过，不再互相压字
+    const placed = [];
     entries.filter((e) => e.isObject).forEach((entry) => {
       const mid = entry.points[Math.floor(entry.points.length / 2)];
       const p = xy(mid[0], mid[1]);
       const isSel = !!(selected && entry.id === selected.id);
-      el("text", { x: p[0] + 6, y: p[1] - 8, fill: isSel ? "#8ff2e4" : "rgba(255,255,255,0.72)",
-        "font-size": 10.5, "paint-order": "stroke", stroke: "rgba(8,16,26,0.9)", "stroke-width": 3,
-        opacity: isSel ? 1 : dim("front") }, svg).textContent =
-        entry.id + " · " + Math.round(entry.lengthKm) + " km";
+      const text = entry.id + " · " + Math.round(entry.lengthKm) + " km";
+      const box = { x: p[0] + 5, y: p[1] - 20, w: text.length * 6.4, h: 14 };
+      const clash = placed.some((q) => !(box.x + box.w < q.x || q.x + q.w < box.x ||
+        box.y + box.h < q.y || q.y + q.h < box.y));
+      if (clash && !isSel) return;
+      if (!clash) placed.push(box);
+      el("text", { x: p[0] + 6, y: p[1] - 8, "data-layer": "front-label",
+        fill: isSel ? "#8ff2e4" : "rgba(255,255,255,0.78)", "font-size": 10.5,
+        "paint-order": "stroke", stroke: "rgba(8,16,26,0.9)", "stroke-width": 3,
+        opacity: isSel ? 1 : dim("front") }, svg).textContent = text;
     });
   }
 
@@ -424,12 +516,26 @@ function drawMap() {
     $("mapEmptyDesc").textContent = snap.status.desc + "（现在选的是 " + timeLabel() + "）";
   }
 
+  // 缺测（-128）的斜线纹理：陆地与云在数据里同码，靠底图把两者分开画
+  const hatch = el("pattern", { id: "nodataHatch", width: 6, height: 6,
+    patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" }, defs);
+  el("rect", { width: 6, height: 6, fill: "rgba(150,166,182,0.30)" }, hatch);
+  el("line", { x1: 0, y1: 0, x2: 0, y2: 6, stroke: "rgba(206,222,238,0.5)", "stroke-width": 1.6 }, hatch);
+
   drawBackground(svg);
-  if (ok) drawDataLayers(svg, snap, iso, grid, state.select);
+  const gratHost = el("g", { id: "gratHost" }, svg);
+  drawGraticule(gratHost);
+  if (ok) {
+    drawSst(svg, iso);
+    drawNodata(svg, iso, grid);
+    drawDataLayers(svg, snap, iso, grid, state.select);
+  }
+  drawLand(svg);                       // 陆地压在数据层之上：海上缺测用纹理，陆地保持实色
   drawOriginLayer(svg);
   drawProbeMark(svg);
   el("style", {}, defs).textContent =
     "@keyframes pulseAnim{0%{r:8;opacity:.9}100%{r:32;opacity:0}}.pulse{animation:pulseAnim 1.6s ease-out infinite}";
+  updateScaleBar();
 }
 
 // ==================== 鼠标放到地图上：看那个点的数据 ====================
@@ -516,8 +622,19 @@ function probeHTML(lon, lat) {
   }
 
   h += '<div class="mp-row"><span class="mp-k">你所在的侧别</span><span class="mp-v">' + (cell.side || "锋区外") + "</span></div>";
-  h += '<div class="mp-row"><span class="mp-k">海表温度</span><span class="mp-v">待接入</span></div>';
-  h += '<div class="mp-note">真实海温还没接进来，这里不给数值，也不按纬度估</div>';
+  // 海表温度：有真实数据就给数值（NOAA GHRSST，与锋面不同源），没有就直说
+  const sstHere = OFData.sstCell(state.date, lon, lat);
+  if (sstHere && sstHere.valueC !== null) {
+    h += '<div class="mp-row"><span class="mp-k">海表温度</span><span class="mp-v">' +
+      sstHere.valueC.toFixed(1) + " °C</span></div>";
+    h += '<div class="mp-note">NOAA GHRSST 融合海温（0.5 °C 分档；与锋面数据集不是同一产品，云下为分析值）</div>';
+  } else if (sstHere && sstHere.inGrid) {
+    h += '<div class="mp-row"><span class="mp-k">海表温度</span><span class="mp-v">这一格没有海温</span></div>';
+    h += '<div class="mp-note">该格在数据里不是有效海温（陆地 / 冰 / 缺测），不给数值</div>';
+  } else {
+    h += '<div class="mp-row"><span class="mp-k">海表温度</span><span class="mp-v">这一天没导出</span></div>';
+    h += '<div class="mp-note">海温只导出了部分日期，缺的日期不给数值</div>';
+  }
   const spot = nearestSpotFrom(lon, lat);
   if (spot) {
     h += '<div class="mp-row"><span class="mp-k">值得去的水域</span><span class="mp-v">' +
@@ -639,7 +756,6 @@ function heroTarget() {
 
 function renderHero() {
   const snap = snapshot();
-  const sp = SPECIES[state.species];
   const v = $("heroVerdict"), l = $("heroLine"), pts = $("heroPoints"), body = $("heroWhyBody");
   $("heroWhen").textContent = timeLabel();
 
@@ -659,7 +775,7 @@ function renderHero() {
   v.className = "verdict " + verdict.cls;
 
   const t = heroTarget();
-  let line = "找 <b>" + sp.label + "</b> · <b>" + state.range + " km</b> 内 · 数据把握 <b>" + snap.score + "%</b>。";
+  let line = "找 <b>" + state.range + " km</b> 内的锋面 · 数据把握 <b>" + snap.score + "%</b>。";
   if (t) line += "先去 <b>" + t.bearing + " " + t.km.toFixed(1) + " km</b> 的" + t.label +
     "（开船约 " + fmtHours(t.km) + " 小时）。";
   else line += "这个范围里没找到像样的线索，可以把找鱼范围放大，或者换个日期。";
@@ -687,8 +803,8 @@ function renderHero() {
     snap.items.map((it) => '<div class="line"><span class="k">' + it[0] + "</span> → <b>" +
       (it[1] > 0 ? "+" : "") + it[1] + "</b></div>").join("") +
     '<div class="line"><span class="k">合计把握</span> → <b>' + snap.score + "%</b></div>" +
-    '<div class="line"><span class="k">数据来源</span> → 真实锋面数据 Zenodo 20356239（CC BY 4.0），0.05° 逐日，东海窗口</div>' +
-    '<div class="line"><span class="k">没算进去的</span> → 海表温度、锋面强度、海况、预报、渔场都还没接真实数据，一律不参与评分</div>' +
+    '<div class="line"><span class="k">数据来源</span> → 锋面：Zenodo 20356239（CC BY 4.0）0.05° 逐日；海温：NOAA GHRSST 融合海温 0.05° 逐日（与锋面不同源）</div>' +
+    '<div class="line"><span class="k">没算进去的</span> → 海温有真实数据但不参与把握；锋面强度、海况、预报、渔场都还没接</div>' +
     '<div class="line"><span class="k">三档怎么分</span> → ≥70% 值得去；50–69% 可以看看；<50% 线索不足</div>';
   syncSelect();
   renderPick();
@@ -702,9 +818,8 @@ function metricCell(label, value, unit, type, id) {
 
 function renderNow() {
   const snap = snapshot();
-  const sp = SPECIES[state.species];
   const st = snap.status;
-  $("nowScopeTag").textContent = state.range + " km 内 · " + sp.label;
+  $("nowScopeTag").textContent = state.range + " km 内";
 
   if (!st.ok) {
     $("nowMetrics").innerHTML = "";
@@ -721,8 +836,10 @@ function renderNow() {
   const objects = snap.objects;
   const coverage = snap.coverage;
   const nearest = snap.nearest;
-  $("nowScopeTag").textContent = state.range + " km 内 · " + sp.label +
-    (coverage === null ? "" : " · 观测覆盖 " + coverage.toFixed(1) + "%");
+  const anchorSst = OFData.sstCell(state.date, state.lon, state.lat);
+  $("nowScopeTag").textContent = state.range + " km 内" +
+    (coverage === null ? "" : " · 观测覆盖 " + coverage.toFixed(1) + "%") +
+    (anchorSst && anchorSst.valueC !== null ? " · 定位点海温 " + anchorSst.valueC.toFixed(1) + " °C" : "");
   $("nowMetrics").innerHTML =
     metricCell("这一天找到的锋面对象", String(objects.length), "条") +
     metricCell("最近的锋面", nearest ? nearest.km.toFixed(1) : "—", "km", "front",
@@ -784,9 +901,20 @@ function renderFuture() {
     "<small>以前这里按「每天衰减 6%」推过数字，那是编的，已经撤掉</small></span></div>" +
     '<div class="row"><span class="i">3</span><span class="grow"><b>要接预报，先补两样东西</b>' +
     "<small>更多日期的锋面样本（做持续性基线：今天有锋面→明天还有的概率），以及海温/流场等预报输入场</small></span></div>";
-  $("futureDays").innerHTML = AVAILABLE_DATES.map((d) =>
-    '<div class="row clickable" data-date="' + d + '"><span class="i">·</span><span class="grow"><b>' + mdText(d) +
-    "</b><small>已导出的观测日期 · 点一下把「出海日」设成这天</small></span></div>").join("");
+  // 已导出的观测日期：默认给「当前出海日之后」的 14 天，其余用汇总行说明（62 天一股脑列出来没法看）
+  const upcoming = AVAILABLE_DATES.filter((d) => d > state.date);
+  const shown = upcoming.slice(0, 14);
+  const rest = upcoming.length - shown.length;
+  const last = AVAILABLE_DATES[AVAILABLE_DATES.length - 1];
+  $("futureDays").innerHTML =
+    '<div class="row"><span class="i">·</span><span class="grow"><b>已导出观测日期共 ' + AVAILABLE_DATES.length +
+    " 天（" + AVAILABLE_DATES[0] + " ~ " + last + "）</b><small>当前出海日之后还有 " + upcoming.length +
+    " 天；点某天即把「出海日」设成那天</small></span></div>" +
+    shown.map((d) =>
+      '<div class="row clickable" data-date="' + d + '"><span class="i">·</span><span class="grow"><b>' + mdText(d) +
+      "</b><small>已导出的观测日期 · 点一下把「出海日」设成这天</small></span></div>").join("") +
+    (rest > 0 ? '<div class="row"><span class="i">…</span><span class="grow"><b>后面还有 ' + rest +
+      " 天</b><small>用顶栏「出海日」的 ◀ ▶ 一天天走，或直接改日期</small></span></div>" : "");
   $("futureDays").querySelectorAll(".clickable").forEach((node) =>
     node.addEventListener("click", () => setDate(node.dataset.date)));
 }
@@ -926,9 +1054,13 @@ function renderBasis() {
     ["冷暖侧", statusText("cold_side", "数据里的 -20 / 20 编码，原样使用", "未接入")],
     ["锋面对象编号", "本地计算：锋面线像元做连通域 → 取直径路径当中心线 → 按公里抽稀；编号只在本系统内有效"],
     ["底图", "Natural Earth 1:10m 陆地 / 海岸线 / 200 m·1000 m 等深线（" + a.basemap.source + "）"],
-    ["已导出的观测日期", a.days.join("、") + "（共 " + a.days.length + " 天）"],
+    ["已导出的观测日期", a.days[0] + " ~ " + a.days[a.days.length - 1] + "（共 " + a.days.length + " 天，逐日）"],
     ["往年同期样本", a.clim.ready ? a.clim.years.join("、") + " 年 · " + a.clim.sample_note : "未导出"],
-    ["海表温度", "未接入：本地已有的 SST 样例是合成的，没有当真实数据用"],
+    ["海表温度", a.sst && a.sst.ready
+      ? a.sst.product.name_zh + " · " + a.sst.product.resolution_deg + "° 逐日 · 按 " + a.sst.bin_c +
+        " °C 分档（已导出 " + a.sst.days.length + " 天） · " + a.sst.product.license +
+        " <em>与锋面数据集不同源 · " + a.sst.product.id + "</em>"
+      : "未接入"],
     ["锋面强度", "未接入（数据集里的 frontal_intensity 尚未下载）"],
     ["海况（风 / 浪 / 涌）", "示例值，没有真实数据源；结论里不含海况判断"],
     ["预报", "未接入"],
@@ -937,7 +1069,7 @@ function renderBasis() {
   ]);
   $("basisRules").innerHTML = listRows([
     ["1", "<b>找鱼范围</b>：以定位点为圆心，" + a.region.ranges_km.join(" / ") + " km 半径内命中才算数；范围内没有编号对象时先给最近的一个，并写明「先给最近的」"],
-    ["2", "<b>数据把握</b>：起评分 30；范围内每个锋面对象 +12（最多算 3 个）；你落在鱼偏好的那一侧 +15（相反 −5，冷暖交汇都行 +6）；最近锋面 ≤10 km +8、≤20 km +4；范围内最长对象 ≥100 km +8、≥50 km +4；观测覆盖 ≥85% +4、<70% −4"],
+    ["2", "<b>数据把握</b>：起评分 30；范围内每个锋面对象 +12（最多算 3 个）；最近锋面 ≤10 km +8、≤20 km +4；范围内最长对象 ≥100 km +8、≥50 km +4；观测覆盖 ≥85% +4、<70% −4。本期没有目标鱼种，冷暖侧只展示、不加分"],
     ["3", "<b>三档结论</b>：≥70% 值得去；50–69% 可以看看；<50% 线索不足。海况没数据，所以不拿它下结论"],
     ["4", "<b>往年同期口径</b>：半径内锋面线像元数 > 0 记为 front_present = true；比例 = 有锋面的天数 ÷ 有效天数（需求 §5.2）"],
     ["5", "<b>开船时间和油</b>：按 8 节航速（" + CRUISE_KMH + " km/h）、" + FUEL_L_PER_KM + " L/km 估，只看量级"],
@@ -946,7 +1078,8 @@ function renderBasis() {
   ]);
   $("basisLimits").innerHTML = listRows(
     a.knownIssues.map((text) => ["!", text]).concat([
-      ["!", "海表温度、海况、预报都没有真实数据，本页所有数字都只由锋面数据算出来"],
+      ["!", "海表温度来自 NOAA GHRSST（与锋面数据集用的 ESA CCI/C3S 不是同一产品）；融合产品本身无缝，云下是分析值；页面按 0.5 °C 分档显示，温度不参与把握评分"],
+      ["!", "海况、预报都没有真实数据，本页所有结论只由锋面数据算出来"],
       ["!", "底图是 Natural Earth 1:10m（公有领域），精度约公里级；国内正式发布需换成带审图号的合规底图"],
     ]));
 }
@@ -990,7 +1123,6 @@ function refresh() {
   renderPick();
   $("dataStamp").textContent = timeLabel() + " · 真实锋面数据";
   document.querySelectorAll("#rangeSeg button").forEach((b) => b.classList.toggle("active", Number(b.dataset.range) === state.range));
-  $("speciesSel").value = state.species;
   $("timeDate").value = state.date;
   $("timeDate").min = DATE_MIN;
   $("timeDate").max = DATE_MAX;
@@ -1006,24 +1138,61 @@ function switchTab(name) {
   document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.id === "pane-" + name));
 }
 
-function applyZoom() {
+// 视窗：中心 + 缩放；中心被夹在数据窗口内，拖动不会把图拖没
+const VIEW_BOX = { x0: -310, y0: -470, x1: 1130, y1: 986 };
+function applyZoom(smooth) {
   const w = 1000 / state.zoom, h = 640 / state.zoom;
+  state.view.cx = clamp(state.view.cx, VIEW_BOX.x0 + w / 2, VIEW_BOX.x1 - w / 2);
+  state.view.cy = clamp(state.view.cy, VIEW_BOX.y0 + h / 2, VIEW_BOX.y1 - h / 2);
   const svg = $("mapSvg");
-  svg.style.transition = "all .25s ease";
-  svg.setAttribute("viewBox", (1000 - w) / 2 + " " + (640 - h) / 2 + " " + w + " " + h);
+  svg.style.transition = smooth === false ? "none" : "all .25s ease";
+  svg.setAttribute("viewBox", (state.view.cx - w / 2) + " " + (state.view.cy - h / 2) + " " + w + " " + h);
+  refreshGraticule();
+  updateScaleBar();
+}
+function refreshGraticule() {
+  const host = $("gratHost");
+  if (!host) return;
+  host.innerHTML = "";
+  drawGraticule(host);
+}
+// 比例尺：把"图上 50 km"换算成屏幕像素（纯几何换算，不涉及数据）
+function updateScaleBar() {
+  const bar = $("mapScale");
+  if (!bar) return;
+  const rect = $("mapSvg").getBoundingClientRect();
+  const box = currentView();
+  if (!rect.width || !box.w) return;
+  const s = Math.max(rect.width / box.w, rect.height / box.h);
+  const km = 50;
+  bar.style.width = (km * KM2PX * s).toFixed(0) + "px";
+  $("mapScaleText").textContent = km + " km";
+}
+// 以光标为中心缩放：把光标底下的地点钉在原位
+function zoomAt(clientX, clientY, factor) {
+  const svg = $("mapSvg"), rect = svg.getBoundingClientRect();
+  const target = geoOfScreen(clientX, clientY);
+  const next = clamp(state.zoom * factor, 1, 8);
+  if (next === state.zoom) return;
+  state.zoom = next;
+  applyZoom(false);
+  const box = currentView();
+  const s = Math.max(rect.width / box.w, rect.height / box.h);
+  const p = screenOf(target[0], target[1]);
+  state.view.cx += (p.x - (clientX - rect.left)) / s;
+  state.view.cy += (p.y - (clientY - rect.top)) / s;
+  applyZoom(false);
+}
+function centerOn(lon, lat, zoom) {
+  const p = xy(lon, lat);
+  state.view.cx = p[0];
+  state.view.cy = p[1];
+  if (zoom) state.zoom = zoom;
+  applyZoom();
 }
 
 // ==================== 事件绑定 ====================
 function bind() {
-  // ③ 找什么鱼
-  $("speciesSel").innerHTML = Object.keys(SPECIES).map((k) =>
-    '<option value="' + k + '">' + SPECIES[k].label + "</option>").join("");
-  $("speciesSel").addEventListener("change", (e) => {
-    state.species = e.target.value;
-    refresh();
-    showToast("目标鱼种：" + SPECIES[state.species].label);
-  });
-
   // ② 找多远
   document.querySelectorAll("#rangeSeg button").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1034,7 +1203,7 @@ function bind() {
     });
   });
 
-  // ④ 出海日（全站唯一的时间控件）
+  // ③ 出海日（全站唯一的时间控件）
   $("timeDate").addEventListener("change", (e) => setDate(e.target.value));
   $("datePrev").addEventListener("click", () => setDate(addDays(state.date, -1)));
   $("dateNext").addEventListener("click", () => setDate(addDays(state.date, 1)));
@@ -1049,15 +1218,48 @@ function bind() {
     state.select = null;
     state.probe = null;
     refresh();
+    centerOn(state.lon, state.lat);       // 定位后视窗跟着走，不用手动找
     showToast("已定位到 " + fmtCoord(state.lon, state.lat));
   };
   $("locateBtn").addEventListener("click", doLocate);
   $("locInput").addEventListener("keydown", (e) => { if (e.key === "Enter") doLocate(); });
 
+  // ===== 地图：拖拽平移 / 滚轮以光标为中心缩放 =====
+  let drag = null, suppressClick = false;
+  const interactive = (t) => !!(t && t.closest && t.closest(".map-legend, .map-controls, .map-pick, .map-probe"));
+  $("map").addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || interactive(e.target)) return;
+    drag = { x: e.clientX, y: e.clientY, moved: 0 };
+    hoverPt = null;
+    renderProbe();
+  });
+  window.addEventListener("mouseup", () => {
+    if (drag && drag.moved > 4) suppressClick = true;   // 拖动结束那一下不算点击
+    drag = null;
+  });
+  $("map").addEventListener("wheel", (e) => {
+    if (interactive(e.target)) return;
+    e.preventDefault();
+    zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.2 : 1 / 1.2);
+  }, { passive: false });
+  window.addEventListener("resize", updateScaleBar);
+
   // ===== 地图：鼠标指到哪，就显示哪里的数据 =====
   const map = $("map");
   let pending = null, raf = 0;
   map.addEventListener("mousemove", (e) => {
+    if (drag) {
+      const rect = $("mapSvg").getBoundingClientRect();
+      const box = currentView();
+      const s = Math.max(rect.width / box.w, rect.height / box.h);
+      state.view.cx -= (e.clientX - drag.x) / s;
+      state.view.cy -= (e.clientY - drag.y) / s;
+      drag.moved += Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y);
+      drag.x = e.clientX;
+      drag.y = e.clientY;
+      applyZoom(false);
+      return;
+    }
     const r = map.getBoundingClientRect();
     pending = { x: e.clientX - r.left, y: e.clientY - r.top, cx: e.clientX, cy: e.clientY };
     if (raf) return;
@@ -1073,6 +1275,7 @@ function bind() {
   });
   map.addEventListener("mouseleave", () => { hoverPt = null; renderProbe(); });
   map.addEventListener("click", (e) => {
+    if (suppressClick) { suppressClick = false; return; }   // 拖动之后的那一下不算点击
     if (e.target.closest && e.target.closest(".map-legend, .map-controls, .map-pick, .map-probe, .map-empty")) return;
     const g = geoOfScreen(e.clientX, e.clientY);
     const onPinned = state.probe && distKm([state.probe.lon, state.probe.lat], g) < 5;
@@ -1103,10 +1306,11 @@ function bind() {
     showToast("已取消选中");
   });
 
-  // 地图缩放
-  $("zoomIn").addEventListener("click", () => { state.zoom = Math.min(state.zoom * 1.25, 4); applyZoom(); });
-  $("zoomOut").addEventListener("click", () => { state.zoom = Math.max(state.zoom / 1.25, 0.4); applyZoom(); });
-  $("recenter").addEventListener("click", () => { state.zoom = 1; applyZoom(); });
+  // 地图缩放按钮（焦点在地图中心；滚轮与拖动见上）
+  const mapCenter = () => { const r = $("map").getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; };
+  $("zoomIn").addEventListener("click", () => { const c = mapCenter(); zoomAt(c[0], c[1], 1.25); });
+  $("zoomOut").addEventListener("click", () => { const c = mapCenter(); zoomAt(c[0], c[1], 1 / 1.25); });
+  $("recenter").addEventListener("click", () => centerOn(state.lon, state.lat, 1));
 
   // 图层开关（图例）
   document.querySelectorAll(".legend-row[data-layer]").forEach((row) => {

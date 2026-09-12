@@ -88,29 +88,44 @@
     border-right: 1px solid var(--line);
   }
   .map svg { width: 100%; height: 100%; display: block; }
-  .map-controls { position: absolute; right: 14px; top: 14px; display: flex; flex-direction: column; gap: 7px; }
+  .map-controls { position: absolute; right: 14px; top: 14px; display: flex; flex-direction: column; gap: 7px; z-index: 7; }
   .ctrl {
     width: 38px; height: 38px; border-radius: 10px; border: 1px solid var(--line-strong);
     background: rgba(12,26,41,.92); color: var(--text); font-size: 17px; cursor: pointer;
   }
   .ctrl:hover { border-color: var(--accent); color: var(--accent); }
   .map-legend {
-    position: absolute; left: 14px; bottom: 14px; width: 218px;
+    position: absolute; left: 14px; bottom: 14px; width: 218px; z-index: 7;
     background: rgba(12,26,41,.92); border: 1px solid var(--line);
-    border-radius: 9px; padding: 9px 11px; font-size: 12px; color: var(--text-dim);
+    border-radius: 9px; padding: 8px 10px; font-size: 12px; color: var(--text-dim);
   }
   .map-legend h4 { color: var(--text); margin-bottom: 6px; font-size: 12px; }
-  .legend-row { display: flex; align-items: center; gap: 7px; margin: 4px 0; cursor: pointer; }
+  .legend-row { display: flex; align-items: center; gap: 7px; margin: 3px 0; cursor: pointer; }
   .swatch { width: 15px; height: 15px; border-radius: 4px; flex: none; border: 1px solid transparent; }
+  .swatch.sst { background: linear-gradient(90deg,#2f7fc1,#37b3b8,#7ecb6a,#e8d75a,#f0a341,#e2694a); }
   .swatch.band { background: rgba(255,236,170,.6); }
   .swatch.front { background: #0f0f0f; border-color: #fff; }
   .swatch.cold { background: rgba(40,90,150,.85); }
   .swatch.warm { background: rgba(190,90,45,.85); }
-  .swatch.nodata { background: rgba(150,166,182,.45); border-color: rgba(200,215,230,.5); }
+  .swatch.nodata { background: repeating-linear-gradient(45deg, rgba(206,222,238,.65) 0 3px, rgba(120,142,166,.25) 3px 6px); border-color: rgba(200,215,230,.5); }
   .swatch.fishing { background: rgba(255,180,84,.75); }
+  /* 比例尺：长度按当前缩放实时换算，标"图上 50 km" */
+  .map-scale {
+    position: absolute; right: 14px; bottom: 16px; z-index: 7; height: 7px; width: 90px;
+    border-left: 2px solid rgba(206,222,238,.9); border-right: 2px solid rgba(206,222,238,.9);
+    background: linear-gradient(180deg, rgba(206,222,238,.7), rgba(206,222,238,.35));
+    pointer-events: none;
+  }
+  .map-scale-label {
+    position: absolute; right: 14px; bottom: 26px; z-index: 7; font-size: 11px;
+    color: rgba(206,222,238,.8); text-shadow: 0 1px 2px rgba(6,14,24,.9); pointer-events: none;
+  }
+  /* hidden 属性只靠 UA 样式表的 display:none 生效，会被任何带 display 的类规则压掉
+     （.map-empty 就是 display:grid）——这里显式兜底，防止「有数据却一直盖着无数据遮罩」。 */
+  [hidden] { display: none !important; }
   .map-empty {
     position: absolute; inset: 0; display: grid; place-content: center; text-align: center;
-    gap: 6px; background: rgba(8,16,26,.55); backdrop-filter: blur(2px); z-index: 8;
+    gap: 6px; background: rgba(8,16,26,.55); backdrop-filter: blur(2px); z-index: 6;
   }
   .map-empty b { font-size: 15px; }
   .map-empty small { color: var(--text-dim); font-size: 12px; }
@@ -323,7 +338,7 @@
 </head>
 <body>
 <div class="app">
-  <!-- ===== L0 全局上下文（唯一真源：定位 / 半径 / 鱼种 / 时间） ===== -->
+  <!-- ===== L0 全局上下文（唯一真源：定位 / 半径 / 时间） ===== -->
   <header class="topbar" id="topbar">
     <div class="brand">
       <div class="logo">⛵</div>
@@ -348,13 +363,8 @@
       </div>
     </div>
 
-    <div class="ctx">
-      <i class="num">3</i><span class="ctx-lab">找什么鱼</span>
-      <select id="speciesSel"></select>
-    </div>
-
     <div class="ctx timebar">
-      <i class="num">4</i><span class="ctx-lab">出海日</span>
+      <i class="num">3</i><span class="ctx-lab">出海日</span>
       <button class="step" id="datePrev" title="前一天">◀</button>
       <input type="date" id="timeDate" value="2024-08-05" min="2024-08-05" max="2024-08-07" />
       <button class="step" id="dateNext" title="后一天">▶</button>
@@ -372,16 +382,19 @@
       </div>
       <div class="map-legend">
         <h4>图层</h4>
+        <div class="legend-row" data-layer="sst"><span class="swatch sst"></span> 海表温度（真实 · NOAA）</div>
         <div class="legend-row" data-layer="band"><span class="swatch band"></span> 锋面带（数据原样）</div>
         <div class="legend-row" data-layer="front"><span class="swatch front"></span> 锋面线 · 对象编号</div>
         <div class="legend-row sub" data-layer="coldwarm"><span class="swatch cold"></span><span class="swatch warm"></span> 冷侧 / 暖侧</div>
-        <div class="legend-row" data-layer="nodata"><span class="swatch nodata"></span> 没有观测（陆地 / 云）</div>
+        <div class="legend-row" data-layer="nodata"><span class="swatch nodata"></span> 没有观测（云 / 未观测海区）</div>
         <div class="legend-row" data-layer="fishing"><span class="swatch fishing"></span> 值得去的水域（示例）</div>
         <div class="legend-band">
           <span class="kbd">底图</span><span class="kbd">Natural Earth · 公有领域</span>
         </div>
-        <div class="legend-note">鼠标指到地图上任意点：看那里真实的锋面编码、冷/暖侧与有没有观测</div>
+        <div class="legend-note">陆地按底图实色画；斜线 = 海上没有观测。鼠标指到任意点看那里真实的编码与冷暖侧</div>
       </div>
+      <div class="map-scale-label" id="mapScaleText">50 km</div>
+      <div class="map-scale" id="mapScale"></div>
       <div class="map-empty" id="mapEmpty" hidden>
         <b id="mapEmptyTitle">该时次无数据</b>
         <small id="mapEmptyDesc"></small>
@@ -498,10 +511,22 @@
 <!-- 真实数据（脚本生成，不要手改） -->
 <script src="data/meta.js"></script>
 <script src="data/base/basemap.js"></script>
-<script src="data/day/2024-08-05.js"></script>
-<script src="data/day/2024-08-06.js"></script>
-<script src="data/day/2024-08-07.js"></script>
 <script src="data/clim/same-period.js"></script>
+<!-- 数据清单：日期/海温有哪些天由导出脚本写进 data/days.js，
+     这里按清单同步注入（document.write 保证后面脚本执行前加载完，file:// 下也能用）。
+     加日期只需要重跑导出脚本，不用手改本文件。 -->
+<script src="data/days.js"></script>
+<script>
+  (function () {
+    var idx = window.OF_DATA_INDEX || { days: [], sst: [] };
+    (idx.days || []).forEach(function (d) {
+      document.write('<script src="data/day/' + d + '.js"><\/script>');
+    });
+    (idx.sst || []).forEach(function (d) {
+      document.write('<script src="data/sst/' + d + '.js"><\/script>');
+    });
+  })();
+</script>
 <!-- 适配层：页面唯一的数据入口 -->
 <script src="prototype-data.js"></script>
 <script src="prototype-fishing.js"></script>

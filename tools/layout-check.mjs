@@ -30,8 +30,18 @@ let id = 0; const pending = new Map();
 ws.addEventListener("message", (ev) => { const m = JSON.parse(ev.data); if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); p.res(m.result); } });
 const send = (method, params = {}) => { const i = ++id; ws.send(JSON.stringify({ id: i, method, params })); return new Promise((res) => pending.set(i, { res })); };
 await send("Runtime.enable");
-await sleep(800);
 const evalJS = async (expr) => (await send("Runtime.evaluate", { expression: `(function(){ ${expr} })()`, returnByValue: true, awaitPromise: true })).result.value;
+
+// 数据文件变多（每天一个 <script>，60+ 天），等 OFData 与首屏渲染就绪再断言，避免竞态
+let ready = false;
+for (let i = 0; i < 80 && !ready; i++) {
+  await sleep(250);
+  try {
+    ready = (await evalJS(`return typeof OFData === "object" && typeof state === "object" &&
+      !!document.querySelector("#gratHost") && (document.getElementById("timeDate").max || "") !== "";`)) === true;
+  } catch (e) { ready = false; }
+}
+if (!ready) console.log("WARN: 页面 20s 内没进入就绪状态，后续断言可能失败");
 
 const GEO = `var tb=document.getElementById("topbar"), hero=document.getElementById("hero"), tabs=document.getElementById("tabs"),
   panes=document.getElementById("panes"), side=document.querySelector(".side"), footer=document.querySelector(".footer");
@@ -54,7 +64,10 @@ const GEO = `var tb=document.getElementById("topbar"), hero=document.getElementB
     legendH: Math.round(document.querySelector(".map-legend").getBoundingClientRect().height),
     pickRight: Math.round(document.querySelector(".map-pick").getBoundingClientRect().right),
     ctrlLeft: Math.round(document.querySelector(".map-controls").getBoundingClientRect().left),
-    probeW: Math.round(parseFloat(getComputedStyle(document.getElementById("mapProbe")).width))
+    probeW: Math.round(parseFloat(getComputedStyle(document.getElementById("mapProbe")).width)),
+    scaleW: Math.round(document.getElementById("mapScale").getBoundingClientRect().width),
+    scaleRight: Math.round(document.getElementById("mapScale").getBoundingClientRect().right),
+    legendRight: Math.round(document.querySelector(".map-legend").getBoundingClientRect().right)
   };`;
 
 const results = [];
@@ -70,11 +83,13 @@ check("卡片区可滚动高度充足（≥200）", g1.panesH >= 200, "panesH=" 
 check("侧栏未溢出视口", g1.sideBottom <= g1.vh + 1, `${g1.sideBottom} ≤ ${g1.vh}`);
 check("地图区域尺寸合理", g1.mapW > 1100 && g1.mapH > 600, `map=${g1.mapW}x${g1.mapH}`);
 check("无文字被裁切（scrollWidth 溢出计数=0）", g1.clipped === 0, "clipped=" + g1.clipped);
-check("图例含 5 个可切换图层（锋面带 / 锋面线 / 冷暖侧 / 缺测 / 渔场示例）", g1.legendOk === 5, "rows=" + g1.legendOk);
-check("顶栏 4 个序号可见（顺序看得见）且已无时间族分段", g1.numBadges === 4 && g1.family === false, `badges=${g1.numBadges} family=${g1.family}`);
+check("图例含 6 个可切换图层（海温 / 锋面带 / 锋面线 / 冷暖侧 / 缺测 / 渔场示例）", g1.legendOk === 6, "rows=" + g1.legendOk);
+check("顶栏 3 个序号可见（顺序看得见）且已无时间族分段", g1.numBadges === 3 && g1.family === false, `badges=${g1.numBadges} family=${g1.family}`);
 check("图例卡片不占地图过多（高度 ≤ 240）", g1.legendH <= 240, "legendH=" + g1.legendH);
 check("选中回执卡与缩放按钮水平不重叠", g1.pickRight <= g1.ctrlLeft, `${g1.pickRight} ≤ ${g1.ctrlLeft}`);
 check("指针浮层宽度合理（200~300px）", g1.probeW >= 200 && g1.probeW <= 300, "probeW=" + g1.probeW);
+check("比例尺存在且长度合理（30~300px，按当前缩放实时换算）", g1.scaleW >= 30 && g1.scaleW <= 300, "scaleW=" + g1.scaleW);
+check("比例尺与图例不重叠（图例在左、比例尺在右）", g1.legendRight < g1.scaleRight, `${g1.legendRight} < ${g1.scaleRight}`);
 
 await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
 await sleep(400);
@@ -84,7 +99,7 @@ check("1280 宽：顶栏保持单行（高度 < 62）", g2.topbarH < 62, "topbar
 check("1280 宽：结论卡仍可见且不重叠", g2.heroH >= 90 && g2.heroBottom <= g2.tabsTop + 1, `${g2.heroH} / ${g2.heroBottom} ≤ ${g2.tabsTop}`);
 check("1280 宽：无文字裁切", g2.clipped === 0, "clipped=" + g2.clipped);
 check("1280 宽：卡片区可滚动", g2.panesH >= 150, "panesH=" + g2.panesH);
-check("1280 宽：4 个序号仍可见（顺序不因窄屏丢失）", g2.numBadges === 4, "badges=" + g2.numBadges);
+check("1280 宽：3 个序号仍可见（顺序不因窄屏丢失）", g2.numBadges === 3, "badges=" + g2.numBadges);
 
 console.log(results.join("\n"));
 console.log("\nFAIL 总数 = " + results.filter((r) => r.indexOf("FAIL") === 0).length);
