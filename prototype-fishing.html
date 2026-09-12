@@ -192,12 +192,13 @@
   .card h3 {
     font-size: 12px; color: var(--text-dim); font-weight: 600; letter-spacing: .4px;
     display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    flex-wrap: wrap; row-gap: 4px;   /* 标签变长时换行，不许把文字挤出容器 */
   }
   .metric { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; margin-top: 9px; }
   .metric .m { background: rgba(10,20,32,.7); border: 1px solid var(--line); border-radius: 9px; padding: 9px; }
   .metric .m .k { font-size: 11px; color: var(--text-dim); }
   .metric .m .v { font-size: 17px; font-weight: 700; margin-top: 3px; font-variant-numeric: tabular-nums; }
-  .metric .m .v small { font-size: 11px; color: var(--text-dim); font-weight: 400; }
+  .metric .m .v small { font-size: 11px; color: var(--text-dim); font-weight: 400; margin-left: 2px; }
   .metric .m.hot .v { color: var(--accent-2); }
 
   .tag {
@@ -344,18 +345,18 @@
       <div class="logo">⛵</div>
       <div>
         <h1>渔场向导</h1>
-        <small>面向渔场预测的海洋锋面分析系统 · 原型</small>
+        <small>海洋锋面渔情分析 · 原型</small>
       </div>
     </div>
 
     <div class="ctx">
-      <i class="num">1</i><span class="ctx-lab">从哪出发</span>
+      <i class="num">1</i><span class="ctx-lab">出发地</span>
       <input id="locInput" placeholder="124.50°E, 30.20°N" value="124.50°E, 30.20°N" />
       <button class="go" id="locateBtn">定位</button>
     </div>
 
     <div class="ctx">
-      <i class="num">2</i><span class="ctx-lab">找多远</span>
+      <i class="num">2</i><span class="ctx-lab">作业范围</span>
       <div class="seg seg-sm" id="rangeSeg">
         <button data-range="10">10 km</button>
         <button data-range="20" class="active">20 km</button>
@@ -382,16 +383,16 @@
       </div>
       <div class="map-legend">
         <h4>图层</h4>
-        <div class="legend-row" data-layer="sst"><span class="swatch sst"></span> 海表温度（真实 · NOAA）</div>
-        <div class="legend-row" data-layer="band"><span class="swatch band"></span> 锋面带（数据原样）</div>
-        <div class="legend-row" data-layer="front"><span class="swatch front"></span> 锋面线 · 对象编号</div>
+        <div class="legend-row" data-layer="sst"><span class="swatch sst"></span> 水温（NOAA GHRSST）</div>
+        <div class="legend-row" data-layer="band"><span class="swatch band"></span> 锋面带（原始数据）</div>
+        <div class="legend-row" data-layer="front"><span class="swatch front"></span> 锋面区 · 编号</div>
         <div class="legend-row sub" data-layer="coldwarm"><span class="swatch cold"></span><span class="swatch warm"></span> 冷侧 / 暖侧</div>
-        <div class="legend-row" data-layer="nodata"><span class="swatch nodata"></span> 没有观测（云 / 未观测海区）</div>
-        <div class="legend-row" data-layer="fishing"><span class="swatch fishing"></span> 值得去的水域（示例）</div>
+        <div class="legend-row" data-layer="nodata"><span class="swatch nodata"></span> 无观测（云 / 未覆盖）</div>
+        <div class="legend-row" data-layer="fishing"><span class="swatch fishing"></span> 推荐水域（示例）</div>
         <div class="legend-band">
           <span class="kbd">陆地</span><span class="kbd">自然地球 1:10m（公有领域）</span>
         </div>
-        <div class="legend-note">陆地=浅色实色块；斜线=海上没有观测；鼠标指到哪看那里的数据</div>
+        <div class="legend-note">悬停地图任意位置可查看该点数据；陆地＝浅色实色块，斜线＝无观测</div>
       </div>
       <div class="map-scale-label" id="mapScaleText">50 km</div>
       <div class="map-scale" id="mapScale"></div>
@@ -418,7 +419,7 @@
         <p class="hero-line" id="heroLine"></p>
         <div class="hero-points" id="heroPoints"></div>
         <details class="why" id="heroWhy">
-          <summary>为什么这么判断</summary>
+          <summary>评分依据</summary>
           <div class="why-body" id="heroWhyBody"></div>
         </details>
       </section>
@@ -428,23 +429,23 @@
         <button class="primary active" data-pane="now" role="tab" aria-selected="true"><span class="dot" style="background:var(--accent)"></span>现在</button>
         <button class="primary" data-pane="future" role="tab" aria-selected="false"><span class="dot" style="background:var(--accent-2)"></span>未来</button>
         <span class="gap"></span>
-        <button class="secondary" data-pane="clim" role="tab" aria-selected="false">往年同期</button>
-        <button class="secondary" data-pane="basis" role="tab" aria-selected="false">依据</button>
+        <button class="secondary" data-pane="clim" role="tab" aria-selected="false">历史同期</button>
+        <button class="secondary" data-pane="basis" role="tab" aria-selected="false">数据说明</button>
       </nav>
 
       <div class="panes" id="panes">
         <!-- 现在 -->
         <section class="pane active" id="pane-now">
           <div class="card">
-            <h3>眼下情况 <span class="tag ok" id="nowScopeTag">—</span></h3>
+            <h3>当前渔情 <span class="tag ok" id="nowScopeTag">—</span></h3>
             <div class="metric" id="nowMetrics"></div>
           </div>
           <div class="card">
-            <h3>天气与海况 <span class="tag" id="seaTag">—</span></h3>
+            <h3>海况与安全 <span class="tag" id="seaTag">—</span></h3>
             <div class="list" id="seaList"></div>
           </div>
           <div class="card">
-            <h3>找鱼范围内的锋面 <span class="tag plain" id="nowFrontTag">—</span></h3>
+            <h3>范围内的锋面区 <span class="tag plain" id="nowFrontTag">—</span></h3>
             <div class="list" id="nowFronts"></div>
             <div class="empty" id="nowEmpty" hidden></div>
           </div>
@@ -453,47 +454,47 @@
         <!-- 未来 -->
         <section class="pane" id="pane-future">
           <div class="card">
-            <h3>未来这几天 <span class="tag plain" id="futureTag">1 / 3 / 7 天</span></h3>
+            <h3>未来趋势 <span class="tag plain" id="futureTag">1 / 3 / 7 天</span></h3>
             <div class="list" id="futureList"></div>
           </div>
           <div class="card">
-            <h3>一天一天看 <span class="tag ok" id="futureBestTag">—</span></h3>
+            <h3>逐日一览 <span class="tag ok" id="futureBestTag">—</span></h3>
             <div class="bars" id="futureBars"></div>
             <div class="list" id="futureDays"></div>
           </div>
         </section>
 
-        <!-- 往年同期（支撑层） -->
+        <!-- 历史同期（支撑层） -->
         <section class="pane" id="pane-clim">
           <div class="card">
-            <h3>往年这个时候，有锋面的天数占比 <span class="tag ok" id="climHint">—</span></h3>
+            <h3>历史同期锋面频率 <span class="tag ok" id="climHint">—</span></h3>
             <div class="seg seg-sm" id="climPeriod">
-              <button data-period="day" class="active">这一天</button>
-              <button data-period="period">这三天</button>
-              <button data-period="month">这个月</button>
+              <button data-period="day" class="active">当日</button>
+              <button data-period="period">近三日</button>
+              <button data-period="month">当月</button>
             </div>
             <div class="bars" id="climBars"></div>
             <div class="row" style="margin-top:9px"><span class="i">i</span><span class="grow" id="climStat"></span></div>
             <details class="why" id="climWhy">
-              <summary>和往年比，正常吗</summary>
+              <summary>与历史同期对比</summary>
               <div class="why-body" id="climYears"></div>
             </details>
-            <div class="hint">自动跟着顶栏「出海日」走，不用另挑日期。</div>
+            <div class="hint">自动跟随顶栏「出海日」，无需单独选择日期。</div>
           </div>
         </section>
 
-        <!-- 依据（支撑层：原 AI 分析的可解释部分 + 数据口径） -->
+        <!-- 数据说明（支撑层：数据来源 / 评分规则 / 使用限制） -->
         <section class="pane" id="pane-basis">
           <div class="card">
-            <h3>数据从哪来</h3>
+            <h3>数据来源</h3>
             <div class="table" id="basisData"></div>
           </div>
           <div class="card">
-            <h3>怎么算的</h3>
+            <h3>评分规则</h3>
             <div class="list" id="basisRules"></div>
           </div>
           <div class="card">
-            <h3>现在还做不到的</h3>
+            <h3>使用限制</h3>
             <div class="list" id="basisLimits"></div>
           </div>
         </section>
@@ -501,8 +502,8 @@
       </div>
 
       <footer class="footer">
-        <span>真实锋面数据 · <b id="dataStamp">—</b></span>
-        <button class="link" id="toBasis">怎么算出来的 ↗</button>
+        <span>数据 · <b id="dataStamp">—</b></span>
+        <button class="link" id="toBasis">查看数据说明 ↗</button>
       </footer>
     </aside>
   </div>

@@ -165,8 +165,8 @@ const top = await evalJS(`return {
   hasFamily: !!document.getElementById("familySeg"),
   topText: (document.querySelector(".topbar") || {}).textContent || "",
   rangeBtns: document.querySelectorAll("#rangeSeg button").length };`);
-check("顶栏按使用顺序分成 3 组（从哪出发/找多远/出海日；目标鱼种本期不做）",
-  top.nums === 3 && top.labels.join("|") === "从哪出发|找多远|出海日", top.nums + " 组 · " + top.labels.join("/"));
+check("顶栏按使用顺序分成 3 组（出发地/作业范围/出海日）",
+  top.nums === 3 && top.labels.join("|") === "出发地|作业范围|出海日", top.nums + " 组 · " + top.labels.join("/"));
 check("顶栏没有第二套数据来源开关（观测/预报/气候 已删）",
   top.hasFamily === false && !/观测来源|预报|气候/.test(top.topText), "familySeg 不存在");
 check("顶栏只有 1 个日期控件，无 month/number",
@@ -180,8 +180,8 @@ const tabs = await evalJS(`var bs = [].slice.call(document.querySelectorAll("#ta
     secondary: bs.filter(function(b){ return b.classList.contains("secondary"); }).map(function(b){ return b.textContent.trim(); }),
     active: document.querySelector("#tabs button.active").dataset.pane,
     paneNow: document.getElementById("pane-now").classList.contains("active") };`);
-check("页签 = 现在/未来（主任务）+ 往年同期/依据（支撑）",
-  tabs.n === 4 && tabs.primary.join(",") === "now,future" && tabs.secondary.join("/") === "往年同期/依据", JSON.stringify(tabs));
+check("页签 = 现在/未来（主任务）+ 历史同期/数据说明（支撑）",
+  tabs.n === 4 && tabs.primary.join(",") === "now,future" && tabs.secondary.join("/") === "历史同期/数据说明", JSON.stringify(tabs));
 check("默认落在「现在」页", tabs.active === "now" && tabs.paneNow === true, tabs.active);
 
 // ===== 4) L1 结论层（常驻，不随页签消失） =====
@@ -194,16 +194,16 @@ const hero = await evalJS(`return {
   why: document.getElementById("heroWhyBody").textContent };`);
 check("结论卡给出三档结论之一（值得去 / 可以看看 / 线索不足）",
   ["值得去", "可以看看", "线索不足"].indexOf(hero.verdict) >= 0, hero.verdict);
-check("结论行含把握 / 方位 / 距离 / 开船时间",
-  /把握 \d+%/.test(hero.line) && /(正北|东北|正东|东南|正南|西南|正西|西北)/.test(hero.line) &&
+check("结论行含把握度 / 方位 / 距离 / 航时",
+  /把握度 \d+%/.test(hero.line) && /(正北|东北|正东|东南|正南|西南|正西|西北)/.test(hero.line) &&
   /km/.test(hero.line) && /小时/.test(hero.line), hero.line.slice(0, 70));
-check("结论卡写明看的是哪一天、数据是观测",
+check("结论卡写明看的是哪一天、数据是实况观测",
   /（今天）|（\+\d 天）|（-\d 天）/.test(hero.when) && /观测/.test(hero.when), hero.when);
-check("结论卡首选点位指向数据里的真实锋面对象编号",
+check("结论卡首选点位指向数据里的真实锋面区编号",
   hero.picks >= 1 && /F\d{3}/.test(hero.firstPick) && boot.dataObjects > 0, hero.firstPick.replace(/\s+/g, " ").slice(0, 48));
-check("「为什么这么判断」列出分项与合计，并说清没算进去的东西",
+check("「评分依据」列出分项与合计，并说明未参与评分的项",
   /起评分/.test(hero.why) && /合计把握/.test(hero.why) &&
-  /数据来源/.test(hero.why) && /没算进去的/.test(hero.why), hero.why.slice(0, 40));
+  /数据来源/.test(hero.why) && /未参与评分/.test(hero.why), hero.why.slice(0, 40));
 
 // ===== 5) 现在页（真实观测数据） =====
 const now = await evalJS(`var ms = [].slice.call(document.querySelectorAll("#nowMetrics .m")).map(function(n){ return n.textContent; });
@@ -213,15 +213,15 @@ const now = await evalJS(`var ms = [].slice.call(document.querySelectorAll("#now
     dataObjects: OFData.objects(document.getElementById("timeDate").value).length,
     coverage: 100 - OFData.quality(document.getElementById("timeDate").value).nodata_percent,
     bodyText: document.body.innerText };`);
-check("现在页 4 个指标格（锋面对象 / 最近的锋面 / 你落在 / 数据把握）",
-  now.ms.length === 4 && /锋面对象/.test(now.ms[0]) && /把握/.test(now.ms[3]), now.ms.length + " 格");
-check("现在页的范围标签跟着「找多远」走，并标出观测覆盖",
+check("现在页 4 个指标格（锋面区 / 最近锋面 / 所处侧 / 把握度）",
+  now.ms.length === 4 && /锋面区/.test(now.ms[0]) && /把握/.test(now.ms[3]), now.ms.length + " 格");
+check("现在页的范围标签跟着「作业范围」走，并标出数据覆盖",
   /20 km/.test(now.scope) && new RegExp(now.coverage.toFixed(1) + "%").test(now.scope), now.scope);
-check("海况整卡标成「示例数据 · 不参与结论」，并提示以官方预报为准",
-  /示例数据/.test(now.seaTag) && /不参与结论/.test(now.seaTag) && /官方海洋预报/.test(now.sea), now.seaTag);
-check("现在页的锋面清单行数 = 数据文件里的对象数", now.fronts === now.dataObjects, now.fronts + " = " + now.dataObjects);
+check("海况整卡标成「示例数据 · 仅供参考」，并提示以官方预报为准",
+  /示例数据/.test(now.seaTag) && /仅供参考/.test(now.seaTag) && /官方海洋预报/.test(now.sea), now.seaTag);
+check("现在页的锋面区清单行数 = 数据文件里的对象数", now.fronts === now.dataObjects, now.fronts + " = " + now.dataObjects);
 const shownCoverage = now.scope.match(/(\d+\.\d)%/);
-check("观测覆盖数与数据文件一致（缺测率来自真实掩码）",
+check("数据覆盖数与数据文件一致（缺测率来自真实掩码）",
   !!shownCoverage && Math.abs(parseFloat(shownCoverage[1]) - now.coverage) < 0.05,
   (shownCoverage ? shownCoverage[1] : "—") + "% vs 数据 " + now.coverage.toFixed(1) + "%");
 // 海温现在有真实数据：页面上的温度必须能在数据文件里找到（按 0.5 °C 档位比对）
@@ -232,8 +232,8 @@ const sstNow = await evalJS(`var iso = document.getElementById("timeDate").value
     cell: OFData.sstCell(iso, 124.5, 30.2), stats: OFData.sstStats(iso),
     bins: Object.keys(bins).length,
     paths: document.querySelectorAll('#mapSvg path[data-layer="sst"]').length };`);
-const shownTemp = (sstNow.tag.match(/定位点海温 ([\d.]+) °C/) || [])[1];
-check("页面上的海温与数据文件一致（定位点档位，不是编造值）",
+const shownTemp = (sstNow.tag.match(/定位点水温 ([\d.]+) °C/) || [])[1];
+check("页面上的水温与数据文件一致（定位点档位，不是编造值）",
   sstNow.cell && sstNow.cell.valueC !== null ? shownTemp === sstNow.cell.valueC.toFixed(1)
     : shownTemp === undefined,
   "页面 " + (shownTemp || "—") + " vs 数据 " + (sstNow.cell ? sstNow.cell.valueC : "null"));
@@ -258,7 +258,7 @@ const fut = await evalJS(`return {
   days: OFData.availableDates() };`);
 check("未来页不再造未来天数（没有柱状图）", fut.bars === 0, "bars=" + fut.bars);
 check("未来页写明预报未接入的原因与补数据方向",
-  /预报未接入/.test(fut.tag) && /没有可用的锋面预报数据/.test(fut.list) && /持续性基线/.test(fut.list),
+  /预报未接入/.test(fut.tag) && /暂无锋面预报数据/.test(fut.list) && /持续性基线/.test(fut.list),
   fut.tag + " · " + fut.list.slice(0, 30));
 check("未来页列出可点的观测日期（当前日之后最多 14 条 + 汇总行）",
   fut.clickable === Math.min(14, fut.upcoming) &&
@@ -299,8 +299,8 @@ const clim = await evalJS(`var data = OFData.clim;
     note: (document.querySelector("#pane-clim .hint") || {}).textContent || "" };`);
 check("往年同期页没有任何日期输入框（锚点跟着顶栏出海日）",
   clim.inputs === 0 && /出海日/.test(clim.note), "inputs=" + clim.inputs);
-check("时段只有 3 个按钮：这一天 / 这三天 / 这个月",
-  clim.btns.join("/") === "这一天/这三天/这个月", clim.btns.join("/"));
+check("时段只有 3 个按钮：当日 / 近三日 / 当月",
+  clim.btns.join("/") === "当日/近三日/当月", clim.btns.join("/"));
 check("「这一天」柱数 = 数据里覆盖的全部年份（有缺样本的年份才标「缺测」）",
   clim.bars === clim.yearCount && clim.missingMarked === clim.gap,
   clim.bars + " 柱 / " + clim.yearCount + " 年 · 缺测标注=" + clim.missingMarked + "（数据里是否有缺口=" + clim.gap + "）");
@@ -313,7 +313,7 @@ await shot("shot-4-clim.png");
 const climPeriod = await evalJS(`document.querySelector('#climPeriod button[data-period="period"]').click();
   return { bars: document.querySelectorAll("#climBars i").length,
     stat: document.getElementById("climStat").textContent, years: document.getElementById("climYears").textContent };`);
-check("「这三天」按年份给占比，并说明为什么要看大半径",
+check("「近三日」按年份给占比，并说明为什么要看大半径",
   climPeriod.bars === clim.yearCount && /100 km/.test(climPeriod.stat) && /为什么看 100 km/.test(climPeriod.years),
   climPeriod.stat.slice(0, 40));
 const climMonth = await evalJS(`document.querySelector('#climPeriod button[data-period="month"]').click();
@@ -338,8 +338,8 @@ check("依据页：数据来源至少 12 行 / 算法 6 条 / 局限不少于 6 
 check("数据来源写清产品、许可与底图出处",
   /zenodo\.20356239/.test(basis.dataText) && /CC BY 4\.0/.test(basis.dataText) &&
   /Natural Earth/.test(basis.dataText), "DOI / 许可 / 底图都有了");
-check("算法说明给出口径（起评分 / 观测覆盖 / front_present）",
-  /起评分/.test(basis.rulesText) && /观测覆盖/.test(basis.rulesText) && /front_present/.test(basis.rulesText), "ok");
+check("算法说明给出口径（起评分 / 数据覆盖 / front_present）",
+  /起评分/.test(basis.rulesText) && /数据覆盖/.test(basis.rulesText) && /front_present/.test(basis.rulesText), "ok");
 check("局限里逐条写明数据来源与没接入的东西（海温来源 / 强度 / 海况 / 预报 / 渔场 / -128 语义）",
   /-128/.test(basis.limitsText) && /海表温度/.test(basis.limitsText) && /海况/.test(basis.limitsText) &&
   /预报/.test(basis.limitsText), basis.limitsText.slice(0, 40));
@@ -360,9 +360,9 @@ check("鼠标移到锋面线像元 → 浮层给出坐标与「锋面线（编�
   p1.hidden === false && /\d+\.\d+°E, \d+\.\d+°N/.test(p1.text) && /锋面线（编码/.test(p1.text), p1.text.slice(0, 30));
 check("浮层里的编码与数据文件里的编码一致", p1.text.indexOf("编码 " + bandPoint.code) >= 0,
   "数据 " + bandPoint.code + " / 浮层 " + (p1.text.match(/编码 (-?\d+)/) || [])[1]);
-check("浮层含离你多远 / 最近锋面 / 侧别 / 真实海温（或明确说明没有）",
-  /离你/.test(p1.text) && /最近的锋面/.test(p1.text) && /侧别/.test(p1.text) && /海表温度/.test(p1.text) &&
-  (/\d+\.\d °C/.test(p1.text) || /这一格没有海温|这一天没导出/.test(p1.text)),
+check("浮层含离你多远 / 最近锋面 / 冷暖侧 / 真实水温（或明确说明没有）",
+  /离你/.test(p1.text) && /最近的锋面/.test(p1.text) && /冷暖侧/.test(p1.text) && /水温/.test(p1.text) &&
+  (/\d+\.\d °C/.test(p1.text) || /该格无水温数据|该日期无数据/.test(p1.text)),
   "四项齐全");
 const probeTemp = (p1.text.match(/([\d.]+) °C/) || [])[1];
 const dataTemp = await evalJS(`var c = OFData.sstCell(document.getElementById("timeDate").value, ${bandPoint.lon}, ${bandPoint.lat});
