@@ -102,12 +102,12 @@
   .map-legend h4 { color: var(--text); margin-bottom: 6px; font-size: 12px; }
   .legend-row { display: flex; align-items: center; gap: 7px; margin: 4px 0; cursor: pointer; }
   .swatch { width: 15px; height: 15px; border-radius: 4px; flex: none; border: 1px solid transparent; }
-  .swatch.sst { background: linear-gradient(135deg,#1c4a8a,#c9283a); }
+  .swatch.band { background: rgba(255,236,170,.6); }
   .swatch.front { background: #0f0f0f; border-color: #fff; }
   .swatch.cold { background: rgba(40,90,150,.85); }
   .swatch.warm { background: rgba(190,90,45,.85); }
+  .swatch.nodata { background: rgba(150,166,182,.45); border-color: rgba(200,215,230,.5); }
   .swatch.fishing { background: rgba(255,180,84,.75); }
-  .gradbar { height: 8px; border-radius: 4px; flex: 1; background: linear-gradient(90deg,#1c4a8a,#4ad0d8,#f7ef8a,#ff9d5c,#c9283a); }
   .map-empty {
     position: absolute; inset: 0; display: grid; place-content: center; text-align: center;
     gap: 6px; background: rgba(8,16,26,.55); backdrop-filter: blur(2px); z-index: 8;
@@ -356,7 +356,7 @@
     <div class="ctx timebar">
       <i class="num">4</i><span class="ctx-lab">出海日</span>
       <button class="step" id="datePrev" title="前一天">◀</button>
-      <input type="date" id="timeDate" value="2024-08-05" min="2024-06-01" max="2024-08-11" />
+      <input type="date" id="timeDate" value="2024-08-05" min="2024-08-05" max="2024-08-07" />
       <button class="step" id="dateNext" title="后一天">▶</button>
     </div>
   </header>
@@ -372,14 +372,15 @@
       </div>
       <div class="map-legend">
         <h4>图层</h4>
-        <div class="legend-row" data-layer="sst"><span class="swatch sst"></span> 海表温度（底图）</div>
-        <div class="legend-row" data-layer="front"><span class="swatch front"></span> 锋面线</div>
+        <div class="legend-row" data-layer="band"><span class="swatch band"></span> 锋面带（数据原样）</div>
+        <div class="legend-row" data-layer="front"><span class="swatch front"></span> 锋面线 · 对象编号</div>
         <div class="legend-row sub" data-layer="coldwarm"><span class="swatch cold"></span><span class="swatch warm"></span> 冷侧 / 暖侧</div>
-        <div class="legend-row" data-layer="fishing"><span class="swatch fishing"></span> 值得去的水域</div>
+        <div class="legend-row" data-layer="nodata"><span class="swatch nodata"></span> 没有观测（陆地 / 云）</div>
+        <div class="legend-row" data-layer="fishing"><span class="swatch fishing"></span> 值得去的水域（示例）</div>
         <div class="legend-band">
-          <span class="kbd">22°C</span><span class="gradbar"></span><span class="kbd">33°C</span>
+          <span class="kbd">底图</span><span class="kbd">Natural Earth · 公有领域</span>
         </div>
-        <div class="legend-note">把鼠标放到地图上任意一点，能看到那里的水温、离你多远、最近的锋面有多远</div>
+        <div class="legend-note">鼠标指到地图上任意点：看那里真实的锋面编码、冷/暖侧与有没有观测</div>
       </div>
       <div class="map-empty" id="mapEmpty" hidden>
         <b id="mapEmptyTitle">该时次无数据</b>
@@ -454,9 +455,9 @@
           <div class="card">
             <h3>往年这个时候，有锋面的天数占比 <span class="tag ok" id="climHint">—</span></h3>
             <div class="seg seg-sm" id="climPeriod">
-              <button data-period="day">这一天</button>
-              <button data-period="month" class="active">这个月</button>
-              <button data-period="year">这一年</button>
+              <button data-period="day" class="active">这一天</button>
+              <button data-period="period">这三天</button>
+              <button data-period="month">这个月</button>
             </div>
             <div class="bars" id="climBars"></div>
             <div class="row" style="margin-top:9px"><span class="i">i</span><span class="grow" id="climStat"></span></div>
@@ -487,13 +488,22 @@
       </div>
 
       <footer class="footer">
-        <span>示例数据 · <b id="dataStamp">—</b></span>
+        <span>真实锋面数据 · <b id="dataStamp">—</b></span>
         <button class="link" id="toBasis">怎么算出来的 ↗</button>
       </footer>
     </aside>
   </div>
 </div>
 
+<!-- 真实数据（脚本生成，不要手改） -->
+<script src="data/meta.js"></script>
+<script src="data/base/basemap.js"></script>
+<script src="data/day/2024-08-05.js"></script>
+<script src="data/day/2024-08-06.js"></script>
+<script src="data/day/2024-08-07.js"></script>
+<script src="data/clim/same-period.js"></script>
+<!-- 适配层：页面唯一的数据入口 -->
+<script src="prototype-data.js"></script>
 <script src="prototype-fishing.js"></script>
 </body>
 </html>

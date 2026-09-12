@@ -70,7 +70,7 @@ check("卡片区可滚动高度充足（≥200）", g1.panesH >= 200, "panesH=" 
 check("侧栏未溢出视口", g1.sideBottom <= g1.vh + 1, `${g1.sideBottom} ≤ ${g1.vh}`);
 check("地图区域尺寸合理", g1.mapW > 1100 && g1.mapH > 600, `map=${g1.mapW}x${g1.mapH}`);
 check("无文字被裁切（scrollWidth 溢出计数=0）", g1.clipped === 0, "clipped=" + g1.clipped);
-check("图例含 4 个可切换图层", g1.legendOk === 4, "rows=" + g1.legendOk);
+check("图例含 5 个可切换图层（锋面带 / 锋面线 / 冷暖侧 / 缺测 / 渔场示例）", g1.legendOk === 5, "rows=" + g1.legendOk);
 check("顶栏 4 个序号可见（顺序看得见）且已无时间族分段", g1.numBadges === 4 && g1.family === false, `badges=${g1.numBadges} family=${g1.family}`);
 check("图例卡片不占地图过多（高度 ≤ 240）", g1.legendH <= 240, "legendH=" + g1.legendH);
 check("选中回执卡与缩放按钮水平不重叠", g1.pickRight <= g1.ctrlLeft, `${g1.pickRight} ≤ ${g1.ctrlLeft}`);

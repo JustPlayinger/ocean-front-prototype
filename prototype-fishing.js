@@ -1,37 +1,44 @@
-/* 渔场向导 · 交互原型（纯前端演示，无真实数据）
+/* 渔场向导 · 交互原型
+ *
+ * 数据：真实锋面数据（Zenodo 20356239，CC BY 4.0，0.05° 逐日）+ 公有领域底图（Natural Earth 1:10m）。
+ *       生成脚本：Ocean/backend/scripts/export_prototype_data.py、tools/build-basemap.mjs。
+ *       页面只通过 prototype-data.js（window.OFData）取数，不直接读原始文件。
+ *
+ * 没有真实数据的地方（海表温度 / 锋面强度 / 海况 / 预报 / 渔场）一律显式标成「待接入」或「示例」，
+ * 不插值、不哈希、不用示例值冒充实测值（需求 FR-7「无数据不编造」）。
  *
  * 信息架构（三层）：
  *   L0 顶栏      ① 从哪出发 ② 找多远 ③ 找什么鱼 ④ 出海日 —— 全局唯一真源
- *   L1 结论层    hero 常驻：能不能出海 + 去哪个点 + 为什么
- *   L2 页签      现在（观测）/ 未来（预报） ｜ 往年同期 / 依据
+ *   L1 结论层    hero 常驻：这天值不值得去 + 去哪个锋面对象 + 为什么
+ *   L2 页签      现在（观测）/ 未来（预报未接入） ｜ 往年同期 / 依据
  *
  * 数据流：state（唯一真源） --渲染--> DOM；所有 render* 只读 state，不写 state。
  */
 "use strict";
 
-// ==================== 常量与算法说明（「依据」页展示同一套） ====================
-const KM_PER_DEG = 111;
-const TODAY = "2024-08-05";                                   // 演示用的"今天"
-const OBS_WINDOW = { from: "2024-06-01", to: "2024-09-30" };  // 观测资料覆盖期
-const FCST_SPAN = 7;                                          // 预报覆盖未来 7 天
-const DATE_MIN = OBS_WINDOW.from;                             // 出海日可选范围
-const DATE_MAX = addDays(TODAY, FCST_SPAN - 1);
-const CRUISE_KMH = 14.8;                                      // 按 8 节航速换算
-const FUEL_L_PER_KM = 1.6;                                    // 小型渔船量级，仅用于比较
-const SST_RANGE = { north: 31.65, south: 28.75, min: 22, max: 33 };
+// ==================== 常量 ====================
+const KM_PER_DEG = 111.195;
+const CRUISE_KMH = 14.8;          // 8 节航速
+const FUEL_L_PER_KM = 1.6;        // 小型渔船量级，仅用于比较
 
 // 地图投影：东西向与南北向 1 km 一样长，半径圈才是正圆
 const ANCHOR = { lon: 124.5, lat: 30.2 };
 const PX_LON = 180;
 const KM2PX = PX_LON / (KM_PER_DEG * Math.cos((ANCHOR.lat * Math.PI) / 180));
 const PX_LAT = KM2PX * KM_PER_DEG;
-const SUB = { cold: 0.13, warm: 0.08 };   // 冷侧 / 暖侧带相对锋面线的纬度偏移
+
+// 时间范围直接来自数据（有几天就只让选几天）
+const AVAILABLE_DATES = OFData.availableDates();
+const DEMO_TODAY = "2024-08-05";      // 项目演示用的「今天」（与需求文档、样例数据一致）
+const TODAY = AVAILABLE_DATES.indexOf(DEMO_TODAY) >= 0 ? DEMO_TODAY : OFData.firstDate();
+const DATE_MIN = OFData.firstDate();
+const DATE_MAX = OFData.lastDate();
 
 const SPECIES = {
-  hairtail:      { label: "带鱼",       sst: [16, 28], prefer: "any" },
-  yellowcroaker: { label: "小黄鱼",     sst: [14, 22], prefer: "cold" },
-  chubmackerel:  { label: "鲐鱼",       sst: [17, 25], prefer: "warm" },
-  squid:         { label: "剑尖枪乌贼", sst: [19, 27], prefer: "warm" },
+  hairtail:      { label: "带鱼",       prefer: "any",  sst: [16, 28] },
+  yellowcroaker: { label: "小黄鱼",     prefer: "cold", sst: [14, 22] },
+  chubmackerel:  { label: "鲐鱼",       prefer: "warm", sst: [17, 25] },
+  squid:         { label: "剑尖枪乌贼", prefer: "warm", sst: [19, 27] },
 };
 
 // ==================== 状态（唯一真源） ====================
@@ -40,30 +47,29 @@ const state = {
   range: 20,                               // ② 找多远（km）
   species: "hairtail",                     // ③ 找什么鱼
   date: TODAY,                             // ④ 出海日（唯一时间控件）
-  layers: { sst: true, front: true, coldwarm: true, fishing: true },
+  layers: { band: true, front: true, coldwarm: true, nodata: true, fishing: true },
   select: null,                            // 被选中的对象 {type, id}
   probe: null,                             // 钉住的地图点 {lon, lat}
   tab: "now",
-  climMode: "month",                       // 往年同期页：day | month | year
+  climMode: "day",                         // 往年同期页：day（这一天）
   zoom: 1,
 };
 
 const $ = (id) => document.getElementById(id);
-const SELECT_LABEL = { front: "锋面线", coldwarm: "冷侧 / 暖侧", sst: "海表温度", fishing: "值得去的水域" };
-const SELECT_LAYERS = { front: ["front"], coldwarm: ["coldwarm"], sst: ["sst"], fishing: ["fishing"] };
-const LAYER_META = [["sst", "海表温度"], ["front", "锋面线"], ["coldwarm", "冷侧 / 暖侧"], ["fishing", "值得去的水域"]];
+const SELECT_LABEL = { front: "锋面对象", coldwarm: "冷侧 / 暖侧", fishing: "值得去的水域（示例）" };
+const SELECT_LAYERS = { front: ["band", "front"], coldwarm: ["coldwarm"], fishing: ["fishing"] };
+const LAYER_META = [["band", "锋面带"], ["front", "锋面线"], ["coldwarm", "冷侧 / 暖侧"],
+  ["nodata", "没有观测"], ["fishing", "值得去的水域（示例）"]];
 const DIRS16 = ["正北", "东北偏北", "东北", "东北偏东", "正东", "东南偏东", "东南", "东南偏南",
   "正南", "西南偏南", "西南", "西南偏西", "正西", "西北偏西", "西北", "西北偏北"];
 
 // ==================== 小工具 ====================
-function hash(str) {
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function hash(str) {          // 只用于「海况示例」这类明确标注的演示值，不参与真实结论
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
   return h >>> 0;
 }
-const rnd = (seed) => hash(String(seed)) / 4294967295;
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-
 function addDays(iso, n) {
   const d = new Date(iso + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + n);
@@ -73,12 +79,15 @@ function mdText(iso) { const p = iso.split("-"); return Number(p[1]) + " 月 " +
 function kmPerLon(lat) { return KM_PER_DEG * Math.cos((lat * Math.PI) / 180); }
 function xy(lon, lat) { return [500 + (lon - ANCHOR.lon) * PX_LON, 320 - (lat - ANCHOR.lat) * PX_LAT]; }
 function geoOfXY(x, y) { return [ANCHOR.lon + (x - 500) / PX_LON, ANCHOR.lat - (y - 320) / PX_LAT]; }
+function fmtCoord(lon, lat) { return lon.toFixed(2) + "°E, " + lat.toFixed(2) + "°N"; }
+const fmtHours = (km) => (km / CRUISE_KMH).toFixed(1);
+const fmtFuel = (km) => Math.round(km * FUEL_L_PER_KM);
 
 // 点到线段的最短距离（km）与最近的落点
 function nearestOnSegment(p, a, b) {
   const kx = kmPerLon(p[1]);
-  const px = p[0] * kx, py = p[1] * KM_PER_DEG;
   const ax = a[0] * kx, ay = a[1] * KM_PER_DEG;
+  const px = p[0] * kx, py = p[1] * KM_PER_DEG;
   const bx = b[0] * kx, by = b[1] * KM_PER_DEG;
   const dx = bx - ax, dy = by - ay;
   const l2 = dx * dx + dy * dy;
@@ -86,168 +95,159 @@ function nearestOnSegment(p, a, b) {
   const cx = ax + t * dx, cy = ay + t * dy;
   return { km: Math.hypot(px - cx, py - cy), point: [cx / kx, cy / KM_PER_DEG] };
 }
-
 function bearing16(from, to) {
   const dx = (to[0] - from[0]) * kmPerLon(from[1]);
   const dy = (to[1] - from[1]) * KM_PER_DEG;
   const deg = (Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360;
   return DIRS16[Math.round(deg / 22.5) % 16];
 }
-
 function distKm(from, to) { return Math.hypot((to[0] - from[0]) * kmPerLon(from[1]), (to[1] - from[1]) * KM_PER_DEG); }
-// 海表温度：与地图色带同源（北冷南暖，随纬度线性变化）
-function sstAt(lat) { return SST_RANGE.min + ((SST_RANGE.north - lat) / (SST_RANGE.north - SST_RANGE.south)) * (SST_RANGE.max - SST_RANGE.min); }
-function fmtCoord(lon, lat) { return lon.toFixed(2) + "°E, " + lat.toFixed(2) + "°N"; }
 
-// ==================== 演示数据（确定性，刷新结果一致） ====================
-// 锋面用同一个形状函数采样：地图画出来的线和卡片里的距离是同一来源
-function makeFront(id, name, base, amp, phase) {
-  const pts = [];
-  for (let i = 0; i <= 12; i++) {
-    const lon = 121.8 + (i * (127.2 - 121.8)) / 12;
-    pts.push([lon, base + amp * Math.sin((lon - 121.8) * 0.9 + phase)]);
-  }
-  return { id, name, points: pts };
+// ==================== 数据入口（一律走 OFData） ====================
+function dataStatus() { return OFData.dateInfo(state.date); }
+function timeLabel() {
+  const base = mdText(state.date);
+  if (!TODAY) return base + " · 观测";
+  const n = Math.round((Date.parse(state.date) - Date.parse(TODAY)) / 86400000);
+  if (n === 0) return base + "（今天）· 观测";
+  const tail = state.date === DATE_MAX ? "（数据里最新的一天）" : "";
+  return base + (n > 0 ? "（+" + n + " 天）" : "（" + n + " 天）") + "· 观测" + tail;
 }
-const FRONTS = [
-  makeFront("F001", "北部陆架锋", 30.92, 0.06, 0.4),
-  makeFront("F002", "中央陆架锋", 30.32, 0.07, 2.1),
-  makeFront("F003", "南部陆架锋", 29.72, 0.05, 3.4),
-];
-// 值得去的水域：椭圆半轴直接用公里写，画图时再乘比例（避免地图与卡片两套说法）
-const FISHING_SPOTS = [
+function dayObjects() { return OFData.objects(state.date); }
+function originCell() { return OFData.cellInfo(state.date, state.lon, state.lat); }
+function qualityOf() { return OFData.quality(state.date); }
+
+// 地图上要画的线：有编号的锋面对象 + 太短没编号的线段（都是同一天的真实数据）
+function frontEntries() {
+  const objects = OFData.objects(state.date);
+  const lines = OFData.frontLines(state.date);
+  const objectLineCount = OFData.objectLineCount(state.date);
+  const entries = objects.map((o) => ({
+    id: o.id, points: o.points, lengthKm: o.lengthKm, pixelCount: o.pixelCount, isObject: true, key: o.id,
+  }));
+  lines.slice(objectLineCount).forEach((points, i) =>
+    entries.push({ id: null, points, lengthKm: null, pixelCount: null, isObject: false, key: "短段 " + (i + 1) }));
+  return entries;
+}
+
+function nearestOnEntry(entry, lon, lat) {
+  const pts = entry.points;
+  let best = null;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const r = nearestOnSegment([lon, lat], pts[i], pts[i + 1]);
+    if (!best || r.km < best.km) best = r;
+  }
+  if (!best && pts.length === 1) best = { km: distKm([lon, lat], pts[0]), point: pts[0] };
+  return best;
+}
+
+// 每个锋面对象：离定位点多远、哪个方位（几何和地图上画的是同一条线，不会有第二套说法）
+function frontInfo() {
+  const origin = [state.lon, state.lat];
+  return frontEntries().map((entry) => {
+    const near = nearestOnEntry(entry, state.lon, state.lat);
+    if (!near) return null;
+    return {
+      id: entry.id, key: entry.key, isObject: entry.isObject, points: entry.points,
+      lengthKm: entry.lengthKm, pixelCount: entry.pixelCount,
+      km: near.km, point: near.point, bearing: bearing16(origin, near.point),
+      inRange: near.km <= state.range,
+    };
+  }).filter(Boolean).sort((a, b) => a.km - b.km);
+}
+
+// 「值得去的水域」：真实渔场数据还没到，这里是示例占位（见「依据」），不参与把握评分
+const DEMO_SPOTS = [
   { id: "S1", lon: 124.62, lat: 30.31, rxKm: 22, ryKm: 16, grade: "高" },
   { id: "S2", lon: 123.90, lat: 29.90, rxKm: 16, ryKm: 12, grade: "中" },
 ];
-
-// ==================== 数据有没有、是哪一类 ====================
-function obsStatus() {
-  if (state.date > TODAY)
-    return { ok: false, title: "这天还没观测到", desc: "观测资料只到今天（" + mdText(TODAY) + "）；要看这天的情况，请切到「未来」" };
-  if (state.date < OBS_WINDOW.from || state.date > OBS_WINDOW.to)
-    return { ok: false, title: "超出观测范围", desc: "观测资料从 " + OBS_WINDOW.from + " 到 " + OBS_WINDOW.to };
-  return { ok: true, title: "", desc: "" };
-}
-function fcstStatus() {
-  if (state.date < TODAY)
-    return { ok: false, title: "这天已经过去", desc: "预报只往后算 " + FCST_SPAN + " 天；想看过去的情况，请切到「现在」", jump: "today" };
-  if (state.date > DATE_MAX)
-    return { ok: false, title: "超出预报范围", desc: "预报只到 " + mdText(DATE_MAX) + "（今天往后 " + FCST_SPAN + " 天）", jump: "max" };
-  return { ok: true, title: "", desc: "" };
-}
-// 结论卡用哪一套：出海日 <= 今天看观测，之后看预报
-function activeStatus() { return state.date > TODAY ? fcstStatus() : obsStatus(); }
-function dataSourceText() { return state.date > TODAY ? "预报" : "观测"; }
-
-// 一句话说明"现在看的是哪一天"
-function timeLabel() {
-  const n = Math.round((Date.parse(state.date) - Date.parse(TODAY)) / 86400000);
-  const src = dataSourceText();
-  if (n === 0) return mdText(state.date) + "（今天）· " + src;
-  if (n > 0) return mdText(state.date) + "（" + n + " 天后）· " + src;
-  return mdText(state.date) + "（" + Math.abs(n) + " 天前）· " + src;
-}
-
-// ==================== 几何同源的距离 / 方位 / 你在哪一侧 ====================
-function frontInfo() {
-  return FRONTS.map((f) => {
-    let best = null;
-    for (let i = 0; i < f.points.length - 1; i++) {
-      const r = nearestOnSegment([state.lon, state.lat], f.points[i], f.points[i + 1]);
-      if (!best || r.km < best.km) best = r;
-    }
-    return {
-      id: f.id, name: f.name, km: best.km, point: best.point,
-      bearing: bearing16([state.lon, state.lat], best.point),
-      side: state.lat > best.point[1] ? "冷侧" : "暖侧",
-      inRange: best.km <= state.range,
-    };
-  }).sort((a, b) => a.km - b.km);
-}
-
 function spotInfo() {
-  return FISHING_SPOTS.map((s) => {
+  return DEMO_SPOTS.map((s) => {
     const km = distKm([state.lon, state.lat], [s.lon, s.lat]);
     return { id: s.id, lon: s.lon, lat: s.lat, rxKm: s.rxKm, ryKm: s.ryKm, grade: s.grade,
-      km, bearing: bearing16([state.lon, state.lat], [s.lon, s.lat]), inRange: km <= state.range };
+      km, bearing: bearing16([state.lon, state.lat], [s.lon, s.lat]), inRange: km <= state.range, demo: true };
   }).sort((a, b) => a.km - b.km);
 }
 
-// 海况（演示数据）
+// 海况：示例数据（没有真实风浪数据源），只在「现在」页展示，不参与结论
 function seaState(date) {
-  const wind = 3 + (hash("wind" + date) % 4);                        // 3~6 级
-  const wave = +(0.6 + (hash("wave" + date) % 10) / 10).toFixed(1);  // 0.6~1.5 m
-  const swell = +(0.5 + (hash("swell" + date) % 9) / 10).toFixed(1); // 0.5~1.3 m
-  const seaworthy = wind <= 5 && wave <= 1.5;
-  const marginal = !seaworthy && wind <= 6 && wave <= 1.8;
-  return { wind, wave, swell, level: seaworthy ? "seaworthy" : marginal ? "marginal" : "unsafe" };
+  const wind = 3 + (hash("wind" + date) % 4);
+  const wave = +(0.6 + (hash("wave" + date) % 10) / 10).toFixed(1);
+  const swell = +(0.5 + (hash("swell" + date) % 9) / 10).toFixed(1);
+  return { wind, wave, swell, level: wind <= 5 && wave <= 1.5 ? "seaworthy" : wind <= 6 && wave <= 1.8 ? "marginal" : "unsafe" };
 }
 
-// ==================== "去这里的把握"怎么加出来的（分项进「为什么这么判断」） ====================
-function scoreBreakdown(sea) {
-  const fronts = frontInfo();
-  const inRange = fronts.filter((f) => f.inRange);
-  const nearest = fronts[0] || null;
-  const spots = spotInfo();
-  const spotIn = spots.filter((s) => s.inRange);
-  const sst = sstAt(state.lat);
+// ==================== 把握怎么加出来的（每项都用真实数据；温度项因未接入不计分） ====================
+function scoreBreakdown(fronts, inRange, cell, quality) {
   const sp = SPECIES[state.species];
-  const gradHigh = rnd("grad" + state.date) > 0.42;
+  const objects = fronts.filter((f) => f.isObject);
+  const inRangeObjects = objects.filter((f) => f.inRange);
   const items = [];
   let s = 30;
   items.push(["起评分", 30]);
-  const addF = Math.min(inRange.length, 3) * 12;
-  s += addF;
-  items.push(["找鱼范围内有 " + inRange.length + " 条锋面", addF]);
-  const preferText = sp.prefer === "cold" ? "冷侧" : sp.prefer === "warm" ? "暖侧" : "冷暖交汇";
-  const sideOk = sp.prefer === "any" ? 0 : (nearest && nearest.side === (sp.prefer === "cold" ? "冷侧" : "暖侧") ? 15 : -5);
-  s += sideOk;
-  items.push(["你在" + (nearest ? nearest.side : "—") + "（" + sp.label + "喜欢" + preferText + "）", sideOk]);
-  const gradScore = gradHigh ? 8 : -8;
-  s += gradScore;
-  items.push(["水温变化比往年" + (gradHigh ? "明显" : "不明显"), gradScore]);
-  const spotScore = spotIn.length ? 15 : 0;
-  s += spotScore;
-  items.push(["范围内有 " + spotIn.length + " 处值得去的水域", spotScore]);
-  const fit = sst >= sp.sst[0] && sst <= sp.sst[1];
-  const fitScore = fit ? 12 : -6;
-  s += fitScore;
-  items.push(["你这里水温 " + sst.toFixed(1) + "°C（" + sp.label + "合适 " + sp.sst[0] + "~" + sp.sst[1] + "°C）", fitScore]);
-  return { score: clamp(Math.round(s), 5, 95), items, fronts, inRange, nearest, spots, spotIn, sst, gradHigh, sea };
+
+  const objScore = Math.min(inRangeObjects.length, 3) * 12;
+  s += objScore;
+  items.push(["找鱼范围内有 " + inRangeObjects.length + " 个锋面对象（每个 +12，最多算 3 个）", objScore]);
+
+  const side = cell ? cell.side : null;
+  const preferText = sp.prefer === "any" ? "冷暖交汇都行" : sp.prefer === "cold" ? "偏好冷侧" : "偏好暖侧";
+  let sideScore = 0;
+  if (side) {
+    if (sp.prefer === "any") sideScore = 6;
+    else if ((sp.prefer === "cold" && side === "冷侧") || (sp.prefer === "warm" && side === "暖侧")) sideScore = 15;
+    else sideScore = -5;
+  }
+  s += sideScore;
+  items.push(["你落在" + (side || "锋区外") + "（" + sp.label + preferText + "）", sideScore]);
+
+  const nearest = fronts[0] || null;
+  const nearScore = !nearest ? 0 : nearest.km <= 10 ? 8 : nearest.km <= 20 ? 4 : 0;
+  s += nearScore;
+  items.push(["最近的锋面 " + (nearest ? nearest.km.toFixed(1) + " km" : "—") + "（≤10 km +8，≤20 km +4）", nearScore]);
+
+  const longestInRange = inRangeObjects.reduce((m, f) => Math.max(m, f.lengthKm || 0), 0);
+  const lenScore = longestInRange >= 100 ? 8 : longestInRange >= 50 ? 4 : 0;
+  s += lenScore;
+  items.push(["范围内最长的锋面对象 " + (longestInRange ? Math.round(longestInRange) + " km" : "—")
+    + "（≥100 km +8，≥50 km +4）", lenScore]);
+
+  const coverage = quality ? 100 - quality.nodata_percent : null;
+  const covScore = coverage === null ? 0 : coverage >= 85 ? 4 : coverage >= 70 ? 0 : -4;
+  s += covScore;
+  items.push(["这天这片海的观测覆盖 " + (coverage === null ? "未知" : coverage.toFixed(1) + "%")
+    + "（≥85% +4，<70% −4）", covScore]);
+
+  return { score: clamp(Math.round(s), 5, 95), items, coverage, side, longestInRange };
 }
 
-// 三档结论：先看安全，再看把握
-function verdictOf(score, sea) {
-  if (sea.level === "unsafe") return { key: "stop", text: "别出海", cls: "stop" };
-  if (sea.level === "marginal" || score < 60) return { key: "caution", text: "谨慎出海", cls: "caution" };
-  return { key: "go", text: "可以出海", cls: "ok" };
+// 三档结论：只说「这一天值不值得去」；海况没有真实数据，就不拿它下结论
+function verdictOf(score) {
+  if (score >= 70) return { key: "go", text: "值得去", cls: "ok" };
+  if (score >= 50) return { key: "some", text: "可以看看", cls: "caution" };
+  return { key: "low", text: "线索不足", cls: "stop" };
 }
 
 // 一次快照（多个 render 复用；state 一变就作废）
 let _snap = null;
 function snapshot() {
   if (_snap) return _snap;
-  const status = activeStatus();
-  const sea = seaState(state.date);
-  const core = status.ok
-    ? scoreBreakdown(sea)
-    : { score: 0, items: [], fronts: [], inRange: [], nearest: null, spots: [], spotIn: [], sst: null, gradHigh: false };
-  _snap = Object.assign({ status, sea }, core);
+  const status = dataStatus();
+  const ok = status.ok;
+  const fronts = ok ? frontInfo() : [];
+  const inRange = fronts.filter((f) => f.inRange);
+  const cell = ok ? originCell() : null;
+  const quality = ok ? qualityOf() : null;
+  const core = ok
+    ? scoreBreakdown(fronts, inRange, cell, quality)
+    : { score: 0, items: [], coverage: null, side: null, longestInRange: 0 };
+  _snap = Object.assign({
+    status, ok, fronts, inRange, nearest: fronts[0] || null, cell, quality,
+    objects: ok ? dayObjects() : [], spots: ok ? spotInfo() : [],
+  }, core);
   return _snap;
 }
 function invalidate() { _snap = null; }
-
-// 未来逐日把握（演示算法：当天把握 × 每天衰减 6% × 上下 9% 的浮动）
-function futureSeries(n) {
-  const base = snapshot().score || 45;
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const d = addDays(state.date, i);
-    const score = clamp(Math.round(base * (1 - i * 0.06) * (1 + (rnd("fcst" + d) - 0.5) * 0.18)), 5, 95);
-    out.push({ date: d, score, sea: seaState(d) });
-  }
-  return out;
-}
 
 // ==================== 地图（SVG） ====================
 const NS = "http://www.w3.org/2000/svg";
@@ -257,11 +257,27 @@ function el(name, attrs, parent) {
   if (parent) parent.appendChild(node);
   return node;
 }
+// 经纬度折线 → SVG path
 function pathOf(pts) { return pts.map((p, i) => (i ? "L " : "M ") + xy(p[0], p[1]).join(",")).join(" "); }
-function offsetPts(pts, dLat) { return pts.map((p) => [p[0], p[1] + dLat]); }
-function yOfLat(lat) { return xy(ANCHOR.lon, lat)[1]; }
+// 多条折线合成一个 path（一个 DOM 节点，几千段也不卡）
+function chainsPath(chains) { return chains.map((pts) => pathOf(pts) + " Z").join(" "); }
+function chainLinesPath(chains) { return chains.map((pts) => pathOf(pts)).join(" "); }
 
-// 钉住的那个点，画个十字
+// 逐行 RLE 还原成矩形（每格一个矩形，合成一个 path；不插值、不放大）
+function rlePath(runs, grid) {
+  const w = grid.dlon * PX_LON;
+  const h = grid.dlat * PX_LAT;
+  let d = "";
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i];
+    const x = 500 + (grid.lon0 + run[1] * grid.dlon - ANCHOR.lon) * PX_LON;
+    const yTop = 320 - (grid.lat0 + (run[0] + 1) * grid.dlat - ANCHOR.lat) * PX_LAT;
+    d += "M" + x.toFixed(1) + "," + yTop.toFixed(1) + "h" + (run[2] * w).toFixed(1) + "v" + h.toFixed(1)
+      + "h" + (-run[2] * w).toFixed(1) + "z";
+  }
+  return d;
+}
+
 function drawProbeMark(svg) {
   if (!state.probe) return;
   const p = xy(state.probe.lon, state.probe.lat);
@@ -270,14 +286,136 @@ function drawProbeMark(svg) {
   el("circle", { cx: p[0], cy: p[1], r: 3.2, fill: "#ffd9a0" }, svg);
 }
 
+// 底图：真实陆地 / 海岸线 / 等深线（Natural Earth 1:10m，公有领域）
+function drawBackground(svg) {
+  const base = OFData.basemap;
+  el("rect", { x: -400, y: -400, width: 1800, height: 1440, fill: "#0d2135" }, svg);
+  if (!base) return;
+  const landPath = chainsPath(base.layers.land.chains);
+  el("path", { d: landPath, fill: "#16283c", stroke: "none" }, svg);
+  if (state.layers.nodata) {
+    el("path", { d: landPath, fill: "rgba(126,146,166,0.30)", stroke: "none" }, svg);
+  }
+  el("path", { d: chainLinesPath(base.layers.coastline.chains), fill: "none",
+    stroke: "rgba(150,200,235,0.75)", "stroke-width": 1.3 }, svg);
+  el("path", { d: chainLinesPath(base.layers.isobath200.chains), fill: "none",
+    stroke: "rgba(120,190,215,0.45)", "stroke-width": 1, "stroke-dasharray": "7 5" }, svg);
+  el("path", { d: chainLinesPath(base.layers.isobath1000.chains), fill: "none",
+    stroke: "rgba(90,150,205,0.35)", "stroke-width": 1, "stroke-dasharray": "3 6" }, svg);
+  for (let i = 0; i <= 20; i++) {
+    el("line", { x1: (i / 20) * 1000, y1: 0, x2: (i / 20) * 1000, y2: 640, stroke: "rgba(150,200,230,0.06)" }, svg);
+  }
+  for (let i = 0; i <= 12; i++) {
+    el("line", { x1: 0, y1: (i / 12) * 640, x2: 1000, y2: (i / 12) * 640, stroke: "rgba(150,200,230,0.06)" }, svg);
+  }
+}
+
+// 数据图层：一切按数据原样画，不做平滑、不外推
+function drawDataLayers(svg, snap, iso, grid, sel) {
+  const dim = (k) => (sel && sel.type !== k ? 0.16 : 1);
+  const entries = frontEntries();
+  const selected = sel && sel.type === "front" && sel.id ? entries.find((e) => e.id === sel.id) : null;
+  const day = OFData.day(iso);
+
+  // 没有观测的像元（陆地 / 云 / 未观测在数据里都是 -128，无法区分）
+  if (state.layers.nodata && day) {
+    el("path", { d: rlePath(day.nodata_rle || [], grid), fill: "rgba(150,166,182,0.34)", stroke: "none" }, svg);
+  }
+
+  // 冷侧 / 暖侧：数据里的 -20 / 20 编码，一格不改
+  if (state.layers.coldwarm) {
+    const on = !!sel && sel.type === "coldwarm";
+    el("path", { d: rlePath(OFData.bandRuns(iso, "cold"), grid), fill: "rgba(38,104,178,0.42)",
+      stroke: "none", opacity: dim("coldwarm") }, svg);
+    el("path", { d: rlePath(OFData.bandRuns(iso, "warm"), grid), fill: "rgba(198,88,58,0.40)",
+      stroke: "none", opacity: dim("coldwarm") }, svg);
+    if (on) {
+      el("path", { d: rlePath(OFData.bandRuns(iso, "cold"), grid), fill: "none",
+        stroke: "#5cb4ff", "stroke-width": 1.6 }, svg);
+      el("path", { d: rlePath(OFData.bandRuns(iso, "warm"), grid), fill: "none",
+        stroke: "#ffab5c", "stroke-width": 1.6 }, svg);
+    }
+  }
+
+  // 锋面带：数据里的 -10 / 10 / 30 像元原样画；编码含义有歧义，图上不解释
+  if (state.layers.band) {
+    el("path", { d: rlePath(OFData.bandRuns(iso, "front"), grid), fill: "rgba(255,236,170,0.5)",
+      stroke: "none", opacity: 0.9 * dim("front") }, svg);
+  }
+
+  // 锋面线：对象中心线 + 未编号短段
+  if (state.layers.front) {
+    entries.forEach((entry) => {
+      const isSel = !!(selected && entry.isObject && entry.id === selected.id);
+      const stroke = isSel ? "#4dd4c6" : entry.isObject ? "#ffffff" : "rgba(255,255,255,0.55)";
+      const width = isSel ? 3.4 : entry.isObject ? 2.3 : 1.3;
+      if (isSel) {
+        el("path", { d: pathOf(entry.points), fill: "none", stroke: "#4dd4c6", "stroke-width": 9,
+          opacity: 0.28, "stroke-linecap": "round" }, svg);
+      }
+      el("path", { d: pathOf(entry.points), fill: "none", stroke, "stroke-width": width,
+        opacity: (entry.isObject ? 0.95 : 0.7) * dim("front"), "stroke-linecap": "round" }, svg);
+    });
+    entries.filter((e) => e.isObject).forEach((entry) => {
+      const mid = entry.points[Math.floor(entry.points.length / 2)];
+      const p = xy(mid[0], mid[1]);
+      const isSel = !!(selected && entry.id === selected.id);
+      el("text", { x: p[0] + 6, y: p[1] - 8, fill: isSel ? "#8ff2e4" : "rgba(255,255,255,0.72)",
+        "font-size": 10.5, "paint-order": "stroke", stroke: "rgba(8,16,26,0.9)", "stroke-width": 3,
+        opacity: isSel ? 1 : dim("front") }, svg).textContent =
+        entry.id + " · " + Math.round(entry.lengthKm) + " km";
+    });
+  }
+
+  // 值得去的水域（示例，未接入真实渔场数据）
+  if (state.layers.fishing) {
+    (snap.spots || []).forEach((s) => {
+      const p = xy(s.lon, s.lat);
+      const rx = s.rxKm * KM2PX, ry = s.ryKm * KM2PX;
+      const isSel = !!sel && sel.type === "fishing" && (!sel.id || sel.id === s.id);
+      el("ellipse", { cx: p[0], cy: p[1], rx, ry, fill: "rgba(255,180,84,0.20)",
+        stroke: "rgba(255,200,120,0.45)", "stroke-dasharray": "4 3", opacity: dim("fishing") }, svg);
+      el("text", { x: p[0] - rx, y: p[1] - ry - 5, fill: "#ffc46b", "font-size": 11,
+        "paint-order": "stroke", stroke: "rgba(8,16,26,0.9)", "stroke-width": 3,
+        opacity: 0.45 + 0.55 * dim("fishing") }, svg).textContent = "值得去的水域 " + s.id + "（示例）";
+      if (isSel) {
+        const q = xy(state.lon, state.lat);
+        el("line", { x1: q[0], y1: q[1], x2: p[0], y2: p[1], stroke: "#ffb454", "stroke-width": 1.2,
+          "stroke-dasharray": "5 4", opacity: 0.8 }, svg);
+      }
+    });
+  }
+}
+
+// 定位点与找鱼范围（没数据时也保留，作为参照）
+function drawOriginLayer(svg) {
+  const q = xy(state.lon, state.lat);
+  [10, 20, 30].forEach((km) => {
+    const r = km * KM2PX;
+    const isRange = km === state.range;
+    el("circle", { cx: q[0], cy: q[1], r, fill: isRange ? "rgba(77,212,198,0.05)" : "none",
+      stroke: isRange ? "rgba(77,212,198,0.55)" : "rgba(140,225,212,0.26)", "stroke-width": isRange ? 1.2 : 1,
+      "stroke-dasharray": isRange ? "5 4" : "3 5" }, svg);
+    el("text", { x: q[0], y: q[1] - r - 4, "text-anchor": "middle",
+      fill: isRange ? "rgba(165,242,230,0.9)" : "rgba(140,225,212,0.4)",
+      "font-size": isRange ? 10 : 8.5 }, svg).textContent = km + " km";
+  });
+  el("circle", { cx: q[0], cy: q[1], r: 8, fill: "none", stroke: "#4dd4c6", "stroke-width": 2, class: "pulse" }, svg);
+  el("circle", { cx: q[0], cy: q[1], r: 5, fill: "#fff" }, svg);
+  el("text", { x: q[0] + 14, y: q[1] - 12, fill: "#fff", "font-size": 13, "font-weight": "bold",
+    "paint-order": "stroke", stroke: "rgba(8,16,26,0.85)", "stroke-width": 3 }, svg)
+    .textContent = fmtCoord(state.lon, state.lat);
+  el("text", { x: 956, y: 40, fill: "rgba(200,225,240,0.6)", "font-size": 13 }, svg).textContent = "N ↑";
+}
+
 function drawMap() {
   const svg = $("mapSvg");
   svg.innerHTML = "";
   const defs = el("defs", {}, svg);
   const snap = snapshot();
-  const ok = snap.status.ok;
-  const sel = state.select;
-  const dim = (k) => (sel && sel.type !== k ? 0.14 : 1);
+  const ok = snap.ok;
+  const iso = state.date;
+  const grid = ok ? OFData.grid(iso) : null;
 
   // 没数据就盖一层说明，不让地图假装有东西
   $("mapEmpty").hidden = ok;
@@ -286,115 +424,16 @@ function drawMap() {
     $("mapEmptyDesc").textContent = snap.status.desc + "（现在选的是 " + timeLabel() + "）";
   }
 
-  // 经纬网格
-  for (let i = 0; i <= 20; i++) el("line", { x1: (i / 20) * 1000, y1: 0, x2: (i / 20) * 1000, y2: 640, stroke: "rgba(150,200,230,0.07)" }, svg);
-  for (let i = 0; i <= 12; i++) el("line", { x1: 0, y1: (i / 12) * 640, x2: 1000, y2: (i / 12) * 640, stroke: "rgba(150,200,230,0.07)" }, svg);
-
-  // 海表温度：与 sstAt() 同一来源（北冷南暖）
-  if (state.layers.sst) {
-    const g = el("linearGradient", { id: "sstGrad", x1: 0, y1: 0, x2: 0, y2: 640, gradientUnits: "userSpaceOnUse" }, defs);
-    [["0%", "#123560"], ["20%", "#1d5c94"], ["40%", "#2a86ae"], ["58%", "#55a284"], ["75%", "#bd9450"], ["100%", "#e26241"]]
-      .forEach((s) => el("stop", { offset: s[0], "stop-color": s[1] }, g));
-    el("rect", { x: 0, y: 0, width: 1000, height: 640, fill: "url(#sstGrad)", opacity: 0.5 * dim("sst") }, svg);
-    for (let t = 24; t <= 32; t += 2) {
-      const lat = SST_RANGE.north - ((t - SST_RANGE.min) / (SST_RANGE.max - SST_RANGE.min)) * (SST_RANGE.north - SST_RANGE.south);
-      const y = yOfLat(lat);
-      const on = !!sel && sel.type === "sst";
-      el("path", { d: "M -20," + (y + 6) + " C 260," + (y - 8) + " 620," + (y + 14) + " 1020," + (y - 4), fill: "none",
-        stroke: on ? "rgba(255,190,90,0.6)" : "rgba(255,240,210,0.16)", "stroke-width": on ? 1.6 : 1 }, svg);
-      el("text", { x: 8, y: y - 5, fill: "rgba(255,240,210,0.42)", "font-size": 10 }, svg).textContent = t + "°C";
-    }
-  }
-
-  // 陆地示意（压在海温之上）
-  el("path", { d: "M -20,-20 L 330,-20 C 300,80 240,120 210,190 C 180,260 120,300 60,420 L -20,420 Z", fill: "#17293a", stroke: "rgba(120,170,210,0.35)" }, svg);
-  el("path", { d: "M 900,-20 L 960,-20 L 1000,40 L 1000,-20 Z", fill: "#17293a", stroke: "rgba(120,170,210,0.3)" }, svg);
-  el("text", { x: 90, y: 90, fill: "rgba(200,225,240,0.5)", "font-size": 15 }, svg).textContent = "陆地";
-  el("text", { x: 925, y: 64, fill: "rgba(200,225,240,0.45)", "font-size": 11 }, svg).textContent = "陆地";
-
-  if (ok) {
-    // 冷侧 / 暖侧带
-    if (state.layers.coldwarm) {
-      const on = !!sel && sel.type === "coldwarm";
-      FRONTS.forEach((f) => {
-        el("path", { d: pathOf(offsetPts(f.points, SUB.cold)), fill: "none", stroke: "rgba(40,90,150,0.5)", "stroke-width": 46, "stroke-linecap": "round", opacity: 0.5 * dim("coldwarm") }, svg);
-        el("path", { d: pathOf(offsetPts(f.points, -SUB.warm)), fill: "none", stroke: "rgba(190,90,45,0.45)", "stroke-width": 36, "stroke-linecap": "round", opacity: 0.45 * dim("coldwarm") }, svg);
-        if (on) {
-          el("path", { d: pathOf(offsetPts(f.points, SUB.cold)), fill: "none", stroke: "#5cb4ff", "stroke-width": 3.5, opacity: 0.85 }, svg);
-          el("path", { d: pathOf(offsetPts(f.points, -SUB.warm)), fill: "none", stroke: "#ffab5c", "stroke-width": 3, opacity: 0.9 }, svg);
-        }
-      });
-    }
-
-    // 锋面线
-    if (state.layers.front) {
-      FRONTS.forEach((f) => {
-        const isSel = !!sel && sel.type === "front" && (!sel.id || sel.id === f.id);
-        el("path", { d: pathOf(f.points), fill: "none", stroke: "#fff", "stroke-width": isSel ? 3.6 : 2.5, opacity: (isSel ? 1 : 0.9) * dim("front") }, svg);
-        if (isSel) el("path", { d: pathOf(f.points), fill: "none", stroke: "#4dd4c6", "stroke-width": 9, opacity: 0.3, "stroke-linecap": "round" }, svg);
-        const mid = xy(f.points[6][0], f.points[6][1]);
-        el("text", { x: mid[0] + 6, y: mid[1] - 9, fill: isSel ? "#8ff2e4" : "rgba(255,255,255,0.66)", "font-size": 11,
-          "paint-order": "stroke", stroke: "rgba(11,20,32,0.9)", "stroke-width": 3, opacity: isSel ? 1 : dim("front") }, svg)
-          .textContent = f.id + " " + f.name;
-      });
-    }
-
-    // 值得去的水域（半轴按公里折算，和卡片里的距离同一口径）
-    if (state.layers.fishing) {
-      (snap.spots || []).forEach((s) => {
-        const p = xy(s.lon, s.lat);
-        const rx = s.rxKm * KM2PX, ry = s.ryKm * KM2PX;
-        const isSel = !!sel && sel.type === "fishing" && (!sel.id || sel.id === s.id);
-        el("ellipse", { cx: p[0], cy: p[1], rx: rx, ry: ry, fill: "rgba(255,180,84,0.26)", stroke: "rgba(255,200,120,0.5)", "stroke-dasharray": "4 3", opacity: dim("fishing") }, svg);
-        el("text", { x: p[0] - rx, y: p[1] - ry - 5, fill: "#ffc46b", "font-size": 11.5, "paint-order": "stroke", stroke: "rgba(11,20,32,0.9)", "stroke-width": 3, opacity: 0.45 + 0.55 * dim("fishing") }, svg)
-          .textContent = "值得去的水域 " + s.id + "（把握" + s.grade + "）";
-        if (isSel) {
-          const q = xy(state.lon, state.lat);
-          el("line", { x1: q[0], y1: q[1], x2: p[0], y2: p[1], stroke: "#ffb454", "stroke-width": 1.2, "stroke-dasharray": "5 4", opacity: 0.8 }, svg);
-          el("ellipse", { cx: p[0], cy: p[1], rx: rx + 5, ry: ry + 5, fill: "none", stroke: "#ffb454", "stroke-width": 2, opacity: 0.95 }, svg);
-        }
-      });
-    }
-  }
-
-  // 定位点 + 找鱼范围圈（没数据时也保留，作为参照）
-  const q = xy(state.lon, state.lat);
-  [10, 20, 30].forEach((km) => {
-    const r = km * KM2PX;
-    const isRange = km === state.range;
-    el("circle", { cx: q[0], cy: q[1], r: r, fill: isRange ? "rgba(77,212,198,0.05)" : "none",
-      stroke: isRange ? "rgba(77,212,198,0.55)" : "rgba(140,225,212,0.26)", "stroke-width": isRange ? 1.2 : 1,
-      "stroke-dasharray": isRange ? "5 4" : "3 5" }, svg);
-    el("text", { x: q[0], y: q[1] - r - 4, "text-anchor": "middle",
-      fill: isRange ? "rgba(165,242,230,0.9)" : "rgba(140,225,212,0.4)", "font-size": isRange ? 10 : 8.5 }, svg).textContent = km + " km";
-  });
-  el("circle", { cx: q[0], cy: q[1], r: 8, fill: "none", stroke: "#4dd4c6", "stroke-width": 2, class: "pulse" }, svg);
-  el("circle", { cx: q[0], cy: q[1], r: 5, fill: "#fff" }, svg);
-  el("text", { x: q[0] + 14, y: q[1] - 12, fill: "#fff", "font-size": 13, "font-weight": "bold",
-    "paint-order": "stroke", stroke: "rgba(11,20,32,0.85)", "stroke-width": 3 }, svg).textContent = fmtCoord(state.lon, state.lat);
-  el("text", { x: 966, y: 40, fill: "rgba(200,225,240,0.6)", "font-size": 13 }, svg).textContent = "N ↑";
-
+  drawBackground(svg);
+  if (ok) drawDataLayers(svg, snap, iso, grid, state.select);
+  drawOriginLayer(svg);
   drawProbeMark(svg);
-  el("style", {}, defs).textContent = "@keyframes pulseAnim{0%{r:8;opacity:.9}100%{r:32;opacity:0}}.pulse{animation:pulseAnim 1.6s ease-out infinite}";
+  el("style", {}, defs).textContent =
+    "@keyframes pulseAnim{0%{r:8;opacity:.9}100%{r:32;opacity:0}}.pulse{animation:pulseAnim 1.6s ease-out infinite}";
 }
 
 // ==================== 鼠标放到地图上：看那个点的数据 ====================
 let hoverPt = null;   // {lon, lat, x, y}，x/y 是相对地图的像素
-
-// 两块陆地的近似边界（和地图上画的海岸线是同一套形状）
-const COAST = [[-20, 330], [0, 322], [80, 285], [120, 250], [190, 210], [260, 178], [300, 135], [360, 95], [420, 60]];
-function isLandXY(x, y) {
-  if (y >= -20 && y <= 420) {
-    let cx = -1e9;
-    for (let i = 0; i < COAST.length - 1; i++) {
-      const a = COAST[i], b = COAST[i + 1];
-      if (y >= a[0] && y <= b[0]) { cx = a[1] + ((b[1] - a[1]) * (y - a[0])) / (b[0] - a[0]); break; }
-    }
-    if (x <= cx) return true;
-  }
-  if (y >= -20 && y <= 40 && x >= 960 + (y + 20) / 1.5) return true;
-  return false;
-}
 
 // 经纬度 <-> 屏幕像素（用 SVG 的变换矩阵，缩放后也不会错位）
 function screenOf(lon, lat) {
@@ -414,63 +453,89 @@ function geoOfScreen(clientX, clientY) {
   return geoOfXY(loc.x, loc.y);
 }
 
+// 某个点的真实像元：缺测（陆地/云/未观测）还是锋面线、冷侧、暖侧
+function cellAt(lon, lat) { return OFData.cellInfo(state.date, lon, lat); }
+
+// 从任意点看最近的锋面（对象或短段），几何与地图同源
 function nearestFrontFrom(lon, lat) {
   let best = null;
-  FRONTS.forEach((f) => {
-    for (let i = 0; i < f.points.length - 1; i++) {
-      const r = nearestOnSegment([lon, lat], f.points[i], f.points[i + 1]);
-      if (!best || r.km < best.km) best = { id: f.id, name: f.name, km: r.km, point: r.point };
+  frontEntries().forEach((entry) => {
+    const near = nearestOnEntry(entry, lon, lat);
+    if (!near) return;
+    if (!best || near.km < best.km) {
+      best = { id: entry.id, isObject: entry.isObject, lengthKm: entry.lengthKm, km: near.km, point: near.point };
     }
   });
-  if (best) {
-    best.bearing = bearing16([lon, lat], best.point);
-    best.side = lat > best.point[1] ? "冷侧" : "暖侧";
-  }
+  if (best) best.bearing = bearing16([lon, lat], best.point);
   return best;
 }
-function nearestSpotFrom(lon, lat) {
-  const list = FISHING_SPOTS.map((s) => {
-    const dx = (lon - s.lon) * kmPerLon(s.lat);
-    const dy = (lat - s.lat) * KM_PER_DEG;
-    return { id: s.id, grade: s.grade, km: Math.hypot(dx, dy), bearing: bearing16([lon, lat], [s.lon, s.lat]),
-      inside: (dx * dx) / (s.rxKm * s.rxKm) + (dy * dy) / (s.ryKm * s.ryKm) <= 1 };
-  }).sort((a, b) => a.km - b.km);
-  return list.find((s) => s.inside) || list[0] || null;
+
+// ==================== 指针查询：鼠标指到哪，就显示那里的真实数据 ====================
+function frontTitle(entry) {
+  return entry.id ? "锋面对象 " + entry.id : "未编号短段";
 }
 
 function probeHTML(lon, lat) {
-  const q = xy(lon, lat);
   const head = '<div class="mp-coord">' + fmtCoord(lon, lat) + "</div>";
-  const foot = '<div class="mp-foot">' + timeLabel() + " · 示例数据<br/>点一下钉住，Esc 取消</div>";
-  if (isLandXY(q[0], q[1])) return head + '<div class="mp-note">这里是陆地（岸上），没有海温数据</div>' + foot;
-  const st = activeStatus();
+  const foot = '<div class="mp-foot">' + timeLabel() + " · 真实锋面数据（Zenodo 20356239）<br/>点一下钉住，Esc 取消</div>";
+  const st = dataStatus();
   if (!st.ok) return head + '<div class="mp-note">' + st.title + "，这个时段没有数据，不估数</div>" + foot;
 
-  const sp = SPECIES[state.species];
-  const sst = sstAt(lat);
-  const inTemp = sst >= sp.sst[0] && sst <= sp.sst[1];
+  const cell = cellAt(lon, lat);
+  const bbox = OFData.attribution() ? OFData.attribution().region.bbox : null;
+  if (!cell || !cell.inGrid) {
+    return head + '<div class="mp-note">这里在导出范围之外' +
+      (bbox ? "（只导出了 " + bbox[0] + "~" + bbox[2] + "°E，" + bbox[1] + "~" + bbox[3] + "°N）" : "") + "</div>" + foot;
+  }
+  if (cell.nodata) {
+    return head + '<div class="mp-note">这里没有观测数据（陆地、云或未观测，数据里统一用 -128 表示）</div>' + foot;
+  }
+
+  const quality = qualityOf();
+  const shortMin = quality ? quality.object_min_length_km : 20;
+  let h = head;
+  const kind = cell.line ? "锋面线（编码 " + cell.code + "）" : cell.side ? cell.side : "无锋面";
+  h += '<div class="mp-row"><span class="mp-k">数据里这一类</span><span class="mp-v">' + kind + "</span></div>";
+  h += '<div class="mp-note">' + (cell.line
+    ? "编码 " + cell.code + " 是数据集自带的锋面线编码（-10 / 10 / 30），含义见「依据」"
+    : cell.side ? "冷侧 / 暖侧直接来自数据里的 -20 / 20 编码"
+      : "这个像元当天有观测，但没有锋面线，也不在冷暖侧") + "</div>";
+
   const km = distKm([state.lon, state.lat], [lon, lat]);
   const bearing = bearing16([state.lon, state.lat], [lon, lat]);
-  const nf = nearestFrontFrom(lon, lat);
-  const spot = nearestSpotFrom(lon, lat);
-
-  let h = head;
-  h += '<div class="mp-row"><span class="mp-k">海表温度</span><span class="mp-v">' + sst.toFixed(1) + " °C</span></div>";
-  h += '<div class="mp-note">' + sp.label + "合适 " + sp.sst[0] + "~" + sp.sst[1] + "°C → " +
-    (inTemp ? "在这范围里" : sst > sp.sst[1] ? "偏暖" : "偏冷") + "</div>";
   h += '<div class="mp-row"><span class="mp-k">离你</span><span class="mp-v">' + km.toFixed(1) + " km · " + bearing + "</span></div>";
   h += '<div class="mp-note' + (km > state.range ? " mp-warn" : "") + '">' +
     (km <= state.range ? "在你选的 " + state.range + " km 找鱼范围内" : "超出 " + state.range + " km 找鱼范围") + "</div>";
+
+  const nf = nearestFrontFrom(lon, lat);
   if (nf) {
-    h += '<div class="mp-row"><span class="mp-k">最近锋面</span><span class="mp-v">' + nf.km.toFixed(1) + " km · " + nf.bearing + "</span></div>";
-    h += '<div class="mp-note">' + nf.id + " " + nf.name + " · 这里在" + nf.side + "</div>";
+    h += '<div class="mp-row"><span class="mp-k">最近的锋面</span><span class="mp-v">' + nf.km.toFixed(1) + " km · " + nf.bearing + "</span></div>";
+    h += '<div class="mp-note">' + (nf.isObject
+      ? "锋面对象 " + nf.id + " · 长 " + Math.round(nf.lengthKm) + " km"
+      : "未编号短段（长不足 " + shortMin + " km，不参与对象统计）") + "</div>";
   }
+
+  h += '<div class="mp-row"><span class="mp-k">你所在的侧别</span><span class="mp-v">' + (cell.side || "锋区外") + "</span></div>";
+  h += '<div class="mp-row"><span class="mp-k">海表温度</span><span class="mp-v">待接入</span></div>';
+  h += '<div class="mp-note">真实海温还没接进来，这里不给数值，也不按纬度估</div>';
+  const spot = nearestSpotFrom(lon, lat);
   if (spot) {
     h += '<div class="mp-row"><span class="mp-k">值得去的水域</span><span class="mp-v">' +
       (spot.inside ? "就在 " + spot.id + " 里" : "距 " + spot.id + " " + spot.km.toFixed(1) + " km") + "</span></div>";
-    if (!spot.inside) h += '<div class="mp-note">往' + spot.bearing + "走可以进水区（" + spot.grade + "）</div>";
+    h += '<div class="mp-note">这一层是示例占位，还没有真实渔场数据（见「依据」）</div>';
   }
   return h + foot;
+}
+
+function nearestSpotFrom(lon, lat) {
+  const list = DEMO_SPOTS.map((s) => {
+    const dx = (lon - s.lon) * kmPerLon(s.lat);
+    const dy = (lat - s.lat) * KM_PER_DEG;
+    return { id: s.id, grade: s.grade, km: Math.hypot(dx, dy),
+      bearing: bearing16([lon, lat], [s.lon, s.lat]),
+      inside: (dx * dx) / (s.rxKm * s.rxKm) + (dy * dy) / (s.ryKm * s.ryKm) <= 1 };
+  }).sort((a, b) => a.km - b.km);
+  return list.find((s) => s.inside) || list[0] || null;
 }
 
 function renderProbe() {
@@ -498,21 +563,22 @@ function pickInfo() {
   if (!s) return null;
   const snap = snapshot();
   if (s.type === "front") {
-    const f = (snap.fronts || []).find((x) => x.id === s.id) || snap.fronts[0];
+    const f = (snap.fronts || []).find((x) => x.isObject && x.id === s.id);
     if (!f) return null;
-    return { name: "锋面线 " + f.id + " " + f.name,
-      body: "离你 <b>" + f.km.toFixed(1) + " km</b> · " + f.bearing + " · 你在" + f.side + "<br/>" +
-        (f.inRange ? "在你的找鱼范围内" : "超出你的找鱼范围") };
+    return { name: "锋面对象 " + f.id,
+      body: "长 <b>" + Math.round(f.lengthKm) + " km</b>（" + f.pixelCount + " 个像元）· 离你 <b>" + f.km.toFixed(1) +
+        " km</b> · " + f.bearing + "<br/>" + (f.inRange ? "在你的找鱼范围内" : "超出你的找鱼范围") +
+        " · 你在" + (snap.cell && snap.cell.side ? snap.cell.side : "锋区外") };
   }
   if (s.type === "fishing") {
-    const p = (snap.spots || []).find((x) => x.id === s.id) || snap.spots[0];
+    const p = (snap.spots || []).find((x) => x.id === s.id);
     if (!p) return null;
-    return { name: "值得去的水域 " + p.id,
-      body: "离你 <b>" + p.km.toFixed(1) + " km</b> · " + p.bearing + " · 把握" + p.grade +
-        "<br/>大小约 " + (p.rxKm * 2) + " × " + (p.ryKm * 2) + " km" };
+    return { name: "值得去的水域 " + p.id + "（示例）",
+      body: "离你 <b>" + p.km.toFixed(1) + " km</b> · " + p.bearing + " · 大小约 " + (p.rxKm * 2) + " × " + (p.ryKm * 2) +
+        " km<br/>这一层是示例占位，还没有真实渔场数据" };
   }
-  if (s.type === "sst") return { name: "海表温度", body: "地图上的等温线已加亮：颜色越暖，水温越高" };
-  return { name: "冷侧 / 暖侧", body: "蓝色是冷侧、橙色是暖侧，锋面就在两者中间" };
+  return { name: "冷侧 / 暖侧",
+    body: "蓝色是冷侧、橙色是暖侧，直接来自数据里的 -20 / 20 编码；锋面线就在两者中间" };
 }
 function renderPick() {
   const box = $("mapPick");
@@ -528,7 +594,7 @@ function toggleSelect(type, id) {
   const same = !!(state.select && state.select.type === type && (!id || !state.select.id || state.select.id === id));
   state.select = same ? null : { type: type, id: id || null };
   if (!same) {
-    SELECT_LAYERS[type].forEach((k) => { state.layers[k] = true; });
+    (SELECT_LAYERS[type] || []).forEach((k) => { state.layers[k] = true; });
     state.probe = null;   // 选中对象与钉住的点只留一个，免得两个框抢同一块位置
   }
   renderLegend(); drawMap(); syncSelect(); renderPick(); renderProbe();
@@ -553,16 +619,23 @@ function renderLegend() {
 // ==================== L1 结论层（常驻，不随页签消失） ====================
 function heroTarget() {
   const snap = snapshot();
-  const spot = snap.spotIn[0];
-  if (spot) return { type: "fishing", id: spot.id, label: "值得去的水域 " + spot.id, km: spot.km, bearing: spot.bearing, fallback: false };
-  const inF = snap.inRange[0];
-  if (inF) return { type: "front", id: inF.id, label: "锋面 " + inF.id + " " + inF.name, km: inF.km, bearing: inF.bearing, fallback: false };
-  const near = snap.nearest;
-  if (near) return { type: "front", id: near.id, label: "锋面 " + near.id + " " + near.name, km: near.km, bearing: near.bearing, fallback: true };
+  const objectsInRange = snap.inRange.filter((f) => f.isObject);
+  if (objectsInRange.length) {
+    const f = objectsInRange[0];
+    return { type: "front", id: f.id, label: "锋面对象 " + f.id, km: f.km, bearing: f.bearing, fallback: false };
+  }
+  const anyObject = snap.fronts.find((f) => f.isObject);
+  if (anyObject) {
+    return { type: "front", id: anyObject.id, label: "锋面对象 " + anyObject.id, km: anyObject.km,
+      bearing: anyObject.bearing, fallback: true, note: "范围里没有编号对象，先给最近的一个" };
+  }
+  const anyLine = snap.fronts[0];
+  if (anyLine) {
+    return { type: null, id: null, label: "未编号短段", km: anyLine.km, bearing: anyLine.bearing, fallback: true,
+      note: "只找到不足 " + (snap.quality ? snap.quality.object_min_length_km : 20) + " km 的短段" };
+  }
   return null;
 }
-const fmtHours = (km) => (km / CRUISE_KMH).toFixed(1);
-const fmtFuel = (km) => Math.round(km * FUEL_L_PER_KM);
 
 function renderHero() {
   const snap = snapshot();
@@ -570,7 +643,7 @@ function renderHero() {
   const v = $("heroVerdict"), l = $("heroLine"), pts = $("heroPoints"), body = $("heroWhyBody");
   $("heroWhen").textContent = timeLabel();
 
-  if (!snap.status.ok) {
+  if (!snap.ok) {
     v.textContent = "先看数据";
     v.className = "verdict caution";
     l.innerHTML = "<b>" + snap.status.title + "</b> — " + snap.status.desc;
@@ -581,40 +654,47 @@ function renderHero() {
     return;
   }
 
-  const verdict = verdictOf(snap.score, snap.sea);
+  const verdict = verdictOf(snap.score);
   v.textContent = verdict.text;
   v.className = "verdict " + verdict.cls;
 
   const t = heroTarget();
-  let line = "找 <b>" + sp.label + "</b> · <b>" + state.range + " km</b> 内 · 去这里的把握 <b>" + snap.score + "%</b>。";
-  if (t) line += "先去 <b>" + t.bearing + " " + t.km.toFixed(1) + " km</b> 的" + t.label + "（开船约 " + fmtHours(t.km) + " 小时）。";
+  let line = "找 <b>" + sp.label + "</b> · <b>" + state.range + " km</b> 内 · 数据把握 <b>" + snap.score + "%</b>。";
+  if (t) line += "先去 <b>" + t.bearing + " " + t.km.toFixed(1) + " km</b> 的" + t.label +
+    "（开船约 " + fmtHours(t.km) + " 小时）。";
   else line += "这个范围里没找到像样的线索，可以把找鱼范围放大，或者换个日期。";
-  if (snap.sea.level !== "seaworthy") line += " ⚠ 海况" + (snap.sea.level === "unsafe" ? "不适合出海" : "接近临界") + "，安全第一。";
   l.innerHTML = line;
 
   const picks = [];
-  if (t) picks.push({ rank: 1, type: t.type, id: t.id, label: t.label, km: t.km, bearing: t.bearing,
-    note: t.fallback ? "范围里没有，先给最近的" : "范围里最值得去的" });
-  snap.inRange.filter((f) => !t || f.id !== t.id).slice(0, 2).forEach((f) => {
-    picks.push({ rank: picks.length + 1, type: "front", id: f.id, label: "锋面 " + f.id + " " + f.name, km: f.km, bearing: f.bearing, note: "备选 · 在范围内" });
+  if (t) {
+    picks.push({ rank: 1, type: t.type, id: t.id, label: t.label, km: t.km, bearing: t.bearing,
+      note: t.fallback ? (t.note || "范围里没有，先给最近的") : "范围里最值得去的" });
+  }
+  snap.inRange.filter((f) => f.isObject && (!t || f.id !== t.id)).slice(0, 2).forEach((f) => {
+    picks.push({ rank: picks.length + 1, type: "front", id: f.id, label: "锋面对象 " + f.id,
+      km: f.km, bearing: f.bearing, note: "备选 · 长 " + Math.round(f.lengthKm) + " km" });
   });
   pts.innerHTML = picks.map((p) =>
-    '<div class="pt" data-type="' + p.type + '" data-id="' + p.id + '"><span class="rk">' + p.rank + "</span>" +
+    '<div class="pt"' + (p.type ? ' data-type="' + p.type + '" data-id="' + (p.id || "") + '"' : "") +
+    '><span class="rk">' + p.rank + "</span>" +
     '<span class="grow"><b>' + p.bearing + " " + p.km.toFixed(1) + " km</b> · " + p.label +
-    "<small>" + p.note + " · 开船约 " + fmtHours(p.km) + " 小时 · 油约 " + fmtFuel(p.km) + " L（怎么算的见「依据」）</small></span></div>"
-  ).join("");
-  pts.querySelectorAll(".pt").forEach((node) => node.addEventListener("click", () => toggleSelect(node.dataset.type, node.dataset.id)));
+    "<small>" + p.note + " · 开船约 " + fmtHours(p.km) + " 小时 · 油约 " + fmtFuel(p.km) +
+    " L（怎么算的见「依据」）</small></span></div>").join("");
+  pts.querySelectorAll(".pt[data-type]").forEach((node) =>
+    node.addEventListener("click", () => toggleSelect(node.dataset.type, node.dataset.id)));
 
   body.innerHTML =
-    snap.items.map((it) => '<div class="line"><span class="k">' + it[0] + "</span> → <b>" + (it[1] > 0 ? "+" : "") + it[1] + "</b></div>").join("") +
+    snap.items.map((it) => '<div class="line"><span class="k">' + it[0] + "</span> → <b>" +
+      (it[1] > 0 ? "+" : "") + it[1] + "</b></div>").join("") +
     '<div class="line"><span class="k">合计把握</span> → <b>' + snap.score + "%</b></div>" +
-    '<div class="line"><span class="k">能不能出海</span> → 风力 ≤5 级 且 浪高 ≤1.5 m 就算能；现在是 ' + snap.sea.wind + " 级 / " + snap.sea.wave + " m</div>" +
-    '<div class="line"><span class="k">三档怎么分</span> → 不能出海就是「别出海」；能出海且把握 ≥60% 是「可以出海」，其余「谨慎出海」</div>';
+    '<div class="line"><span class="k">数据来源</span> → 真实锋面数据 Zenodo 20356239（CC BY 4.0），0.05° 逐日，东海窗口</div>' +
+    '<div class="line"><span class="k">没算进去的</span> → 海表温度、锋面强度、海况、预报、渔场都还没接真实数据，一律不参与评分</div>' +
+    '<div class="line"><span class="k">三档怎么分</span> → ≥70% 值得去；50–69% 可以看看；<50% 线索不足</div>';
   syncSelect();
   renderPick();
 }
 
-// ==================== L2-现在（观测数据） ====================
+// ==================== L2-现在（真实观测数据） ====================
 function metricCell(label, value, unit, type, id) {
   return "<div class=\"m\"" + (type ? ' data-type="' + type + '" data-id="' + (id || "") + '" style="cursor:pointer"' : "") + ">" +
     '<div class="k">' + label + '</div><div class="v">' + value + "<small>" + (unit || "") + "</small></div></div>";
@@ -623,10 +703,10 @@ function metricCell(label, value, unit, type, id) {
 function renderNow() {
   const snap = snapshot();
   const sp = SPECIES[state.species];
-  const st = obsStatus();
+  const st = snap.status;
+  $("nowScopeTag").textContent = state.range + " km 内 · " + sp.label;
 
   if (!st.ok) {
-    $("nowScopeTag").textContent = state.range + " km 内 · " + sp.label;
     $("nowMetrics").innerHTML = "";
     $("seaTag").textContent = "没数据"; $("seaTag").className = "tag warn";
     $("seaList").innerHTML = "";
@@ -634,168 +714,193 @@ function renderNow() {
     $("nowFrontTag").textContent = "没数据";
     const e0 = $("nowEmpty");
     e0.hidden = false;
-    e0.innerHTML = "<b>" + st.title + "</b><br/>" + st.desc +
-      (state.date > TODAY ? '<br/><button class="go" id="jumpFuture" style="margin-top:8px">去看「未来」</button>' : "");
-    const b = $("jumpFuture");
-    if (b) b.addEventListener("click", () => switchTab("future"));
+    e0.innerHTML = "<b>" + st.title + "</b><br/>" + st.desc;
     return;
   }
 
-  const sst = snap.sst, nf = snap.nearest;
-  const fit = sst >= sp.sst[0] && sst <= sp.sst[1];
-  $("nowScopeTag").textContent = state.range + " km 内 · " + sp.label + " · 水温 " + sst.toFixed(1) + "°C" +
-    (fit ? "合适" : sst > sp.sst[1] ? "偏暖" : "偏冷");
+  const objects = snap.objects;
+  const coverage = snap.coverage;
+  const nearest = snap.nearest;
+  $("nowScopeTag").textContent = state.range + " km 内 · " + sp.label +
+    (coverage === null ? "" : " · 观测覆盖 " + coverage.toFixed(1) + "%");
   $("nowMetrics").innerHTML =
-    metricCell("你这里的水温", sst.toFixed(1), "°C", "sst") +
-    metricCell("最近的锋面", nf.km.toFixed(1), "km", "front", nf.id) +
-    metricCell("你在", nf.side, "", "coldwarm") +
-    metricCell("去这里的把握", String(snap.score), "%", "fishing");
+    metricCell("这一天找到的锋面对象", String(objects.length), "条") +
+    metricCell("最近的锋面", nearest ? nearest.km.toFixed(1) : "—", "km", "front",
+      nearest && nearest.isObject ? nearest.id : "") +
+    metricCell("你落在", snap.side || "锋区外", "", "coldwarm") +
+    metricCell("数据把握", String(snap.score), "%");
 
-  const sea = snap.sea;
-  $("seaTag").textContent = sea.level === "seaworthy" ? "能出海" : sea.level === "marginal" ? "看情况" : "别出海";
-  $("seaTag").className = "tag " + (sea.level === "seaworthy" ? "ok" : "warn");
+  // 海况：示例数据，不参与结论
+  const sea = seaState(state.date);
+  $("seaTag").textContent = "示例数据 · 不参与结论";
+  $("seaTag").className = "tag warn";
   $("seaList").innerHTML =
     '<div class="row"><span class="i">≈</span><span class="grow"><b>风力 ' + sea.wind + " 级</b> · 浪高 " + sea.wave +
-    " m · 涌浪 " + sea.swell + ' m<small>能出海的标准：风力 ≤5 级 且 浪高 ≤1.5 m</small></span></div>' +
-    '<div class="row"><span class="i">' + (sea.level === "seaworthy" ? "✓" : "!") + '</span><span class="grow"><b>' +
-    (sea.level === "seaworthy" ? "符合出海条件" : sea.level === "marginal" ? "接近临界，建议缩短航次" : "超出出海条件，建议改天") +
-    "</b><small>海况是示例数据；实船作业请以官方海洋预报为准</small></span></div>";
+    " m · 涌浪 " + sea.swell + ' m<small>这几个数是示例值，还没有真实风浪数据源，只看量级</small></span></div>' +
+    '<div class="row"><span class="i">!</span><span class="grow"><b>出海安全请以官方海洋预报为准</b>' +
+    "<small>本期没有风浪数据，结论里也不含海况判断</small></span></div>";
 
-  $("nowFrontTag").textContent = "共 " + snap.fronts.length + " 条 · 范围内 " + snap.inRange.length + " 条";
-  $("nowFronts").innerHTML = snap.fronts.map((f) =>
+  const objectLines = snap.fronts.filter((f) => f.isObject);
+  const inRangeObjects = objectLines.filter((f) => f.inRange);
+  const shortCount = snap.fronts.length - objectLines.length;
+  $("nowFrontTag").textContent = "编号 " + objectLines.length + " · 范围内 " + inRangeObjects.length +
+    (shortCount ? " · 短段 " + shortCount : "");
+  $("nowFronts").innerHTML = objectLines.map((f) =>
     '<div class="row clickable" data-type="front" data-id="' + f.id + '"><span class="i">' + (f.inRange ? "✓" : "·") + "</span>" +
-    '<span class="grow"><b>' + f.id + " " + f.name + "</b> " + f.bearing + " " + f.km.toFixed(1) + " km" +
-    "<small>" + (f.inRange ? "在找鱼范围内" : "超出找鱼范围，只作参考") + " · 你在它的" + f.side + " · 点一下在地图上高亮" + "</small></span>" +
-    '<span class="tag ' + (f.side === "暖侧" ? "warm" : "cold") + ' side-tag">' + f.side + "</span></div>"
+    '<span class="grow"><b>' + f.id + " · 长 " + Math.round(f.lengthKm) + " km</b> " + f.bearing + " " + f.km.toFixed(1) + " km" +
+    "<small>" + (f.inRange ? "在找鱼范围内" : "超出找鱼范围，只作参考") + " · " + f.pixelCount + " 个像元 · 点一下在地图上高亮</small></span>" +
+    '<span class="tag ' + (f.inRange ? "ok" : "plain") + ' side-tag">' + (f.inRange ? "范围内" : "范围外") + "</span></div>"
   ).join("");
   $("nowFronts").querySelectorAll(".clickable").forEach((node) =>
     node.addEventListener("click", () => toggleSelect(node.dataset.type, node.dataset.id)));
 
   const e = $("nowEmpty");
-  if (snap.inRange.length === 0) {
+  if (!inRangeObjects.length) {
     e.hidden = false;
-    const near = snap.nearest;
-    e.innerHTML = "<b>" + state.range + " km 内没有锋面</b><br/>先给你最近的一处参考：" +
-      (near ? near.id + " " + near.name + "（" + near.bearing + " " + near.km.toFixed(1) + " km）" : "无") +
+    e.innerHTML = "<b>" + state.range + " km 内没有编号的锋面对象</b><br/>" +
+      (nearest ? "先给你最近的参考：" + (nearest.isObject ? nearest.id : "未编号短段") +
+        "（" + nearest.bearing + " " + nearest.km.toFixed(1) + " km）" : "这天这片海没找到锋面线") +
       "；可以把找鱼范围放大，或者换个日期。";
   } else {
     e.hidden = true;
   }
   $("nowMetrics").querySelectorAll(".m[data-type]").forEach((node) =>
-    node.addEventListener("click", () => toggleSelect(node.dataset.type, node.dataset.id)));
+    node.addEventListener("click", () => {
+      if (node.dataset.type === "front" && !node.dataset.id) return;
+      toggleSelect(node.dataset.type, node.dataset.id);
+    }));
   syncSelect();
 }
 
-// ==================== L2-未来（预报数据） ====================
-function seaTagOf(sea) {
-  if (sea.level === "seaworthy") return { text: "能出海", cls: "ok" };
-  if (sea.level === "marginal") return { text: "看情况", cls: "warn" };
-  return { text: "别出海", cls: "warn" };
-}
-
+// ==================== L2-未来（预报还没接入，说清楚为什么） ====================
 function renderFuture() {
-  const st = fcstStatus();
-  if (!st.ok) {
-    $("futureTag").textContent = "没数据";
-    $("futureList").innerHTML = "";
-    $("futureBars").innerHTML = "";
-    $("futureBestTag").textContent = "—";
-    const btn = st.jump === "today" ? '<button class="go" id="jumpToday">回到今天</button>'
-      : st.jump === "max" ? '<button class="go" id="jumpMax">调到 ' + mdText(DATE_MAX) + "</button>" : "";
-    $("futureDays").innerHTML = '<div class="row"><span class="i">i</span><span class="grow"><b>' + st.title +
-      "</b><small>" + st.desc + "</small></span></div>" + (btn ? '<div style="margin-top:8px">' + btn + "</div>" : "");
-    const b1 = $("jumpToday"), b2 = $("jumpMax");
-    if (b1) b1.addEventListener("click", () => { state.date = TODAY; refresh(); });
-    if (b2) b2.addEventListener("click", () => { state.date = DATE_MAX; refresh(); });
-    return;
-  }
-
-  const days = futureSeries(FCST_SPAN);
-  const best = days.reduce((a, b) => (b.score > a.score ? b : a), days[0]);
-  $("futureTag").textContent = state.date === TODAY ? "从今天起 " + FCST_SPAN + " 天" : "从 " + mdText(state.date) + " 起 " + FCST_SPAN + " 天";
-  $("futureBestTag").textContent = "最好的一天：" + mdText(best.date) + " · " + best.score + "%";
-
-  // 柱子点一下就换"出海日"——全局只有一个日期
-  $("futureBars").innerHTML = days.map((d) =>
-    '<i class="future' + (d.date === best.date ? " active" : "") + '" data-date="' + d.date + '" title="' +
-    mdText(d.date) + " · 把握 " + d.score + '%" style="height:' + Math.max(6, d.score) + '%"></i>').join("");
-  $("futureBars").querySelectorAll("i").forEach((n) => n.addEventListener("click", () => setDate(n.dataset.date)));
-
-  $("futureDays").innerHTML = days.map((d, i) => {
-    const tag = seaTagOf(d.sea);
-    const label = d.date === TODAY ? "（今天）" : "（" + (i + 1) + " 天后）";
-    return '<div class="row clickable' + (d.date === state.date ? " active" : "") + '" data-date="' + d.date + '"><span class="i">' + (i + 1) + "</span>" +
-      '<span class="grow"><b>' + mdText(d.date) + label + " · 把握 " + d.score + "%</b>" +
-      "<small>风力 " + d.sea.wind + " 级 · 浪高 " + d.sea.wave + " m · 点一下就把「出海日」设成这天</small></span>" +
-      '<span class="tag ' + tag.cls + ' side-tag">' + tag.text + "</span></div>";
-  }).join("");
-  $("futureDays").querySelectorAll(".clickable").forEach((n) => n.addEventListener("click", () => setDate(n.dataset.date)));
-
-  const d1 = days[0], d3 = days[Math.min(2, days.length - 1)], d7 = days[days.length - 1];
+  $("futureTag").textContent = "预报未接入";
+  $("futureBestTag").textContent = "—";
+  $("futureBars").innerHTML = "";
   $("futureList").innerHTML =
-    '<div class="row"><span class="i">→</span><span class="grow"><b>1 天后 把握 ' + d1.score + "%</b>（" + mdText(d1.date) + "）" +
-    "<small>主要看现在这条锋面还能稳多久</small></span></div>" +
-    '<div class="row"><span class="i">→</span><span class="grow"><b>3 天后 把握 ' + d3.score + "%</b>（" + mdText(d3.date) + "）" +
-    "<small>再叠加往年这个时段的规律</small></span></div>" +
-    '<div class="row"><span class="i">→</span><span class="grow"><b>7 天后 把握 ' + d7.score + "%</b>（" + mdText(d7.date) + "）" +
-    "<small>只看趋势，别当作业依据</small></span></div>" +
-    '<div class="hint">越往后越不准：这里是按"现在的把握 × 每天衰减"推的，出远海前请看官方海洋预报。</div>';
+    '<div class="row"><span class="i">1</span><span class="grow"><b>目前没有可用的锋面预报数据</b>' +
+    "<small>现在用的是观测回算数据集（到 2024 年为止），它回答的是「那天实际什么样」，不是「明天会怎样」</small></span></div>" +
+    '<div class="row"><span class="i">2</span><span class="grow"><b>所以这一页不给未来天数、不给未来把握</b>' +
+    "<small>以前这里按「每天衰减 6%」推过数字，那是编的，已经撤掉</small></span></div>" +
+    '<div class="row"><span class="i">3</span><span class="grow"><b>要接预报，先补两样东西</b>' +
+    "<small>更多日期的锋面样本（做持续性基线：今天有锋面→明天还有的概率），以及海温/流场等预报输入场</small></span></div>";
+  $("futureDays").innerHTML = AVAILABLE_DATES.map((d) =>
+    '<div class="row clickable" data-date="' + d + '"><span class="i">·</span><span class="grow"><b>' + mdText(d) +
+    "</b><small>已导出的观测日期 · 点一下把「出海日」设成这天</small></span></div>").join("");
+  $("futureDays").querySelectorAll(".clickable").forEach((node) =>
+    node.addEventListener("click", () => setDate(node.dataset.date)));
 }
 
-// ==================== L2-往年同期（锚点全部来自顶栏的出海日） ====================
-const CLIM_YEARS = [2019, 2020, 2021, 2022, 2023, 2024, 2025];
-const CUR_YEAR = 2024;
-const CLIM_MONTH = 8;   // 这几年的数据按月对齐，月份取 8 月
-
-function climSeries() {
-  const date = state.date;
-  const mo = Number(date.slice(5, 7));
-  const day = Number(date.slice(8, 10));
-  if (state.climMode === "day") {
-    const vals = CLIM_YEARS.map((y) => clamp(Math.round(50 + (rnd("cd" + y + date) - 0.5) * 70), 5, 95));
-    return { vals, active: CLIM_YEARS.indexOf(CUR_YEAR), labels: CLIM_YEARS.map((y) => y + " 年"), what: "年" };
-  }
-  if (state.climMode === "month") {
-    const days = new Date(Date.UTC(CUR_YEAR, mo, 0)).getUTCDate();
-    const vals = [];
-    for (let i = 1; i <= days; i++) vals.push(clamp(Math.round(45 + (rnd("cm" + mo + i) - 0.5) * 70), 5, 95));
-    return { vals, active: day - 1, labels: vals.map((_, i) => i + 1 + " 日"), what: "天" };
-  }
-  const vals = [];
-  for (let i = 1; i <= 12; i++) vals.push(clamp(Math.round(48 + (rnd("cy" + i) - 0.5) * 66), 5, 95));
-  return { vals, active: mo - 1, labels: vals.map((_, i) => i + 1 + " 月"), what: "月" };
+// ==================== L2-往年同期（真实多年度统计，口径见需求 §5.2） ====================
+function climBarsHTML(labels, heights, actives, titles) {
+  return labels.map((label, i) =>
+    '<i class="' + (actives[i] ? "active" : "") + '" title="' + titles[i] + '" style="height:' +
+    Math.max(5, Math.round(heights[i])) + '%"></i>').join("");
 }
 
 function renderClim() {
-  const m = state.climMode;
-  const date = state.date;
-  document.querySelectorAll("#climPeriod button").forEach((b) => b.classList.toggle("active", b.dataset.period === m));
+  const mode = state.climMode;
+  document.querySelectorAll("#climPeriod button").forEach((b) => b.classList.toggle("active", b.dataset.period === mode));
+  const bars = $("climBars"), stat = $("climStat"), years = $("climYears"), hint = $("climHint");
+  const clim = OFData.clim;
 
-  const s = climSeries();
-  const rate = s.vals[s.active];
-  const unitText = m === "day" ? "这一天 · " + mdText(date) : m === "month" ? "这个月 · " + CLIM_MONTH + " 月" : "这一年 · " + CUR_YEAR + " 年";
-  $("climHint").textContent = unitText;
-  $("climBars").innerHTML = s.vals.map((v, i) =>
-    '<i class="' + (i === s.active ? "active" : "") + '" title="' + s.labels[i] + " · " + v + '%" style="height:' + Math.max(4, v) + '%"></i>').join("");
+  if (!clim) {
+    hint.textContent = "统计未导出"; hint.className = "tag warn";
+    bars.innerHTML = ""; years.innerHTML = "";
+    stat.innerHTML = "<b>往年同期统计还没生成</b><br/>跑一次 <code>export_prototype_data.py --mode clim</code> 之后，这里会是真实的多年度对比。";
+    return;
+  }
 
-  const others = s.vals.filter((_, i) => i !== s.active);
-  const mean = Math.round(others.reduce((a, b) => a + b, 0) / Math.max(1, others.length));
-  const diff = rate - mean;
-  const anomaly = Math.abs(diff) >= 8 ? (diff > 0 ? "偏高" : "偏低") : "正常";
-  const same = m === "day" ? "这 7 年里的其他年份" : m === "month" ? "这个月的其他日子" : "这一年的其他月份";
+  if (mode === "month") {
+    hint.textContent = "样本不足"; hint.className = "tag warn";
+    bars.innerHTML = ""; years.innerHTML = "";
+    stat.innerHTML = "<b>整月统计还没法做</b><br/>现在只导出了每年 8 月 5—7 日三天，算不出「整月」；" +
+      "数据集本身是逐日的，按月补齐日期后这里就能给整月口径。";
+    return;
+  }
 
-  const headText = m === "day" ? mdText(date) : m === "month" ? CLIM_MONTH + " 月" : CUR_YEAR + " 年";
-  $("climStat").innerHTML = "<b>" + headText + "</b> 有锋面的把握 <b>" + rate +
-    "%</b>（" + same + "平均 " + mean + "%）";
-  $("climHint").className = "tag " + (anomaly === "正常" ? "ok" : "warm");
+  const key = String(state.range);
+  const yearRows = Object.keys(clim.by_year).sort();
+  const widestKey = Object.keys(clim.by_day[Object.keys(clim.by_day)[0]].by_range)
+    .map(Number).sort((a, b) => b - a)[0];
 
-  $("climYears").innerHTML =
-    '<div class="line"><span class="k">' + same + "平均</span> → <b>" + mean + "%</b></div>" +
-    '<div class="line"><span class="k">这次比它</span> → <b>' + (diff > 0 ? "+" : "") + diff + "</b> 个点 · " + anomaly + "</div>" +
-    '<div class="line"><span class="k">对你的意义</span> → ' + (anomaly === "偏高" ? "锋面比常年活跃，线索更集中，值得按推荐点位走一趟" :
-      anomaly === "偏低" ? "锋面比常年弱，建议跟着眼下的实时锋面走，别只靠往年经验" : "和常年差不多，往年这时候的作业经验可以照用") + "</div>" +
-    (s.vals.length <= 12 ? s.vals.map((v, i) =>
-      '<div class="line"><span class="k">' + s.labels[i] + "</span> → <b>" + v + "%</b></div>").join("") : "");
+  if (mode === "period") {
+    const wideKey = String(widestKey);
+    const probs = yearRows.map((y) => {
+      const bucket = clim.by_year[y].by_range[wideKey] || clim.by_year[y].by_range[key];
+      return bucket ? bucket.probability || 0 : 0;
+    });
+    const labels = yearRows.map((y) => y + " 年");
+    bars.innerHTML = climBarsHTML(labels, probs.map((p) => p * 100), yearRows.map(() => false),
+      yearRows.map((y, i) => y + " 年 · " + widestKey + " km 内 " + Math.round(probs[i] * 100) + "% 的日子有锋面"));
+    stat.innerHTML = "<b>这几天</b> · " + widestKey + " km 内出现锋面的天数占比：" +
+      yearRows.map((y, i) => y + " " + Math.round(probs[i] * 100) + "%").join(" · ");
+    hint.textContent = widestKey + " km 内 · 每月取样"; hint.className = "tag";
+    years.innerHTML =
+      '<div class="line"><span class="k">为什么看 ' + widestKey + " km</span> → 锋面在海上分布很散，只盯 " + state.range +
+      " km 会经常是 0%；放大到 " + widestKey + " km 才能看出年份之间的差别</div>" +
+      '<div class="line"><span class="k">口径</span> → ' + clim.method + "</div>" +
+      '<div class="line"><span class="k">样本</span> → ' + clim.sample_note + "</div>" +
+      yearRows.map((y) => {
+        const bucket = clim.by_year[y].by_range[wideKey];
+        const narrow = clim.by_year[y].by_range[key];
+        return '<div class="line"><span class="k">' + y + " 年（" + (bucket ? bucket.days : 0) + " 天）</span> → <b>" +
+          (bucket ? bucket.present_days + "/" + bucket.days : "—") + "</b> 天有锋面 · 线像元合计 " +
+          (bucket ? bucket.line_cells : "—") + "（" + state.range + " km 内：" +
+          (narrow ? narrow.present_days + "/" + narrow.days : "—") + "）</div>";
+      }).join("");
+    return;
+  }
+
+  // mode === "day"：往年「这一天」的对比
+  const md = state.date.slice(5);
+  const entry = clim.by_day[md];
+  if (!entry) {
+    hint.textContent = "没有这一天"; hint.className = "tag warn";
+    bars.innerHTML = ""; years.innerHTML = "";
+    stat.innerHTML = "<b>" + mdText(state.date) + " 不在取样范围里</b><br/>往年同期只取了 " +
+      Object.keys(clim.by_day).join("、") + " 这几天。";
+    return;
+  }
+  const item = entry.by_range[key];
+  const cells = yearRows.map((y) => entry.years[y] && entry.years[y][key] ? entry.years[y][key] : null);
+  const maxLine = Math.max(1, ...cells.map((c) => (c ? c.line_cells : 0)));
+  const thisYear = state.date.slice(0, 4);
+  bars.innerHTML = climBarsHTML(yearRows.map((y) => y), cells.map((c) => (c ? c.line_cells / maxLine * 100 : 0)),
+    yearRows.map((y) => y === thisYear),
+    yearRows.map((y, i) => y + " 年 " + md + " · " + (cells[i] && cells[i].front_present ? "有锋面" :
+      cells[i] ? "无锋面" : "缺测") + " · 线像元 " + (cells[i] ? cells[i].line_cells : "—")));
+
+  const others = yearRows.filter((y) => y !== thisYear);
+  const otherPresent = others.filter((y, i) => {
+    const c = entry.years[y] && entry.years[y][key];
+    return c && c.front_present;
+  }).length;
+  const otherValid = others.filter((y) => entry.years[y] && entry.years[y][key] &&
+    entry.years[y][key].status === "ok").length;
+  const climRate = otherValid ? otherPresent / otherValid : null;
+  const mine = entry.years[thisYear] && entry.years[thisYear][key] ? entry.years[thisYear][key] : null;
+  stat.innerHTML = "<b>" + mdText(state.date) + "</b> · 往年（" + item.days + " 个年份样本）在 " + state.range +
+    " km 内出现锋面的比例 <b>" + Math.round((item.probability || 0) * 100) + "%</b>（" + item.present_days + "/" + item.days +
+    " 天有锋面）";
+  const diff = mine && mine.status === "ok" && climRate !== null ? (mine.front_present ? 1 : 0) - climRate : null;
+  const level = diff === null ? "没有样本" : diff > 0.2 ? "比常年活跃" : diff < -0.2 ? "比常年弱" : "和常年差不多";
+  hint.textContent = "这一天 · " + item.days + " 年样本"; hint.className = "tag " + (diff === null ? "" : diff > 0.2 ? "ok" : diff < -0.2 ? "warm" : "ok");
+
+  const wide = entry.by_range[String(widestKey)];
+  years.innerHTML =
+    '<div class="line"><span class="k">' + widestKey + " km 内</span> → <b>" +
+    Math.round((wide ? wide.probability || 0 : 0) * 100) + "%</b> 的日子有锋面（" +
+    (wide ? wide.present_days + "/" + wide.days : "—") + " 天）· 锋面在海上分布很散，看大范围更能看出年份差别</div>" +
+    '<div class="line"><span class="k">其他年份（' + otherValid + " 年有数据）</span> → <b>" +
+    (climRate === null ? "—" : Math.round(climRate * 100) + "%") + "</b> 的日子有锋面</div>" +
+    '<div class="line"><span class="k">' + thisYear + " 年这一天</span> → <b>" +
+    (mine ? (mine.front_present ? "有锋面" : "无锋面") + "（线像元 " + mine.line_cells + "）" : "缺测") + "</b></div>" +
+    '<div class="line"><span class="k">和常年比</span> → ' + level + "</div>" +
+    '<div class="line"><span class="k">对你的意义</span> → ' + (level === "比常年活跃"
+      ? "往年这时候也容易出锋面，跟常年经验走问题不大" : level === "比常年弱"
+      ? "往年这时候出锋面的机会多一些，别只靠往年经验，以当天观测为准" : "和常年差不多，往年这段时间的作业经验可以照用") + "</div>" +
+    '<div class="line"><span class="k">口径</span> → ' + clim.method + "（" + clim.sample_note + "）</div>";
 }
 
 // ==================== L2-依据（数据从哪来 / 怎么算的 / 还做不到什么） ====================
@@ -807,29 +912,43 @@ function listRows(rows) {
 }
 
 function renderBasis() {
+  const a = OFData.attribution();
+  if (!a) {
+    $("basisData").innerHTML = tableRows([["数据文件", "data/ 目录里没有生成好的数据"]]);
+    $("basisRules").innerHTML = "";
+    $("basisLimits").innerHTML = listRows([["!", "先跑 Ocean/backend/scripts/export_prototype_data.py 与 tools/build-basemap.mjs"]]);
+    return;
+  }
+  const st = a.status;
+  const statusText = (key, real, missing) => (st[key] === "real" ? real : missing);
   $("basisData").innerHTML = tableRows([
-    ["锋面位置", "锋面产品 0.05°（冷暖侧 / 对象） <em>样例</em>"],
-    ["海表温度", "analysed_sst 0.05° <em>待接入真实数据</em>"],
-    ["锋面强度", "frontal_intensity <em>待接入</em>"],
-    ["水深 / 岸线", "GEBCO 底图与海陆掩码 <em>待接入</em>"],
-    ["渔业数据", "AIS 船位 / 渔获 <em>待接入，另建渔场视图</em>"],
-    ["现在看的日期", timeLabel() + " <em>示例数据</em>"],
-    ["更新速度", "观测 ≤24 小时 · 预报逐日 <em>示例</em>"],
+    ["锋面位置", a.nameZh + " · " + a.resolutionDeg + "° 逐日 · " + a.license + " <em>Zenodo " + a.doi + "</em>"],
+    ["冷暖侧", statusText("cold_side", "数据里的 -20 / 20 编码，原样使用", "未接入")],
+    ["锋面对象编号", "本地计算：锋面线像元做连通域 → 取直径路径当中心线 → 按公里抽稀；编号只在本系统内有效"],
+    ["底图", "Natural Earth 1:10m 陆地 / 海岸线 / 200 m·1000 m 等深线（" + a.basemap.source + "）"],
+    ["已导出的观测日期", a.days.join("、") + "（共 " + a.days.length + " 天）"],
+    ["往年同期样本", a.clim.ready ? a.clim.years.join("、") + " 年 · " + a.clim.sample_note : "未导出"],
+    ["海表温度", "未接入：本地已有的 SST 样例是合成的，没有当真实数据用"],
+    ["锋面强度", "未接入（数据集里的 frontal_intensity 尚未下载）"],
+    ["海况（风 / 浪 / 涌）", "示例值，没有真实数据源；结论里不含海况判断"],
+    ["预报", "未接入"],
+    ["渔场分布", "示例占位（地图上的椭圆），没有真实渔场 / 船位数据"],
+    ["数据生成", a.generatedAt + " · 由脚本生成，页面不手改"],
   ]);
   $("basisRules").innerHTML = listRows([
-    ["1", "<b>找鱼范围</b>：以你的定位点为圆心，半径内命中才算数；半径内没有命中时，先给最近的一处，并写明「先给最近的」"],
-    ["2", "<b>有锋面的把握</b>：只有一个说法 —— 一段时间里有锋面的天数占多少；不再出现多个可信度标签"],
-    ["3", "<b>去这里的把握</b>：起评分 30；半径内每多一条锋面 +12（最多算 3 条）；你在鱼喜欢的那一侧 +15（不对 −5）；水温变化比往年明显 +8（不明显 −8）；范围内有值得去的水域 +15；水温合适 +12（不合适 −6）"],
-    ["4", "<b>三档结论</b>：不能出海 → 别出海；能出海且把握 ≥60% → 可以出海；其余 → 谨慎出海（先保安全）"],
-    ["5", "<b>开船时间和油</b>：按 8 节航速（14.8 km/h）、1.6 L/km 估，只看量级"],
-    ["6", "<b>未来几天</b>：今天的把握 × 每天衰减 6% × 上下 9% 的随机浮动（示例算法，要用真实数据回测校准）"],
+    ["1", "<b>找鱼范围</b>：以定位点为圆心，" + a.region.ranges_km.join(" / ") + " km 半径内命中才算数；范围内没有编号对象时先给最近的一个，并写明「先给最近的」"],
+    ["2", "<b>数据把握</b>：起评分 30；范围内每个锋面对象 +12（最多算 3 个）；你落在鱼偏好的那一侧 +15（相反 −5，冷暖交汇都行 +6）；最近锋面 ≤10 km +8、≤20 km +4；范围内最长对象 ≥100 km +8、≥50 km +4；观测覆盖 ≥85% +4、<70% −4"],
+    ["3", "<b>三档结论</b>：≥70% 值得去；50–69% 可以看看；<50% 线索不足。海况没数据，所以不拿它下结论"],
+    ["4", "<b>往年同期口径</b>：半径内锋面线像元数 > 0 记为 front_present = true；比例 = 有锋面的天数 ÷ 有效天数（需求 §5.2）"],
+    ["5", "<b>开船时间和油</b>：按 8 节航速（" + CRUISE_KMH + " km/h）、" + FUEL_L_PER_KM + " L/km 估，只看量级"],
+    ["6", "<b>对象中心线</b>：连通域直径路径 + Douglas-Peucker 抽稀（容差 6 km），对象最短 " +
+      (OFData.quality(a.days[a.days.length - 1]) ? OFData.quality(a.days[a.days.length - 1]).object_min_length_km : 20) + " km 才编号"],
   ]);
-  $("basisLimits").innerHTML = listRows([
-    ["!", "所有数值都是示例数据，还没接入真实的海温、锋面强度、海况"],
-    ["!", "海况是模拟的，实船作业请以官方海洋预报为准；本系统不承担航行安全责任"],
-    ["!", "「值得去的水域」只是示意，还没用船位或渔获数据验证过"],
-    ["!", "三维地球、离线包、手机端不在这一期里（见需求文档）"],
-  ]);
+  $("basisLimits").innerHTML = listRows(
+    a.knownIssues.map((text) => ["!", text]).concat([
+      ["!", "海表温度、海况、预报都没有真实数据，本页所有数字都只由锋面数据算出来"],
+      ["!", "底图是 Natural Earth 1:10m（公有领域），精度约公里级；国内正式发布需换成带审图号的合规底图"],
+    ]));
 }
 
 // ==================== 提示条（只用于确认操作，不播报结论） ====================
@@ -839,7 +958,7 @@ function showToast(text) {
   const t = $("toast");
   t.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove("show"), 1600);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 1800);
 }
 
 // ==================== 统一刷新（state → 全部渲染） ====================
@@ -852,7 +971,7 @@ function clampDate(iso) {
 function setDate(iso) {
   const d = clampDate(iso);
   if (!d) return;
-  if (d !== iso) showToast("日期只能选 " + mdText(DATE_MIN) + " ~ " + mdText(DATE_MAX));
+  if (d !== iso) showToast("日期只能选 " + mdText(DATE_MIN) + " ~ " + mdText(DATE_MAX) + "（已导出的观测日期）");
   if (d === state.date) return;
   state.date = d;
   refresh();
@@ -869,7 +988,7 @@ function refresh() {
   renderBasis();
   renderProbe();
   renderPick();
-  $("dataStamp").textContent = timeLabel() + " · 示例数据";
+  $("dataStamp").textContent = timeLabel() + " · 真实锋面数据";
   document.querySelectorAll("#rangeSeg button").forEach((b) => b.classList.toggle("active", Number(b.dataset.range) === state.range));
   $("speciesSel").value = state.species;
   $("timeDate").value = state.date;
@@ -887,10 +1006,18 @@ function switchTab(name) {
   document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.id === "pane-" + name));
 }
 
+function applyZoom() {
+  const w = 1000 / state.zoom, h = 640 / state.zoom;
+  const svg = $("mapSvg");
+  svg.style.transition = "all .25s ease";
+  svg.setAttribute("viewBox", (1000 - w) / 2 + " " + (640 - h) / 2 + " " + w + " " + h);
+}
+
 // ==================== 事件绑定 ====================
 function bind() {
   // ③ 找什么鱼
-  $("speciesSel").innerHTML = Object.keys(SPECIES).map((k) => '<option value="' + k + '">' + SPECIES[k].label + "</option>").join("");
+  $("speciesSel").innerHTML = Object.keys(SPECIES).map((k) =>
+    '<option value="' + k + '">' + SPECIES[k].label + "</option>").join("");
   $("speciesSel").addEventListener("change", (e) => {
     state.species = e.target.value;
     refresh();
@@ -948,17 +1075,17 @@ function bind() {
   map.addEventListener("click", (e) => {
     if (e.target.closest && e.target.closest(".map-legend, .map-controls, .map-pick, .map-probe, .map-empty")) return;
     const g = geoOfScreen(e.clientX, e.clientY);
-    const q = xy(g[0], g[1]);
-    if (isLandXY(q[0], q[1])) { showToast("这里是陆地，不看海里的数据"); return; }
     const onPinned = state.probe && distKm([state.probe.lon, state.probe.lat], g) < 5;
     hoverPt = null;
     if (onPinned) {
       state.probe = null;
       showToast("已取消钉住");
     } else {
+      const cell = cellAt(g[0], g[1]);
       state.probe = { lon: g[0], lat: g[1] };
       state.select = null;
-      showToast("已钉住 " + fmtCoord(g[0], g[1]));
+      showToast(!cell || !cell.inGrid ? "已钉住：这一点在导出范围外"
+        : cell.nodata ? "已钉住：这一点没有观测数据" : "已钉住 " + fmtCoord(g[0], g[1]));
     }
     renderLegend(); drawMap(); syncSelect(); renderPick(); renderProbe();
   });
@@ -1012,25 +1139,7 @@ function bind() {
   $("toBasis").addEventListener("click", () => switchTab("basis"));
 }
 
-function applyZoom() {
-  const w = 1000 / state.zoom, h = 640 / state.zoom;
-  const svg = $("mapSvg");
-  svg.style.transition = "all .25s ease";
-  svg.setAttribute("viewBox", (1000 - w) / 2 + " " + (640 - h) / 2 + " " + w + " " + h);
-}
-
 // ==================== 启动 ====================
 bind();
 refresh();
 switchTab("now");
-
-
-
-
-
-
-
-
-
-
-
