@@ -1,0 +1,80 @@
+import { spawn } from "node:child_process";
+import { rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// 用法：node tools/layout-check.mjs  （可用环境变量 EDGE / PAGE 覆盖）
+const EDGE = process.env.EDGE || "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+const PAGE = process.env.PAGE || pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "prototype-fishing.html")).href;
+const PORT = 9341;
+const PROFILE = join(process.env.TEMP || "C:\\temp", "_edge_profile_layout");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+try { rmSync(PROFILE, { recursive: true, force: true }); } catch (e) {}
+
+const child = spawn(EDGE, ["--headless=new", "--disable-gpu", "--no-first-run", `--remote-debugging-port=${PORT}`,
+  `--user-data-dir=${PROFILE}`, "--window-size=1680,900", PAGE], { stdio: "ignore" });
+
+let wsUrl = null;
+for (let i = 0; i < 50 && !wsUrl; i++) {
+  await sleep(300);
+  try {
+    const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
+    const t = list.find((x) => x.type === "page" && /prototype-fishing/.test(x.url));
+    if (t) wsUrl = t.webSocketDebuggerUrl;
+  } catch (e) {}
+}
+if (!wsUrl) { console.log("FAIL: 无法连接"); child.kill(); process.exit(1); }
+const ws = new WebSocket(wsUrl);
+await new Promise((res) => ws.addEventListener("open", res));
+let id = 0; const pending = new Map();
+ws.addEventListener("message", (ev) => { const m = JSON.parse(ev.data); if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); p.res(m.result); } });
+const send = (method, params = {}) => { const i = ++id; ws.send(JSON.stringify({ id: i, method, params })); return new Promise((res) => pending.set(i, { res })); };
+await send("Runtime.enable");
+await sleep(800);
+const evalJS = async (expr) => (await send("Runtime.evaluate", { expression: `(function(){ ${expr} })()`, returnByValue: true, awaitPromise: true })).result.value;
+
+const GEO = `var tb=document.getElementById("topbar"), hero=document.getElementById("hero"), tabs=document.getElementById("tabs"),
+  panes=document.getElementById("panes"), side=document.querySelector(".side"), footer=document.querySelector(".footer");
+  var r=function(n){return n.getBoundingClientRect();};
+  return {
+    vw: window.innerWidth, vh: window.innerHeight,
+    docScrollW: document.documentElement.scrollWidth,
+    topbarH: Math.round(r(tb).height),
+    heroH: Math.round(r(hero).height),
+    heroBottom: Math.round(r(hero).bottom), tabsTop: Math.round(r(tabs).top),
+    tabsH: Math.round(r(tabs).height), panesH: panes.clientHeight,
+    sideW: Math.round(r(side).width), sideTop: Math.round(r(side).top), sideBottom: Math.round(r(side).bottom),
+    footerH: Math.round(r(footer).height),
+    mapW: document.getElementById("map").clientWidth, mapH: document.getElementById("map").clientHeight,
+    clipped: [].slice.call(document.querySelectorAll(".side *, .topbar *")).filter(function(n){return n.clientWidth>0 && n.scrollWidth>n.clientWidth+1;}).length,
+    legendOk: document.querySelectorAll(".legend-row[data-layer]").length,
+    heroPts: document.querySelectorAll("#heroPoints .pt").length
+  };`;
+
+const results = [];
+const check = (l, c, d) => results.push(`${c ? "PASS" : "FAIL"}  ${l}${d ? "  → " + d : ""}`);
+
+const g1 = await evalJS(GEO);
+check("1680 宽：无横向溢出", g1.docScrollW <= g1.vw + 1, JSON.stringify({ docScrollW: g1.docScrollW, vw: g1.vw }));
+check("1680 宽：顶栏单行（高度 < 62）", g1.topbarH < 62, "topbarH=" + g1.topbarH);
+check("结论卡与页签不重叠（hero.bottom ≤ tabs.top）", g1.heroBottom <= g1.tabsTop + 1, `${g1.heroBottom} ≤ ${g1.tabsTop}`);
+check("结论卡可见（高度 ≥ 90）", g1.heroH >= 90, "heroH=" + g1.heroH);
+check("页签条可见", g1.tabsH > 20, "tabsH=" + g1.tabsH);
+check("卡片区可滚动高度充足（≥200）", g1.panesH >= 200, "panesH=" + g1.panesH);
+check("侧栏未溢出视口", g1.sideBottom <= g1.vh + 1, `${g1.sideBottom} ≤ ${g1.vh}`);
+check("地图区域尺寸合理", g1.mapW > 1100 && g1.mapH > 600, `map=${g1.mapW}x${g1.mapH}`);
+check("无文字被裁切（scrollWidth 溢出计数=0）", g1.clipped === 0, "clipped=" + g1.clipped);
+check("图例含 4 个可切换图层", g1.legendOk === 4, "rows=" + g1.legendOk);
+
+await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+await sleep(400);
+const g2 = await evalJS(GEO);
+check("1280 宽：无横向溢出", g2.docScrollW <= g2.vw + 1, JSON.stringify({ docScrollW: g2.docScrollW, vw: g2.vw }));
+check("1280 宽：顶栏保持单行（高度 < 62）", g2.topbarH < 62, "topbarH=" + g2.topbarH);
+check("1280 宽：结论卡仍可见且不重叠", g2.heroH >= 90 && g2.heroBottom <= g2.tabsTop + 1, `${g2.heroH} / ${g2.heroBottom} ≤ ${g2.tabsTop}`);
+check("1280 宽：无文字裁切", g2.clipped === 0, "clipped=" + g2.clipped);
+check("1280 宽：卡片区可滚动", g2.panesH >= 150, "panesH=" + g2.panesH);
+
+console.log(results.join("\n"));
+console.log("\nFAIL 总数 = " + results.filter((r) => r.indexOf("FAIL") === 0).length);
+ws.close(); child.kill(); process.exit(0);
