@@ -34,6 +34,7 @@ const DEMO_TODAY = "2024-08-05";      // 项目演示用的「今天」（与需
 const TODAY = AVAILABLE_DATES.indexOf(DEMO_TODAY) >= 0 ? DEMO_TODAY : OFData.firstDate();
 const DATE_MIN = OFData.firstDate();
 const DATE_MAX = OFData.lastDate();
+const DEFAULT_ZOOM = 0.8;              // 默认视野：略微拉远，海岸线/陆地能进画面
 
 // ==================== 状态（唯一真源） ====================
 const state = {
@@ -45,7 +46,7 @@ const state = {
   probe: null,                             // 钉住的地图点 {lon, lat}
   tab: "now",
   climMode: "day",                         // 往年同期页：day（这一天）
-  zoom: 1,
+  zoom: DEFAULT_ZOOM,                      // 默认略微拉远，让海岸线/陆地进画面
   view: { cx: 500, cy: 320 },              // 视窗中心（SVG 坐标）：滚轮缩放/拖拽平移用
 };
 
@@ -181,7 +182,7 @@ function scoreBreakdown(fronts, inRange, cell, quality) {
 
   const objScore = Math.min(inRangeObjects.length, 3) * 12;
   s += objScore;
-  items.push(["找鱼范围内有 " + inRangeObjects.length + " 个锋面对象（每个 +12，最多算 3 个）", objScore]);
+  items.push(["范围内锋面对象 " + inRangeObjects.length + " 个", objScore]);
 
   // 冷暖侧照实展示（数据里的 -20 / 20 编码原样用），但本期没有目标鱼种，侧别不参与评分
   const side = cell ? cell.side : null;
@@ -189,19 +190,17 @@ function scoreBreakdown(fronts, inRange, cell, quality) {
   const nearest = fronts[0] || null;
   const nearScore = !nearest ? 0 : nearest.km <= 10 ? 8 : nearest.km <= 20 ? 4 : 0;
   s += nearScore;
-  items.push(["最近的锋面 " + (nearest ? nearest.km.toFixed(1) + " km" : "—") + "（≤10 km +8，≤20 km +4）", nearScore]);
+  items.push(["最近锋面 " + (nearest ? nearest.km.toFixed(1) + " km" : "—"), nearScore]);
 
   const longestInRange = inRangeObjects.reduce((m, f) => Math.max(m, f.lengthKm || 0), 0);
   const lenScore = longestInRange >= 100 ? 8 : longestInRange >= 50 ? 4 : 0;
   s += lenScore;
-  items.push(["范围内最长的锋面对象 " + (longestInRange ? Math.round(longestInRange) + " km" : "—")
-    + "（≥100 km +8，≥50 km +4）", lenScore]);
+  items.push(["范围内最长对象 " + (longestInRange ? Math.round(longestInRange) + " km" : "—"), lenScore]);
 
   const coverage = quality ? 100 - quality.nodata_percent : null;
   const covScore = coverage === null ? 0 : coverage >= 85 ? 4 : coverage >= 70 ? 0 : -4;
   s += covScore;
-  items.push(["这天这片海的观测覆盖 " + (coverage === null ? "未知" : coverage.toFixed(1) + "%")
-    + "（≥85% +4，<70% −4）", covScore]);
+  items.push(["观测覆盖 " + (coverage === null ? "未知" : coverage.toFixed(1) + "%"), covScore]);
 
   return { score: clamp(Math.round(s), 5, 95), items, coverage, side, longestInRange };
 }
@@ -301,7 +300,7 @@ function drawProbeMark(svg) {
 // 底图：真实陆地 / 海岸线 / 等深线（Natural Earth 1:10m，公有领域）
 function drawBackground(svg) {
   const base = OFData.basemap;
-  el("rect", { x: -400, y: -400, width: 1800, height: 1440, fill: "#0d2135" }, svg);
+  el("rect", { x: -400, y: -400, width: 1800, height: 1440, fill: "#0d2135", "data-layer": "ocean" }, svg);
   if (!base) return;
   el("path", { d: chainLinesPath(base.layers.isobath200.chains), fill: "none",
     stroke: "rgba(120,190,215,0.42)", "stroke-width": 1, "stroke-dasharray": "7 5" }, svg);
@@ -375,14 +374,15 @@ function drawSst(svg, iso) {
   });
 }
 
-// 陆地画在数据层之上：海上的"没有观测"用斜线纹理，陆地保持实色
-// （数据里的 -128 同时包含陆地与云，之前直接铺灰会让陆地也变成"缺测"）
+// 陆地画在数据层之上：海上的"没有观测"用斜线纹理，陆地是实色块 + 亮海岸线
+// （数据里的 -128 同时包含陆地与云；陆地填充要明显浅于海面，否则等于看不见）
 function drawLand(svg) {
   const base = OFData.basemap;
   if (!base) return;
-  el("path", { d: chainsPath(base.layers.land.chains), fill: "#16283c", stroke: "none" }, svg);
-  el("path", { d: chainLinesPath(base.layers.coastline.chains), fill: "none",
-    stroke: "rgba(150,200,235,0.75)", "stroke-width": 1.3 }, svg);
+  el("path", { d: chainsPath(base.layers.land.chains), "data-layer": "land",
+    fill: "#3a5068", stroke: "none" }, svg);
+  el("path", { d: chainLinesPath(base.layers.coastline.chains), "data-layer": "coast",
+    fill: "none", stroke: "rgba(196,229,252,0.9)", "stroke-width": 1.4 }, svg);
 }
 
 // 海上没有观测的像元（云 / 未观测；数据里 -128 与陆地共用编码）
@@ -583,7 +583,7 @@ function frontTitle(entry) {
 
 function probeHTML(lon, lat) {
   const head = '<div class="mp-coord">' + fmtCoord(lon, lat) + "</div>";
-  const foot = '<div class="mp-foot">' + timeLabel() + " · 真实锋面数据（Zenodo 20356239）<br/>点一下钉住，Esc 取消</div>";
+  const foot = '<div class="mp-foot">' + timeLabel() + " · 锋面 Zenodo / 海温 NOAA<br/>点一下钉住，Esc 取消</div>";
   const st = dataStatus();
   if (!st.ok) return head + '<div class="mp-note">' + st.title + "，这个时段没有数据，不估数</div>" + foot;
 
@@ -603,22 +603,22 @@ function probeHTML(lon, lat) {
   const kind = cell.line ? "锋面线（编码 " + cell.code + "）" : cell.side ? cell.side : "无锋面";
   h += '<div class="mp-row"><span class="mp-k">数据里这一类</span><span class="mp-v">' + kind + "</span></div>";
   h += '<div class="mp-note">' + (cell.line
-    ? "编码 " + cell.code + " 是数据集自带的锋面线编码（-10 / 10 / 30），含义见「依据」"
-    : cell.side ? "冷侧 / 暖侧直接来自数据里的 -20 / 20 编码"
-      : "这个像元当天有观测，但没有锋面线，也不在冷暖侧") + "</div>";
+    ? "编码 " + cell.code + "，数据集自带的锋面线编码"
+    : cell.side ? "冷暖侧来自数据里的 −20 / 20 编码"
+      : "有观测，但没有锋面线，也不在冷暖侧") + "</div>";
 
   const km = distKm([state.lon, state.lat], [lon, lat]);
   const bearing = bearing16([state.lon, state.lat], [lon, lat]);
   h += '<div class="mp-row"><span class="mp-k">离你</span><span class="mp-v">' + km.toFixed(1) + " km · " + bearing + "</span></div>";
   h += '<div class="mp-note' + (km > state.range ? " mp-warn" : "") + '">' +
-    (km <= state.range ? "在你选的 " + state.range + " km 找鱼范围内" : "超出 " + state.range + " km 找鱼范围") + "</div>";
+    (km <= state.range ? "在 " + state.range + " km 范围内" : "超出 " + state.range + " km 范围") + "</div>";
 
   const nf = nearestFrontFrom(lon, lat);
   if (nf) {
     h += '<div class="mp-row"><span class="mp-k">最近的锋面</span><span class="mp-v">' + nf.km.toFixed(1) + " km · " + nf.bearing + "</span></div>";
     h += '<div class="mp-note">' + (nf.isObject
       ? "锋面对象 " + nf.id + " · 长 " + Math.round(nf.lengthKm) + " km"
-      : "未编号短段（长不足 " + shortMin + " km，不参与对象统计）") + "</div>";
+      : "未编号短段（< " + shortMin + " km）") + "</div>";
   }
 
   h += '<div class="mp-row"><span class="mp-k">你所在的侧别</span><span class="mp-v">' + (cell.side || "锋区外") + "</span></div>";
@@ -627,19 +627,19 @@ function probeHTML(lon, lat) {
   if (sstHere && sstHere.valueC !== null) {
     h += '<div class="mp-row"><span class="mp-k">海表温度</span><span class="mp-v">' +
       sstHere.valueC.toFixed(1) + " °C</span></div>";
-    h += '<div class="mp-note">NOAA GHRSST 融合海温（0.5 °C 分档；与锋面数据集不是同一产品，云下为分析值）</div>';
+    h += '<div class="mp-note">NOAA GHRSST · 0.5 °C 分档，与锋面不是同一产品</div>';
   } else if (sstHere && sstHere.inGrid) {
     h += '<div class="mp-row"><span class="mp-k">海表温度</span><span class="mp-v">这一格没有海温</span></div>';
-    h += '<div class="mp-note">该格在数据里不是有效海温（陆地 / 冰 / 缺测），不给数值</div>';
+    h += '<div class="mp-note">该格不是有效海温（陆地 / 冰 / 缺测）</div>';
   } else {
     h += '<div class="mp-row"><span class="mp-k">海表温度</span><span class="mp-v">这一天没导出</span></div>';
-    h += '<div class="mp-note">海温只导出了部分日期，缺的日期不给数值</div>';
+    h += '<div class="mp-note">海温只导出了部分日期</div>';
   }
   const spot = nearestSpotFrom(lon, lat);
   if (spot) {
     h += '<div class="mp-row"><span class="mp-k">值得去的水域</span><span class="mp-v">' +
       (spot.inside ? "就在 " + spot.id + " 里" : "距 " + spot.id + " " + spot.km.toFixed(1) + " km") + "</span></div>";
-    h += '<div class="mp-note">这一层是示例占位，还没有真实渔场数据（见「依据」）</div>';
+    h += '<div class="mp-note">示例占位，没有真实渔场数据</div>';
   }
   return h + foot;
 }
@@ -775,10 +775,10 @@ function renderHero() {
   v.className = "verdict " + verdict.cls;
 
   const t = heroTarget();
-  let line = "找 <b>" + state.range + " km</b> 内的锋面 · 数据把握 <b>" + snap.score + "%</b>。";
-  if (t) line += "先去 <b>" + t.bearing + " " + t.km.toFixed(1) + " km</b> 的" + t.label +
-    "（开船约 " + fmtHours(t.km) + " 小时）。";
-  else line += "这个范围里没找到像样的线索，可以把找鱼范围放大，或者换个日期。";
+  let line = state.range + " km 内 · 把握 <b>" + snap.score + "%</b>。";
+  if (t) line += "首选 <b>" + t.bearing + " " + t.km.toFixed(1) + " km</b> 的" + t.label +
+    "（约 " + fmtHours(t.km) + " 小时）。";
+  else line += "范围内没有线索，可以放大范围或换一天。";
   l.innerHTML = line;
 
   const picks = [];
@@ -794,8 +794,8 @@ function renderHero() {
     '<div class="pt"' + (p.type ? ' data-type="' + p.type + '" data-id="' + (p.id || "") + '"' : "") +
     '><span class="rk">' + p.rank + "</span>" +
     '<span class="grow"><b>' + p.bearing + " " + p.km.toFixed(1) + " km</b> · " + p.label +
-    "<small>" + p.note + " · 开船约 " + fmtHours(p.km) + " 小时 · 油约 " + fmtFuel(p.km) +
-    " L（怎么算的见「依据」）</small></span></div>").join("");
+    "<small>" + p.note + " · 约 " + fmtHours(p.km) + " 小时 · 油 " + fmtFuel(p.km) +
+    " L</small></span></div>").join("");
   pts.querySelectorAll(".pt[data-type]").forEach((node) =>
     node.addEventListener("click", () => toggleSelect(node.dataset.type, node.dataset.id)));
 
@@ -803,9 +803,9 @@ function renderHero() {
     snap.items.map((it) => '<div class="line"><span class="k">' + it[0] + "</span> → <b>" +
       (it[1] > 0 ? "+" : "") + it[1] + "</b></div>").join("") +
     '<div class="line"><span class="k">合计把握</span> → <b>' + snap.score + "%</b></div>" +
-    '<div class="line"><span class="k">数据来源</span> → 锋面：Zenodo 20356239（CC BY 4.0）0.05° 逐日；海温：NOAA GHRSST 融合海温 0.05° 逐日（与锋面不同源）</div>' +
-    '<div class="line"><span class="k">没算进去的</span> → 海温有真实数据但不参与把握；锋面强度、海况、预报、渔场都还没接</div>' +
-    '<div class="line"><span class="k">三档怎么分</span> → ≥70% 值得去；50–69% 可以看看；<50% 线索不足</div>';
+    '<div class="line"><span class="k">数据来源</span> → 锋面 Zenodo 20356239 · 海温 NOAA GHRSST</div>' +
+    '<div class="line"><span class="k">没算进去的</span> → 海温、强度、海况、预报、渔场都不打分</div>' +
+    '<div class="line"><span class="k">三档</span> → ≥70% 值得去 · 50–69% 可以看看 · <50% 线索不足</div>';
   syncSelect();
   renderPick();
 }
@@ -841,21 +841,21 @@ function renderNow() {
     (coverage === null ? "" : " · 观测覆盖 " + coverage.toFixed(1) + "%") +
     (anchorSst && anchorSst.valueC !== null ? " · 定位点海温 " + anchorSst.valueC.toFixed(1) + " °C" : "");
   $("nowMetrics").innerHTML =
-    metricCell("这一天找到的锋面对象", String(objects.length), "条") +
-    metricCell("最近的锋面", nearest ? nearest.km.toFixed(1) : "—", "km", "front",
+    metricCell("锋面对象", String(objects.length), "条") +
+    metricCell("最近锋面", nearest ? nearest.km.toFixed(1) : "—", "km", "front",
       nearest && nearest.isObject ? nearest.id : "") +
     metricCell("你落在", snap.side || "锋区外", "", "coldwarm") +
-    metricCell("数据把握", String(snap.score), "%");
+    metricCell("把握", String(snap.score), "%");
 
   // 海况：示例数据，不参与结论
   const sea = seaState(state.date);
   $("seaTag").textContent = "示例数据 · 不参与结论";
   $("seaTag").className = "tag warn";
   $("seaList").innerHTML =
-    '<div class="row"><span class="i">≈</span><span class="grow"><b>风力 ' + sea.wind + " 级</b> · 浪高 " + sea.wave +
-    " m · 涌浪 " + sea.swell + ' m<small>这几个数是示例值，还没有真实风浪数据源，只看量级</small></span></div>' +
-    '<div class="row"><span class="i">!</span><span class="grow"><b>出海安全请以官方海洋预报为准</b>' +
-    "<small>本期没有风浪数据，结论里也不含海况判断</small></span></div>";
+    '<div class="row"><span class="i">≈</span><span class="grow"><b>风力 ' + sea.wind + " 级 · 浪 " + sea.wave +
+    " m · 涌 " + sea.swell + ' m</b><small>示例值，没有风浪数据源</small></span></div>' +
+    '<div class="row"><span class="i">!</span><span class="grow"><b>出海安全以官方海洋预报为准</b>' +
+    "<small>本期结论不含海况判断</small></span></div>";
 
   const objectLines = snap.fronts.filter((f) => f.isObject);
   const inRangeObjects = objectLines.filter((f) => f.inRange);
@@ -865,7 +865,7 @@ function renderNow() {
   $("nowFronts").innerHTML = objectLines.map((f) =>
     '<div class="row clickable" data-type="front" data-id="' + f.id + '"><span class="i">' + (f.inRange ? "✓" : "·") + "</span>" +
     '<span class="grow"><b>' + f.id + " · 长 " + Math.round(f.lengthKm) + " km</b> " + f.bearing + " " + f.km.toFixed(1) + " km" +
-    "<small>" + (f.inRange ? "在找鱼范围内" : "超出找鱼范围，只作参考") + " · " + f.pixelCount + " 个像元 · 点一下在地图上高亮</small></span>" +
+    "<small>" + (f.inRange ? "范围内" : "范围外") + " · " + f.pixelCount + " 像元 · 点一下高亮</small></span>" +
     '<span class="tag ' + (f.inRange ? "ok" : "plain") + ' side-tag">' + (f.inRange ? "范围内" : "范围外") + "</span></div>"
   ).join("");
   $("nowFronts").querySelectorAll(".clickable").forEach((node) =>
@@ -875,9 +875,9 @@ function renderNow() {
   if (!inRangeObjects.length) {
     e.hidden = false;
     e.innerHTML = "<b>" + state.range + " km 内没有编号的锋面对象</b><br/>" +
-      (nearest ? "先给你最近的参考：" + (nearest.isObject ? nearest.id : "未编号短段") +
-        "（" + nearest.bearing + " " + nearest.km.toFixed(1) + " km）" : "这天这片海没找到锋面线") +
-      "；可以把找鱼范围放大，或者换个日期。";
+      (nearest ? "最近的参考：" + (nearest.isObject ? nearest.id : "未编号短段") +
+        "（" + nearest.bearing + " " + nearest.km.toFixed(1) + " km）" : "这天没找到锋面线") +
+      "；可以放大范围或换一天。";
   } else {
     e.hidden = true;
   }
@@ -895,12 +895,12 @@ function renderFuture() {
   $("futureBestTag").textContent = "—";
   $("futureBars").innerHTML = "";
   $("futureList").innerHTML =
-    '<div class="row"><span class="i">1</span><span class="grow"><b>目前没有可用的锋面预报数据</b>' +
-    "<small>现在用的是观测回算数据集（到 2024 年为止），它回答的是「那天实际什么样」，不是「明天会怎样」</small></span></div>" +
-    '<div class="row"><span class="i">2</span><span class="grow"><b>所以这一页不给未来天数、不给未来把握</b>' +
-    "<small>以前这里按「每天衰减 6%」推过数字，那是编的，已经撤掉</small></span></div>" +
-    '<div class="row"><span class="i">3</span><span class="grow"><b>要接预报，先补两样东西</b>' +
-    "<small>更多日期的锋面样本（做持续性基线：今天有锋面→明天还有的概率），以及海温/流场等预报输入场</small></span></div>";
+    '<div class="row"><span class="i">1</span><span class="grow"><b>没有可用的锋面预报数据</b>' +
+    "<small>手上是 1982—2024 的观测回算，回答「那天实际什么样」，不是「明天会怎样」</small></span></div>" +
+    '<div class="row"><span class="i">2</span><span class="grow"><b>所以这里不给未来把握</b>' +
+    "<small>以前按「每天衰减 6%」推过数字，那是编的，已经撤掉</small></span></div>" +
+    '<div class="row"><span class="i">3</span><span class="grow"><b>要接预报，先补两样</b>' +
+    "<small>更多日期的样本（做持续性基线）和预报输入场（海温 / 流场）</small></span></div>";
   // 已导出的观测日期：默认给「当前出海日之后」的 14 天，其余用汇总行说明（62 天一股脑列出来没法看）
   const upcoming = AVAILABLE_DATES.filter((d) => d > state.date);
   const shown = upcoming.slice(0, 14);
@@ -935,15 +935,14 @@ function renderClim() {
   if (!clim) {
     hint.textContent = "统计未导出"; hint.className = "tag warn";
     bars.innerHTML = ""; years.innerHTML = "";
-    stat.innerHTML = "<b>往年同期统计还没生成</b><br/>跑一次 <code>export_prototype_data.py --mode clim</code> 之后，这里会是真实的多年度对比。";
+    stat.innerHTML = "<b>统计还没生成</b><br/>跑一次 <code>export_prototype_data.py --mode clim</code>。";
     return;
   }
 
   if (mode === "month") {
     hint.textContent = "样本不足"; hint.className = "tag warn";
     bars.innerHTML = ""; years.innerHTML = "";
-    stat.innerHTML = "<b>整月统计还没法做</b><br/>现在只导出了每年 8 月 5—7 日三天，算不出「整月」；" +
-      "数据集本身是逐日的，按月补齐日期后这里就能给整月口径。";
+    stat.innerHTML = "<b>整月算不了</b><br/>样本只有每年 8 月 5—7 日，算不出「整月」；按月补日期后才有。";
     return;
   }
 
@@ -965,8 +964,8 @@ function renderClim() {
       yearRows.map((y, i) => y + " " + Math.round(probs[i] * 100) + "%").join(" · ");
     hint.textContent = widestKey + " km 内 · 每月取样"; hint.className = "tag";
     years.innerHTML =
-      '<div class="line"><span class="k">为什么看 ' + widestKey + " km</span> → 锋面在海上分布很散，只盯 " + state.range +
-      " km 会经常是 0%；放大到 " + widestKey + " km 才能看出年份之间的差别</div>" +
+      '<div class="line"><span class="k">为什么看 ' + widestKey + " km</span> → 锋面在海上很散，只盯 " + state.range +
+      " km 常是 0%</div>" +
       '<div class="line"><span class="k">口径</span> → ' + clim.method + "</div>" +
       '<div class="line"><span class="k">样本</span> → ' + clim.sample_note + "</div>" +
       yearRows.map((y) => {
@@ -1008,9 +1007,9 @@ function renderClim() {
     entry.years[y][key].status === "ok").length;
   const climRate = otherValid ? otherPresent / otherValid : null;
   const mine = entry.years[thisYear] && entry.years[thisYear][key] ? entry.years[thisYear][key] : null;
-  stat.innerHTML = "<b>" + mdText(state.date) + "</b> · 往年（" + item.days + " 个年份样本）在 " + state.range +
+  stat.innerHTML = "<b>" + mdText(state.date) + "</b> · 往年 " + item.days + " 个年份样本里，" + state.range +
     " km 内出现锋面的比例 <b>" + Math.round((item.probability || 0) * 100) + "%</b>（" + item.present_days + "/" + item.days +
-    " 天有锋面）";
+    " 天）";
   const diff = mine && mine.status === "ok" && climRate !== null ? (mine.front_present ? 1 : 0) - climRate : null;
   const level = diff === null ? "没有样本" : diff > 0.2 ? "比常年活跃" : diff < -0.2 ? "比常年弱" : "和常年差不多";
   hint.textContent = "这一天 · " + item.days + " 年样本"; hint.className = "tag " + (diff === null ? "" : diff > 0.2 ? "ok" : diff < -0.2 ? "warm" : "ok");
@@ -1019,15 +1018,14 @@ function renderClim() {
   years.innerHTML =
     '<div class="line"><span class="k">' + widestKey + " km 内</span> → <b>" +
     Math.round((wide ? wide.probability || 0 : 0) * 100) + "%</b> 的日子有锋面（" +
-    (wide ? wide.present_days + "/" + wide.days : "—") + " 天）· 锋面在海上分布很散，看大范围更能看出年份差别</div>" +
+    (wide ? wide.present_days + "/" + wide.days : "—") + " 天）</div>" +
     '<div class="line"><span class="k">其他年份（' + otherValid + " 年有数据）</span> → <b>" +
     (climRate === null ? "—" : Math.round(climRate * 100) + "%") + "</b> 的日子有锋面</div>" +
     '<div class="line"><span class="k">' + thisYear + " 年这一天</span> → <b>" +
     (mine ? (mine.front_present ? "有锋面" : "无锋面") + "（线像元 " + mine.line_cells + "）" : "缺测") + "</b></div>" +
-    '<div class="line"><span class="k">和常年比</span> → ' + level + "</div>" +
-    '<div class="line"><span class="k">对你的意义</span> → ' + (level === "比常年活跃"
-      ? "往年这时候也容易出锋面，跟常年经验走问题不大" : level === "比常年弱"
-      ? "往年这时候出锋面的机会多一些，别只靠往年经验，以当天观测为准" : "和常年差不多，往年这段时间的作业经验可以照用") + "</div>" +
+    '<div class="line"><span class="k">和常年比</span> → ' + level + "，" + (level === "比常年活跃"
+      ? "往年这时候也常出锋面" : level === "比常年弱"
+      ? "往年会更多，别只看往年" : "往年经验可以照用") + "</div>" +
     '<div class="line"><span class="k">口径</span> → ' + clim.method + "（" + clim.sample_note + "）</div>";
 }
 
@@ -1050,37 +1048,36 @@ function renderBasis() {
   const st = a.status;
   const statusText = (key, real, missing) => (st[key] === "real" ? real : missing);
   $("basisData").innerHTML = tableRows([
-    ["锋面位置", a.nameZh + " · " + a.resolutionDeg + "° 逐日 · " + a.license + " <em>Zenodo " + a.doi + "</em>"],
-    ["冷暖侧", statusText("cold_side", "数据里的 -20 / 20 编码，原样使用", "未接入")],
-    ["锋面对象编号", "本地计算：锋面线像元做连通域 → 取直径路径当中心线 → 按公里抽稀；编号只在本系统内有效"],
-    ["底图", "Natural Earth 1:10m 陆地 / 海岸线 / 200 m·1000 m 等深线（" + a.basemap.source + "）"],
-    ["已导出的观测日期", a.days[0] + " ~ " + a.days[a.days.length - 1] + "（共 " + a.days.length + " 天，逐日）"],
-    ["往年同期样本", a.clim.ready ? a.clim.years.join("、") + " 年 · " + a.clim.sample_note : "未导出"],
+    ["锋面位置", "Zenodo " + a.doi + " · " + a.resolutionDeg + "° 逐日 · " + a.license],
     ["海表温度", a.sst && a.sst.ready
-      ? a.sst.product.name_zh + " · " + a.sst.product.resolution_deg + "° 逐日 · 按 " + a.sst.bin_c +
-        " °C 分档（已导出 " + a.sst.days.length + " 天） · " + a.sst.product.license +
-        " <em>与锋面数据集不同源 · " + a.sst.product.id + "</em>"
+      ? "NOAA GHRSST · " + a.sst.product.resolution_deg + "° 逐日 · 按 " + a.sst.bin_c +
+        " °C 分档（" + a.sst.days.length + " 天）"
       : "未接入"],
-    ["锋面强度", "未接入（数据集里的 frontal_intensity 尚未下载）"],
-    ["海况（风 / 浪 / 涌）", "示例值，没有真实数据源；结论里不含海况判断"],
+    ["冷暖侧", statusText("cold_side", "−20 / 20 编码，原样用", "未接入")],
+    ["对象编号", "本系统内编号（连通域 → 中心线 → 抽稀），不是数据集自带编号"],
+    ["底图", "Natural Earth 1:10m 陆地 / 海岸线 / 等深线"],
+    ["观测日期", a.days[0] + " ~ " + a.days[a.days.length - 1] + "（" + a.days.length + " 天）"],
+    ["往年同期", a.clim.ready ? a.clim.years.join("、") + " 年 · " + a.clim.sample_note : "未导出"],
+    ["锋面强度", "未接入"],
+    ["海况", "示例值，不参与结论"],
     ["预报", "未接入"],
-    ["渔场分布", "示例占位（地图上的椭圆），没有真实渔场 / 船位数据"],
-    ["数据生成", a.generatedAt + " · 由脚本生成，页面不手改"],
+    ["渔场", "示例占位，没有船位数据"],
+    ["数据生成", a.generatedAt],
   ]);
   $("basisRules").innerHTML = listRows([
-    ["1", "<b>找鱼范围</b>：以定位点为圆心，" + a.region.ranges_km.join(" / ") + " km 半径内命中才算数；范围内没有编号对象时先给最近的一个，并写明「先给最近的」"],
-    ["2", "<b>数据把握</b>：起评分 30；范围内每个锋面对象 +12（最多算 3 个）；最近锋面 ≤10 km +8、≤20 km +4；范围内最长对象 ≥100 km +8、≥50 km +4；观测覆盖 ≥85% +4、<70% −4。本期没有目标鱼种，冷暖侧只展示、不加分"],
-    ["3", "<b>三档结论</b>：≥70% 值得去；50–69% 可以看看；<50% 线索不足。海况没数据，所以不拿它下结论"],
-    ["4", "<b>往年同期口径</b>：半径内锋面线像元数 > 0 记为 front_present = true；比例 = 有锋面的天数 ÷ 有效天数（需求 §5.2）"],
-    ["5", "<b>开船时间和油</b>：按 8 节航速（" + CRUISE_KMH + " km/h）、" + FUEL_L_PER_KM + " L/km 估，只看量级"],
-    ["6", "<b>对象中心线</b>：连通域直径路径 + Douglas-Peucker 抽稀（容差 6 km），对象最短 " +
+    ["1", "<b>范围</b>：以定位点为圆心，" + a.region.ranges_km.join(" / ") + " km 内命中才算；范围内没有编号对象时给最近的一个并注明"],
+    ["2", "<b>把握</b>：起评分 30；范围内对象 +12（最多 3 个）；最近锋面 ≤10 km +8、≤20 km +4；最长对象 ≥100 km +8、≥50 km +4；观测覆盖 ≥85% +4、<70% −4；冷暖侧只展示、不加分"],
+    ["3", "<b>三档</b>：≥70% 值得去 · 50–69% 可以看看 · <50% 线索不足（海况没数据，不参与）"],
+    ["4", "<b>往年同期</b>：半径内锋面线像元数 > 0 记 front_present = true；比例 = 有锋面的天数 ÷ 有效天数"],
+    ["5", "<b>航时 / 油耗</b>：按 8 节（" + CRUISE_KMH + " km/h）、" + FUEL_L_PER_KM + " L/km 估，只看量级"],
+    ["6", "<b>中心线</b>：连通域直径路径 + 抽稀（6 km），对象 ≥ " +
       (OFData.quality(a.days[a.days.length - 1]) ? OFData.quality(a.days[a.days.length - 1]).object_min_length_km : 20) + " km 才编号"],
   ]);
   $("basisLimits").innerHTML = listRows(
     a.knownIssues.map((text) => ["!", text]).concat([
-      ["!", "海表温度来自 NOAA GHRSST（与锋面数据集用的 ESA CCI/C3S 不是同一产品）；融合产品本身无缝，云下是分析值；页面按 0.5 °C 分档显示，温度不参与把握评分"],
-      ["!", "海况、预报都没有真实数据，本页所有结论只由锋面数据算出来"],
-      ["!", "底图是 Natural Earth 1:10m（公有领域），精度约公里级；国内正式发布需换成带审图号的合规底图"],
+      ["!", "海表温度是 NOAA GHRSST，与锋面数据集（ESA CCI/C3S）不是同一产品；按 0.5 °C 分档，不参与评分"],
+      ["!", "海况、预报没有真实数据，本页结论只由锋面数据算出"],
+      ["!", "底图 Natural Earth 1:10m（公有领域），公里级精度；国内正式发布要换带审图号的合规底图"],
     ]));
 }
 
@@ -1172,7 +1169,7 @@ function updateScaleBar() {
 function zoomAt(clientX, clientY, factor) {
   const svg = $("mapSvg"), rect = svg.getBoundingClientRect();
   const target = geoOfScreen(clientX, clientY);
-  const next = clamp(state.zoom * factor, 1, 8);
+  const next = clamp(state.zoom * factor, 0.6, 8);
   if (next === state.zoom) return;
   state.zoom = next;
   applyZoom(false);
@@ -1310,7 +1307,7 @@ function bind() {
   const mapCenter = () => { const r = $("map").getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; };
   $("zoomIn").addEventListener("click", () => { const c = mapCenter(); zoomAt(c[0], c[1], 1.25); });
   $("zoomOut").addEventListener("click", () => { const c = mapCenter(); zoomAt(c[0], c[1], 1 / 1.25); });
-  $("recenter").addEventListener("click", () => centerOn(state.lon, state.lat, 1));
+  $("recenter").addEventListener("click", () => centerOn(state.lon, state.lat, DEFAULT_ZOOM));
 
   // 图层开关（图例）
   document.querySelectorAll(".legend-row[data-layer]").forEach((row) => {
@@ -1346,4 +1343,5 @@ function bind() {
 // ==================== 启动 ====================
 bind();
 refresh();
+applyZoom(false);      // 按 state.zoom 设定初始视野（默认略微拉远，海岸线在画面内）
 switchTab("now");

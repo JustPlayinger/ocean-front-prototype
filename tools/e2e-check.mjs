@@ -98,7 +98,10 @@ const boot = await evalJS(`var m = OFData.meta, days = OFData.availableDates();
   return { hasAdapter: typeof OFData === "object", doi: m.product.doi, license: m.product.license,
     days: days, status: m.status, grid: OFData.grid(days[0]),
     input: { value: document.getElementById("timeDate").value, min: document.getElementById("timeDate").min, max: document.getElementById("timeDate").max },
-    paths: { coast: document.querySelectorAll('#mapSvg path[stroke*="150,200,235"]').length,
+    paths: { coast: document.querySelectorAll('#mapSvg path[data-layer="coast"]').length,
+      land: document.querySelectorAll('#mapSvg path[data-layer="land"]').length,
+      landFill: (document.querySelector('#mapSvg path[data-layer="land"]') || { getAttribute: function () { return null; } }).getAttribute("fill"),
+      oceanFill: (document.querySelector('#mapSvg rect[data-layer="ocean"]') || { getAttribute: function () { return null; } }).getAttribute("fill"),
       cold: document.querySelectorAll('#mapSvg path[data-layer="cold"]').length,
       warm: document.querySelectorAll('#mapSvg path[data-layer="warm"]').length,
       band: document.querySelectorAll('#mapSvg path[data-layer="band"]').length,
@@ -120,6 +123,35 @@ check("地图用的是真实底图（海岸线 / 冷暖侧 / 锋面带 / 缺测�
   boot.paths.coast === 1 && boot.paths.cold === 1 && boot.paths.warm === 1 && boot.paths.band === 1 && boot.paths.nodata === 1,
   JSON.stringify(boot.paths));
 check("地图有真实经纬网（0.05° 数据窗口上的整数度格网）", boot.paths.grat >= 4, boot.paths.grat + " 条格网线");
+check("陆地是实色块且与海面底色不同（不是同色看不见）",
+  boot.paths.land === 1 && boot.paths.landFill && boot.paths.landFill !== boot.paths.oceanFill,
+  "陆地 " + boot.paths.landFill + " vs 海面 " + boot.paths.oceanFill);
+
+// 光栅化后数像素：陆地必须真的占了画面（防止"画了但看不见"）
+const raster = await evalJS(`
+  var src = document.getElementById("mapSvg").cloneNode(true);
+  src.setAttribute("width", 1000); src.setAttribute("height", 640);
+  var xml = new XMLSerializer().serializeToString(src);
+  var url = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(xml)));
+  return new Promise(function (resolve) {
+    var img = new Image();
+    img.onload = function () {
+      var c = document.createElement("canvas"); c.width = 1000; c.height = 640;
+      var ctx = c.getContext("2d"); ctx.drawImage(img, 0, 0, 1000, 640);
+      var d = ctx.getImageData(0, 0, 1000, 640).data;
+      var land = 0, ocean = 0;
+      for (var i = 0; i < d.length; i += 8) {
+        if (d[i] === 58 && d[i + 1] === 80 && d[i + 2] === 104) land++;
+        if (d[i] === 13 && d[i + 1] === 33 && d[i + 2] === 53) ocean++;
+      }
+      resolve({ imgOk: img.width + "x" + img.height, land: land * 2, ocean: ocean * 2 });
+    };
+    img.onerror = function () { resolve({ imgError: true }); };
+    img.src = url;
+  });`);
+check("光栅化后陆地像素确实占了画面（默认视野里能看到海岸线与陆地）",
+  raster.imgOk === "1000x640" && raster.land > 20000,
+  "陆地 " + raster.land + " px · " + JSON.stringify(raster));
 check("地图上的锋面对象线与数据文件一致（没有手写几何）",
   boot.paths.objectLines === boot.dataObjects, boot.paths.objectLines + " = " + boot.dataObjects);
 await shot("shot-1-now.png");
@@ -422,9 +454,9 @@ check("缩放改变视窗，比例尺跟着换算（图上 50 km 换算成像素
 check("经纬网标出真实度数（°E / °N），不是等分格网",
   zoom.gratLines >= 4 && zoom.gratTexts.some((t) => /°E$/.test(t)) && zoom.gratTexts.some((t) => /°N$/.test(t)),
   zoom.gratLines + " 条 · " + zoom.gratTexts.slice(0, 4).join(" / "));
-check("「回到定位点」复位视窗与缩放",
-  zoom.back.w === 1000 && zoom.back.x === 0 && zoom.back.y === 0,
-  JSON.stringify(zoom.back));
+check("「回到定位点」复位视窗与缩放（回到初始默认视野）",
+  zoom.back.w === zoom.before.w && zoom.back.x === zoom.before.x && zoom.back.y === zoom.before.y,
+  JSON.stringify(zoom.back) + " = " + JSON.stringify(zoom.before));
 
 // ===== 12) 目标鱼种已下线（本期不做）：没有第二套偏好真源 =====
 const noSpecies = await evalJS(`return {
