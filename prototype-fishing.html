@@ -259,14 +259,71 @@
   .footer a, .footer button.link { color: var(--accent); text-decoration: none; background: none; border: 0; cursor: pointer; font-size: 11.5px; font-family: inherit; }
   .kbd { font-size: 11px; color: var(--text-dim); }
 
+  /* ============ 顶栏分组序号与分隔：让"先做什么"看得见 ============ */
+  .ctx { position: relative; }
+  .ctx .num {
+    width: 15px; height: 15px; border-radius: 50%; flex: none; display: grid; place-items: center;
+    font-size: 10px; font-style: normal; font-weight: 700; color: var(--accent);
+    background: rgba(77,212,198,.12); border: 1px solid rgba(77,212,198,.35);
+  }
+  .topbar > .ctx + .ctx::before {
+    content: ""; position: absolute; left: -6px; top: 22%; height: 56%;
+    width: 1px; background: var(--line-strong);
+  }
+
+  /* ============ 图例分组：开关是开关，色带是色带 ============ */
+  .legend-row.sub { padding-left: 15px; }
+  .legend-band { display: flex; align-items: center; gap: 7px; margin-top: 7px; }
+  .legend-note {
+    margin-top: 7px; padding-top: 7px; border-top: 1px dashed rgba(148,190,226,.16);
+    font-size: 11px; line-height: 1.5;
+  }
+  .hint { margin-top: 8px; color: var(--text-dim); font-size: 11.5px; line-height: 1.5; }
+
+  /* ============ 鼠标指向地图任意点，看那里的数据 ============ */
+  .map-probe {
+    position: absolute; left: 0; top: 0; z-index: 12; width: 238px; pointer-events: none;
+    background: rgba(9,20,32,.96); border: 1px solid var(--line-strong); border-radius: 9px;
+    padding: 9px 10px; font-size: 12px; box-shadow: 0 8px 22px rgba(0,0,0,.35);
+  }
+  .map-probe .mp-coord { font-weight: 700; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .map-probe .mp-row { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; }
+  .map-probe .mp-k { color: var(--text-dim); white-space: nowrap; }
+  .map-probe .mp-v { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+  .map-probe .mp-note { color: var(--text-dim); font-size: 11px; margin-top: 1px; line-height: 1.45; }
+  .map-probe .mp-foot {
+    margin-top: 7px; padding-top: 6px; border-top: 1px dashed rgba(148,190,226,.16);
+    color: var(--text-dim); font-size: 11px;
+  }
+  .map-probe .mp-warn { color: var(--warn); }
+
+  /* ============ 选中回执卡：点了谁、怎么取消，一眼看到 ============ */
+  .map-pick {
+    position: absolute; right: 64px; top: 14px; z-index: 12; width: 228px;
+    background: rgba(9,20,32,.96); border: 1px solid rgba(77,212,198,.5); border-radius: 9px;
+    padding: 8px 10px; font-size: 12px; box-shadow: 0 8px 22px rgba(0,0,0,.35);
+  }
+  .map-pick .pk-head { display: flex; align-items: center; gap: 6px; }
+  .map-pick .pk-head b { flex: 1; font-size: 12.5px; color: var(--accent); }
+  .map-pick .pk-x {
+    border: 0; background: rgba(148,190,226,.1); color: var(--text); width: 20px; height: 20px;
+    border-radius: 6px; cursor: pointer; font-size: 11px; line-height: 1; flex: none;
+  }
+  .map-pick .pk-x:hover { background: rgba(255,143,107,.25); }
+  .map-pick .pk-body { margin-top: 6px; color: var(--text-dim); line-height: 1.55; }
+  .map-pick .pk-body b { color: var(--text); }
+
   /* 窄屏（≤1440）压缩上下文条，保持单行不换行 */
   @media (max-width: 1440px) {
     .topbar { gap: 8px; padding: 9px 12px; }
     .brand small { display: none; }
     .ctx input#locInput { width: 104px; }
     .ctx { padding: 3px 6px 3px 8px; }
+    .ctx-lab { font-size: 10.5px; }
+    .ctx .num { width: 14px; height: 14px; font-size: 9.5px; }
     .seg button { padding: 5px 9px; }
     .timebar .step { width: 24px; height: 24px; }
+    .legend-note { display: none; }
   }
 </style>
 </head>
@@ -283,13 +340,13 @@
     </div>
 
     <div class="ctx">
-      <span class="ctx-lab">定位</span>
+      <i class="num">1</i><span class="ctx-lab">从哪出发</span>
       <input id="locInput" placeholder="124.50°E, 30.20°N" value="124.50°E, 30.20°N" />
       <button class="go" id="locateBtn">定位</button>
     </div>
 
     <div class="ctx">
-      <span class="ctx-lab">作业半径</span>
+      <i class="num">2</i><span class="ctx-lab">找多远</span>
       <div class="seg seg-sm" id="rangeSeg">
         <button data-range="10">10 km</button>
         <button data-range="20" class="active">20 km</button>
@@ -298,20 +355,15 @@
     </div>
 
     <div class="ctx">
-      <span class="ctx-lab">目标鱼种</span>
+      <i class="num">3</i><span class="ctx-lab">找什么鱼</span>
       <select id="speciesSel"></select>
     </div>
 
     <div class="ctx timebar">
-      <span class="ctx-lab" id="timeLab">时次</span>
-      <button class="step" id="datePrev" title="前一时刻">◀</button>
-      <input type="date" id="timeDate" value="2024-08-05" />
-      <button class="step" id="dateNext" title="后一时刻">▶</button>
-      <div class="seg seg-sm" id="familySeg">
-        <button data-family="obs" class="active">观测</button>
-        <button data-family="fcst">预报</button>
-        <button data-family="clim">气候</button>
-      </div>
+      <i class="num">4</i><span class="ctx-lab">出海日</span>
+      <button class="step" id="datePrev" title="前一天">◀</button>
+      <input type="date" id="timeDate" value="2024-08-05" min="2024-06-01" max="2024-08-11" />
+      <button class="step" id="dateNext" title="后一天">▶</button>
     </div>
   </header>
 
@@ -325,18 +377,24 @@
         <button class="ctrl" title="回到定位点" id="recenter">◎</button>
       </div>
       <div class="map-legend">
-        <h4>图层（点击开关）</h4>
-        <div class="legend-row" data-layer="sst"><span class="swatch sst"></span> 海表温度 SST</div>
+        <h4>图层</h4>
+        <div class="legend-row" data-layer="sst"><span class="swatch sst"></span> 海表温度（底图）</div>
         <div class="legend-row" data-layer="front"><span class="swatch front"></span> 锋面线</div>
-        <div class="legend-row" data-layer="coldwarm"><span class="swatch cold"></span><span class="swatch warm"></span> 冷侧 / 暖侧</div>
-        <div class="legend-row" data-layer="fishing"><span class="swatch fishing"></span> 渔场高概率区</div>
-        <div class="legend-row static">
+        <div class="legend-row sub" data-layer="coldwarm"><span class="swatch cold"></span><span class="swatch warm"></span> 冷侧 / 暖侧</div>
+        <div class="legend-row" data-layer="fishing"><span class="swatch fishing"></span> 值得去的水域</div>
+        <div class="legend-band">
           <span class="kbd">22°C</span><span class="gradbar"></span><span class="kbd">33°C</span>
         </div>
+        <div class="legend-note">把鼠标放到地图上任意一点，能看到那里的水温、离你多远、最近的锋面有多远</div>
       </div>
       <div class="map-empty" id="mapEmpty" hidden>
         <b id="mapEmptyTitle">该时次无数据</b>
         <small id="mapEmptyDesc"></small>
+      </div>
+      <div class="map-probe" id="mapProbe" hidden></div>
+      <div class="map-pick" id="mapPick" hidden>
+        <div class="pk-head"><b id="pickName">—</b><button class="pk-x" id="pickClose" title="取消选中">✕</button></div>
+        <div class="pk-body" id="pickBody"></div>
       </div>
       <div class="toast" id="toast"><b id="toastLoc"></b></div>
     </section>
@@ -352,7 +410,7 @@
         <p class="hero-line" id="heroLine"></p>
         <div class="hero-points" id="heroPoints"></div>
         <details class="why" id="heroWhy">
-          <summary>依据与判定规则</summary>
+          <summary>为什么这么判断</summary>
           <div class="why-body" id="heroWhyBody"></div>
         </details>
       </section>
@@ -362,7 +420,7 @@
         <button class="primary active" data-pane="now" role="tab" aria-selected="true"><span class="dot" style="background:var(--accent)"></span>现在</button>
         <button class="primary" data-pane="future" role="tab" aria-selected="false"><span class="dot" style="background:var(--accent-2)"></span>未来</button>
         <span class="gap"></span>
-        <button class="secondary" data-pane="clim" role="tab" aria-selected="false">规律</button>
+        <button class="secondary" data-pane="clim" role="tab" aria-selected="false">往年同期</button>
         <button class="secondary" data-pane="basis" role="tab" aria-selected="false">依据</button>
       </nav>
 
@@ -370,15 +428,15 @@
         <!-- 现在 -->
         <section class="pane active" id="pane-now">
           <div class="card">
-            <h3>关键指标 <span class="tag ok" id="nowScopeTag">—</span></h3>
+            <h3>眼下情况 <span class="tag ok" id="nowScopeTag">—</span></h3>
             <div class="metric" id="nowMetrics"></div>
           </div>
           <div class="card">
-            <h3>海况与适航 <span class="tag" id="seaTag">—</span></h3>
+            <h3>天气与海况 <span class="tag" id="seaTag">—</span></h3>
             <div class="list" id="seaList"></div>
           </div>
           <div class="card">
-            <h3>范围内锋面 <span class="tag plain" id="nowFrontTag">—</span></h3>
+            <h3>找鱼范围内的锋面 <span class="tag plain" id="nowFrontTag">—</span></h3>
             <div class="list" id="nowFronts"></div>
             <div class="empty" id="nowEmpty" hidden></div>
           </div>
@@ -387,51 +445,47 @@
         <!-- 未来 -->
         <section class="pane" id="pane-future">
           <div class="card">
-            <h3>未来可能度 <span class="tag plain" id="futureTag">1 / 3 / 7 天</span></h3>
+            <h3>未来这几天，去这里的把握 <span class="tag plain" id="futureTag">1 / 3 / 7 天</span></h3>
             <div class="list" id="futureList"></div>
           </div>
           <div class="card">
-            <h3>逐日窗口 <span class="tag ok" id="futureBestTag">—</span></h3>
+            <h3>一天一天看 <span class="tag ok" id="futureBestTag">—</span></h3>
             <div class="bars" id="futureBars"></div>
             <div class="list" id="futureDays"></div>
           </div>
         </section>
 
-        <!-- 规律（支撑层） -->
+        <!-- 往年同期（支撑层） -->
         <section class="pane" id="pane-clim">
           <div class="card">
-            <h3>锋面出现率 <span class="tag ok" id="climHint">—</span></h3>
+            <h3>往年这个时候，有锋面的天数占比 <span class="tag ok" id="climHint">—</span></h3>
             <div class="seg seg-sm" id="climPeriod">
-              <button data-period="day">按日</button>
-              <button data-period="month" class="active">按月</button>
-              <button data-period="year">按年</button>
-            </div>
-            <div class="anchor-row" id="climAnchor">
-              <input type="date" id="climDate" value="2024-08-05" />
-              <input type="month" id="climMonth" value="2024-08" />
-              <input type="number" id="climYear" value="2024" min="2015" max="2030" />
+              <button data-period="day">这一天</button>
+              <button data-period="month" class="active">这个月</button>
+              <button data-period="year">这一年</button>
             </div>
             <div class="bars" id="climBars"></div>
             <div class="row" style="margin-top:9px"><span class="i">i</span><span class="grow" id="climStat"></span></div>
             <details class="why" id="climWhy">
-              <summary>多年同期与异常</summary>
+              <summary>和往年比，正常吗</summary>
               <div class="why-body" id="climYears"></div>
             </details>
+            <div class="hint">这里看的是"往年这时候"的规律，自动跟着顶栏「出海日」走，不用另外挑日期。</div>
           </div>
         </section>
 
         <!-- 依据（支撑层：原 AI 分析的可解释部分 + 数据口径） -->
         <section class="pane" id="pane-basis">
           <div class="card">
-            <h3>数据来源与时次</h3>
+            <h3>数据从哪来</h3>
             <div class="table" id="basisData"></div>
           </div>
           <div class="card">
-            <h3>判定规则与口径</h3>
+            <h3>怎么算的</h3>
             <div class="list" id="basisRules"></div>
           </div>
           <div class="card">
-            <h3>局限与待接入</h3>
+            <h3>现在还做不到的</h3>
             <div class="list" id="basisLimits"></div>
           </div>
         </section>
@@ -439,8 +493,8 @@
       </div>
 
       <footer class="footer">
-        <span>数据为演示占位 · 时次 <b id="dataStamp">—</b></span>
-        <button class="link" id="toBasis">口径与依据 ↗</button>
+        <span>示例数据 · <b id="dataStamp">—</b></span>
+        <button class="link" id="toBasis">怎么算出来的 ↗</button>
       </footer>
     </aside>
   </div>

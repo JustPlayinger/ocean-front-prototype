@@ -48,7 +48,13 @@ const GEO = `var tb=document.getElementById("topbar"), hero=document.getElementB
     mapW: document.getElementById("map").clientWidth, mapH: document.getElementById("map").clientHeight,
     clipped: [].slice.call(document.querySelectorAll(".side *, .topbar *")).filter(function(n){return n.clientWidth>0 && n.scrollWidth>n.clientWidth+1;}).length,
     legendOk: document.querySelectorAll(".legend-row[data-layer]").length,
-    heroPts: document.querySelectorAll("#heroPoints .pt").length
+    heroPts: document.querySelectorAll("#heroPoints .pt").length,
+    numBadges: document.querySelectorAll(".topbar .ctx .num").length,
+    family: !!document.getElementById("familySeg"),
+    legendH: Math.round(document.querySelector(".map-legend").getBoundingClientRect().height),
+    pickRight: Math.round(document.querySelector(".map-pick").getBoundingClientRect().right),
+    ctrlLeft: Math.round(document.querySelector(".map-controls").getBoundingClientRect().left),
+    probeW: Math.round(parseFloat(getComputedStyle(document.getElementById("mapProbe")).width))
   };`;
 
 const results = [];
@@ -65,6 +71,10 @@ check("侧栏未溢出视口", g1.sideBottom <= g1.vh + 1, `${g1.sideBottom} ≤
 check("地图区域尺寸合理", g1.mapW > 1100 && g1.mapH > 600, `map=${g1.mapW}x${g1.mapH}`);
 check("无文字被裁切（scrollWidth 溢出计数=0）", g1.clipped === 0, "clipped=" + g1.clipped);
 check("图例含 4 个可切换图层", g1.legendOk === 4, "rows=" + g1.legendOk);
+check("顶栏 4 个序号可见（顺序看得见）且已无时间族分段", g1.numBadges === 4 && g1.family === false, `badges=${g1.numBadges} family=${g1.family}`);
+check("图例卡片不占地图过多（高度 ≤ 240）", g1.legendH <= 240, "legendH=" + g1.legendH);
+check("选中回执卡与缩放按钮水平不重叠", g1.pickRight <= g1.ctrlLeft, `${g1.pickRight} ≤ ${g1.ctrlLeft}`);
+check("指针浮层宽度合理（200~300px）", g1.probeW >= 200 && g1.probeW <= 300, "probeW=" + g1.probeW);
 
 await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
 await sleep(400);
@@ -74,6 +84,7 @@ check("1280 宽：顶栏保持单行（高度 < 62）", g2.topbarH < 62, "topbar
 check("1280 宽：结论卡仍可见且不重叠", g2.heroH >= 90 && g2.heroBottom <= g2.tabsTop + 1, `${g2.heroH} / ${g2.heroBottom} ≤ ${g2.tabsTop}`);
 check("1280 宽：无文字裁切", g2.clipped === 0, "clipped=" + g2.clipped);
 check("1280 宽：卡片区可滚动", g2.panesH >= 150, "panesH=" + g2.panesH);
+check("1280 宽：4 个序号仍可见（顺序不因窄屏丢失）", g2.numBadges === 4, "badges=" + g2.numBadges);
 
 console.log(results.join("\n"));
 console.log("\nFAIL 总数 = " + results.filter((r) => r.indexOf("FAIL") === 0).length);
