@@ -218,23 +218,27 @@ check("页签 = 当前 / 历史 / 预测 / AI 分析",
   tabs.labels.join("/") === "当前/历史/预测/AI 分析" && tabs.secondary.length === 0, JSON.stringify(tabs));
 check("默认落在「当前」页", tabs.active === "now" && tabs.paneNow === true, tabs.active);
 
-// ===== 4) L1 结论层（常驻，不随页签消失） =====
+// ===== 4) 结论块：已并入「当前」页（2026-09-14 起不再常驻） =====
 const hero = await evalJS(`return {
+  inNow: !!document.querySelector("#pane-now #heroLine"),
+  legacy: !!document.getElementById("hero") || !!document.getElementById("heroPoints"),
   verdict: document.getElementById("heroVerdict").textContent,
   line: document.getElementById("heroLine").textContent,
   when: document.getElementById("heroWhen").textContent,
-  picks: document.querySelectorAll("#heroPoints .pt").length,
-  firstPick: (document.querySelector("#heroPoints .pt") || {}).textContent || "",
+  lead: (document.querySelector("#nowLead .row.clickable") || {}).textContent || "",
   why: document.getElementById("heroWhyBody").textContent };`);
-check("结论卡给出三档结论之一（值得去 / 可以看看 / 线索不足）",
+check("结论块在「当前」页内，不再有常驻 hero 与首选点位卡",
+  hero.inNow === true && hero.legacy === false, "inNow=" + hero.inNow + " · legacy=" + hero.legacy);
+check("结论块给出三档结论之一（值得去 / 可以看看 / 线索不足）",
   ["值得去", "可以看看", "线索不足"].indexOf(hero.verdict) >= 0, hero.verdict);
-check("结论行含把握度 / 方位 / 距离 / 航时",
+check("结论行含范围内锋面区数量 / 把握度 / 方位 / 距离（已无航时·油耗）",
+  /作业范围 20 km 内/.test(hero.line) && /(个锋面区|暂无锋面区)/.test(hero.line) &&
   /把握度 \d+%/.test(hero.line) && /(正北|东北|正东|东南|正南|西南|正西|西北)/.test(hero.line) &&
-  /km/.test(hero.line) && /小时/.test(hero.line), hero.line.slice(0, 70));
+  /km/.test(hero.line) && !/小时|油耗/.test(hero.line), hero.line.slice(0, 70));
 check("结论卡写明看的是哪一天、数据是实况观测",
   /（今天）|（\+\d 天）|（-\d 天）/.test(hero.when) && /观测/.test(hero.when), hero.when);
-check("结论卡首选点位指向数据里的真实锋面区编号",
-  hero.picks >= 1 && /F\d{3}/.test(hero.firstPick) && boot.dataObjects > 0, hero.firstPick.replace(/\s+/g, " ").slice(0, 48));
+check("结论块首选锋面区指向数据里的真实对象编号（取「作业线索」首条）",
+  /F\d{3}/.test(hero.lead) && boot.dataObjects > 0, hero.lead.replace(/\s+/g, " ").slice(0, 48));
 check("「评分依据」列出分项与合计，并说明未参与评分的项",
   /起评分/.test(hero.why) && /合计把握/.test(hero.why) &&
   /数据来源/.test(hero.why) && /未参与评分/.test(hero.why), hero.why.slice(0, 40));
@@ -431,10 +435,12 @@ const basis = await evalJS(`return {
   limits: document.querySelectorAll("#basisLimits .row").length,
   dataText: document.getElementById("basisData").textContent,
   rulesText: document.getElementById("basisRules").textContent,
-  limitsText: document.getElementById("basisLimits").textContent };`);
-check("数据说明：数据来源至少 14 行 / 算法 6 条 / 局限不少于 7 条",
-  basis.data >= 14 && basis.rules === 6 && basis.limits >= 7,
+  limitsText: document.getElementById("basisLimits").textContent,
+  noFuel: !/航时|油耗/.test(document.body.textContent) };`);
+check("数据说明：数据来源至少 14 行 / 算法 5 条（航时·油耗已删） / 局限不少于 7 条",
+  basis.data >= 14 && basis.rules === 5 && basis.limits >= 7,
   JSON.stringify({ data: basis.data, rules: basis.rules, limits: basis.limits }));
+check("全页（含隐藏面板）不再出现「航时 / 油耗」文案", basis.noFuel === true, "noFuel=" + basis.noFuel);
 check("数据来源写清产品、许可与底图出处",
   /zenodo\.20356239/.test(basis.dataText) && /CC BY 4\.0/.test(basis.dataText) &&
   /Natural Earth/.test(basis.dataText), "DOI / 许可 / 底图都有了");
@@ -501,14 +507,14 @@ await evalJS(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape
 check("Esc 取消钉住", (await evalJS(PROBE)).hidden === true, "已取消");
 
 // ===== 10) 选中回执：点了谁、怎么取消 =====
-const pick = await evalJS(`var pt = document.querySelector("#heroPoints .pt"); var id = pt.dataset.id; pt.click();
+const pick = await evalJS(`var pt = document.querySelector("#nowLead .row.clickable"); var id = pt.dataset.id; pt.click();
   return { id: id, hidden: document.getElementById("mapPick").hidden,
     name: document.getElementById("pickName").textContent,
     body: document.getElementById("pickBody").textContent,
     x: document.getElementById("pickClose").textContent.trim(),
     dimmed: [].slice.call(document.querySelectorAll("#mapSvg *")).filter(function(n){ return n.getAttribute("opacity") === "0.16"; }).length };`);
 await sleep(150);
-check("点结论卡点位 → 地图上出现「选中回执」卡（标题是真实对象编号）",
+check("点当前页作业线索首条 → 地图上出现「选中回执」卡（标题是真实对象编号）",
   pick.hidden === false && pick.name.indexOf(pick.id) >= 0, pick.name + " · " + pick.body.slice(0, 24));
 check("回执卡给出长度 / 距离 / 侧别（都来自数据）",
   /长 \d+ km/.test(pick.body) && /离你/.test(pick.body) && /你在/.test(pick.body), pick.body.slice(0, 36));

@@ -156,9 +156,8 @@
   /* ============ 右侧面板 ============ */
   .side { width: 356px; flex: none; display: flex; flex-direction: column; background: var(--panel); z-index: 10; }
 
-  /* L1 结论层：常驻 hero，不随页签消失 */
-  .hero { border-bottom: 1px solid var(--line); padding: 12px 12px 10px; background: linear-gradient(180deg, rgba(77,212,198,.09), transparent); }
-  .hero-top { display: flex; align-items: center; gap: 8px; }
+  /* 结论块：2026-09-14 起并入「当前」页「当前渔情」卡，不再常驻（原 .hero 外壳已移除） */
+  .hero-top { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
   .verdict {
     font-size: 17px; font-weight: 700; letter-spacing: .5px; padding: 3px 12px; border-radius: 8px;
     border: 1px solid; display: inline-flex; align-items: center; gap: 6px;
@@ -169,18 +168,6 @@
   .hero-top .when { margin-left: auto; font-size: 11px; color: var(--text-dim); }
   .hero-line { font-size: 13px; line-height: 1.6; margin-top: 8px; }
   .hero-line b { color: var(--accent-2); }
-  .hero-points { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
-  .pt {
-    display: flex; align-items: center; gap: 8px; font-size: 12.5px;
-    background: rgba(10,20,32,.66); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
-    cursor: pointer; transition: border-color .18s, background .18s;
-  }
-  .pt:hover { border-color: rgba(77,212,198,.45); }
-  .pt.active { border-color: var(--accent); background: rgba(77,212,198,.1); }
-  .pt .rk { width: 17px; height: 17px; border-radius: 50%; flex: none; display: grid; place-items: center;
-    font-size: 11px; font-weight: 700; background: rgba(255,180,84,.18); color: var(--accent-2); }
-  .pt .grow { flex: 1; }
-  .pt small { display: block; color: var(--text-dim); font-size: 11px; margin-top: 1px; }
 
   /* L2 页签：按 9.3 沟通记录收敛为 当前 / 历史 / 预测 / AI 分析 */
   .tabs { display: flex; align-items: flex-end; gap: 4px; padding: 10px 12px 0; }
@@ -446,21 +433,8 @@
       <div class="toast" id="toast"><b id="toastLoc"></b></div>
     </section>
 
-    <!-- ===== 右侧：L1 结论层 + L2 分层细节 ===== -->
+    <!-- ===== 右侧：页签面板（结论已并入「当前」页，不再常驻） ===== -->
     <aside class="side">
-      <!-- L1 结论层（常驻，跨页签不消失） -->
-      <section class="hero" id="hero">
-        <div class="hero-top">
-          <span class="verdict ok" id="heroVerdict">—</span>
-          <span class="when" id="heroWhen">—</span>
-        </div>
-        <p class="hero-line" id="heroLine"></p>
-        <div class="hero-points" id="heroPoints"></div>
-        <details class="why" id="heroWhy">
-          <summary>评分依据</summary>
-          <div class="why-body" id="heroWhyBody"></div>
-        </details>
-      </section>
 
       <!-- L2 页签：当前 / 历史 / 预测 / AI 分析；数据说明由页脚进入 -->
       <nav class="tabs" id="tabs" role="tablist">
@@ -475,7 +449,17 @@
         <section class="pane active" id="pane-now">
           <div class="card">
             <h3>当前渔情 <span class="tag ok" id="nowScopeTag">—</span></h3>
+            <!-- 结论块：原常驻 hero 于 2026-09-14 并入本卡（页面上唯一的结论出口） -->
+            <div class="hero-top">
+              <span class="verdict ok" id="heroVerdict">—</span>
+              <span class="when" id="heroWhen">—</span>
+            </div>
+            <p class="hero-line" id="heroLine"></p>
             <div class="metric" id="nowMetrics"></div>
+            <details class="why" id="heroWhy">
+              <summary>评分依据</summary>
+              <div class="why-body" id="heroWhyBody"></div>
+            </details>
             <details class="why" id="seaDetails">
               <summary>海况与安全 <span class="tag" id="seaTag">—</span></summary>
               <div class="list" id="seaList"></div>

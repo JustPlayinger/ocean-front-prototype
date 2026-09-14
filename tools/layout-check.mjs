@@ -60,22 +60,23 @@ for (let i = 0; i < 80 && !ready; i++) {
 }
 if (!ready) console.log("WARN: 页面 20s 内没进入就绪状态，后续断言可能失败");
 
-const GEO = `var tb=document.getElementById("topbar"), hero=document.getElementById("hero"), tabs=document.getElementById("tabs"),
+const GEO = `var tb=document.getElementById("topbar"), concl=document.querySelector("#pane-now .card"), tabs=document.getElementById("tabs"),
   panes=document.getElementById("panes"), side=document.querySelector(".side"), footer=document.querySelector(".footer");
   var r=function(n){return n.getBoundingClientRect();};
   return {
     vw: window.innerWidth, vh: window.innerHeight,
     docScrollW: document.documentElement.scrollWidth,
     topbarH: Math.round(r(tb).height),
-    heroH: Math.round(r(hero).height),
-    heroBottom: Math.round(r(hero).bottom), tabsTop: Math.round(r(tabs).top),
+    conclH: Math.round(r(concl).height),
+    conclTop: Math.round(r(concl).top), tabsTop: Math.round(r(tabs).top),
+    legacyHero: !!document.getElementById("hero") || !!document.getElementById("heroPoints"),
     tabsH: Math.round(r(tabs).height), panesH: panes.clientHeight,
     sideW: Math.round(r(side).width), sideTop: Math.round(r(side).top), sideBottom: Math.round(r(side).bottom),
     footerH: Math.round(r(footer).height),
     mapW: document.getElementById("map").clientWidth, mapH: document.getElementById("map").clientHeight,
     clipped: [].slice.call(document.querySelectorAll(".side *, .topbar *")).filter(function(n){return n.clientWidth>0 && n.scrollWidth>n.clientWidth+1;}).length,
     legendOk: document.querySelectorAll(".legend-row[data-layer]").length,
-    heroPts: document.querySelectorAll("#heroPoints .pt").length,
+    leadRows: document.querySelectorAll("#nowLead .row.clickable").length,
     numBadges: document.querySelectorAll(".topbar .ctx .num").length,
     family: !!document.getElementById("familySeg"),
     legendH: Math.round(document.querySelector(".map-legend").getBoundingClientRect().height),
@@ -93,8 +94,10 @@ const check = (l, c, d) => results.push(`${c ? "PASS" : "FAIL"}  ${l}${d ? "  �
 const g1 = await evalJS(GEO);
 check("1680 宽：无横向溢出", g1.docScrollW <= g1.vw + 1, JSON.stringify({ docScrollW: g1.docScrollW, vw: g1.vw }));
 check("1680 宽：顶栏单行（高度 < 62）", g1.topbarH < 62, "topbarH=" + g1.topbarH);
-check("结论卡与页签不重叠（hero.bottom ≤ tabs.top）", g1.heroBottom <= g1.tabsTop + 1, `${g1.heroBottom} ≤ ${g1.tabsTop}`);
-check("结论卡可见（高度 ≥ 90）", g1.heroH >= 90, "heroH=" + g1.heroH);
+check("结论卡在「当前」页内、位于页签下方（原常驻 hero 已移除）",
+  g1.legacyHero === false && g1.conclTop >= g1.tabsTop - 1, `legacyHero=${g1.legacyHero} · ${g1.conclTop} ≥ ${g1.tabsTop}`);
+check("结论卡可见（高度 ≥ 150，含把握度与 4 个指标格）", g1.conclH >= 150, "conclH=" + g1.conclH);
+check("当前页作业线索至少 1 条可点（首选锋面区入口）", g1.leadRows >= 1, "leadRows=" + g1.leadRows);
 check("页签条可见", g1.tabsH > 20, "tabsH=" + g1.tabsH);
 check("卡片区可滚动高度充足（≥200）", g1.panesH >= 200, "panesH=" + g1.panesH);
 check("侧栏未溢出视口", g1.sideBottom <= g1.vh + 1, `${g1.sideBottom} ≤ ${g1.vh}`);
@@ -113,7 +116,9 @@ await sleep(400);
 const g2 = await evalJS(GEO);
 check("1280 宽：无横向溢出", g2.docScrollW <= g2.vw + 1, JSON.stringify({ docScrollW: g2.docScrollW, vw: g2.vw }));
 check("1280 宽：顶栏保持单行（高度 < 62）", g2.topbarH < 62, "topbarH=" + g2.topbarH);
-check("1280 宽：结论卡仍可见且不重叠", g2.heroH >= 90 && g2.heroBottom <= g2.tabsTop + 1, `${g2.heroH} / ${g2.heroBottom} ≤ ${g2.tabsTop}`);
+check("1280 宽：结论卡仍在「当前」页且可见（高度 ≥ 150）",
+  g2.legacyHero === false && g2.conclH >= 150 && g2.conclTop >= g2.tabsTop - 1,
+  `${g2.conclH} · ${g2.conclTop} ≥ ${g2.tabsTop}`);
 check("1280 宽：无文字裁切", g2.clipped === 0, "clipped=" + g2.clipped);
 check("1280 宽：卡片区可滚动", g2.panesH >= 150, "panesH=" + g2.panesH);
 check("1280 宽：3 个序号仍可见（顺序不因窄屏丢失）", g2.numBadges === 3, "badges=" + g2.numBadges);

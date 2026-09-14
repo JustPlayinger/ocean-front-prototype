@@ -10,7 +10,7 @@
  *
  * 信息架构（三层）：
  *   L0 顶栏      ① 从哪出发 ② 找多远 ③ 出海日 —— 全局唯一真源（目标鱼种本期不做，见需求 FR-10）
- *   L1 结论层    hero 常驻：这天值不值得去 + 去哪个锋面对象 + 为什么
+ *   L1 结论块    已并入「当前」页（2026-09-14）：这天值不值得去 + 首选锋面区 + 为什么
  *   L2 页签      当前 / 历史 / 预测 / AI 分析；数据说明作为支撑入口
  *
  * 数据流：state（唯一真源） --渲染--> DOM；所有 render* 只读 state，不写 state。
@@ -19,8 +19,6 @@
 
 // ==================== 常量 ====================
 const KM_PER_DEG = 111.195;
-const CRUISE_KMH = 14.8;          // 8 节航速
-const FUEL_L_PER_KM = 1.6;        // 小型渔船量级，仅用于比较
 
 // 地图投影：东西向与南北向 1 km 一样长，半径圈才是正圆
 const ANCHOR = { lon: 124.5, lat: 30.2 };
@@ -94,8 +92,6 @@ function parseCoord(raw) {
   if (lonHit && latHit) return [lonHit.value, latHit.value];
   return [hits[0].value, hits[1].value];
 }
-const fmtHours = (km) => (km / CRUISE_KMH).toFixed(1);
-const fmtFuel = (km) => Math.round(km * FUEL_L_PER_KM);
 
 // 点到线段的最短距离（km）与最近的落点
 function nearestOnSegment(p, a, b) {
@@ -764,7 +760,7 @@ function renderLegend() {
   });
 }
 
-// ==================== L1 结论层（常驻，不随页签消失） ====================
+// ==================== 结论块（已并入「当前」页，随页签切换显示） ====================
 function heroTarget() {
   const snap = snapshot();
   const objectsInRange = snap.inRange.filter((f) => f.isObject);
@@ -787,14 +783,13 @@ function heroTarget() {
 
 function renderHero() {
   const snap = snapshot();
-  const v = $("heroVerdict"), l = $("heroLine"), pts = $("heroPoints"), body = $("heroWhyBody");
+  const v = $("heroVerdict"), l = $("heroLine"), body = $("heroWhyBody");
   $("heroWhen").textContent = timeLabel();
 
   if (!snap.ok) {
     v.textContent = "先看数据";
     v.className = "verdict caution";
     l.innerHTML = "<b>" + snap.status.title + "</b> — " + snap.status.desc;
-    pts.innerHTML = "";
     body.innerHTML = '<div class="line"><span class="k">当前日期</span> → ' + timeLabel() + "</div>" +
       '<div class="line"><span class="k">说明</span> → 该日期没有实况数据，不输出评分与建议</div>';
     syncSelect(); renderPick();
@@ -806,29 +801,12 @@ function renderHero() {
   v.className = "verdict " + verdict.cls;
 
   const t = heroTarget();
-  let line = "作业范围 " + state.range + " km · 把握度 <b>" + snap.score + "%</b>。";
-  if (t) line += "推荐 <b>" + t.bearing + " " + t.km.toFixed(1) + " km</b> 的" + t.label +
-    "，约 " + fmtHours(t.km) + " 小时可达。";
-  else line += "该范围内暂无线索，可扩大作业范围或换个日期。";
+  const inRangeCount = snap.inRange.filter((f) => f.isObject).length;
+  let line = "作业范围 " + state.range + " km 内 <b>" +
+    (inRangeCount ? inRangeCount + " 个锋面区" : "暂无锋面区") + "</b> · 把握度 <b>" + snap.score + "%</b>。";
+  if (t) line += "首选 <b>" + t.bearing + " " + t.km.toFixed(1) + " km</b> 的" + t.label + "。";
+  else line += "可扩大作业范围或换个日期。";
   l.innerHTML = line;
-
-  const picks = [];
-  if (t) {
-    picks.push({ rank: 1, type: t.type, id: t.id, label: t.label, km: t.km, bearing: t.bearing,
-      note: t.fallback ? (t.note || "范围内暂无线索，展示最近的一条") : "范围内首选" });
-  }
-  snap.inRange.filter((f) => f.isObject && (!t || f.id !== t.id)).slice(0, 2).forEach((f) => {
-    picks.push({ rank: picks.length + 1, type: "front", id: f.id, label: "锋面区 " + f.id,
-      km: f.km, bearing: f.bearing, note: "备选 · 长 " + Math.round(f.lengthKm) + " km" });
-  });
-  pts.innerHTML = picks.map((p) =>
-    '<div class="pt"' + (p.type ? ' data-type="' + p.type + '" data-id="' + (p.id || "") + '"' : "") +
-    '><span class="rk">' + p.rank + "</span>" +
-    '<span class="grow"><b>' + p.bearing + " " + p.km.toFixed(1) + " km</b> · " + p.label +
-    "<small>" + p.note + " · 约 " + fmtHours(p.km) + " 小时 · 油耗 " + fmtFuel(p.km) +
-    " L</small></span></div>").join("");
-  pts.querySelectorAll(".pt[data-type]").forEach((node) =>
-    node.addEventListener("click", () => toggleSelect(node.dataset.type, node.dataset.id)));
 
   body.innerHTML =
     snap.items.map((it) => '<div class="line"><span class="k">' + it[0] + "</span> → <b>" +
@@ -1289,8 +1267,7 @@ function renderBasis() {
     ["2", "<b>把握度</b>：起评分 30；范围内每个锋面区 +12（最多 3 个）；最近锋面 ≤10 km +8、≤20 km +4；最长锋面区 ≥100 km +8、≥50 km +4；数据覆盖 ≥85% +4、<70% −4；冷暖侧只展示、不加分"],
     ["3", "<b>结论分档</b>：≥70% 值得去 · 50–69% 可以看看 · <50% 线索不足"],
     ["4", "<b>历史同期</b>：半径内锋面线格数 > 0 记 front_present = true；比例 = 有锋面的天数 ÷ 有效天数"],
-    ["5", "<b>航时 / 油耗</b>：按 8 节（" + CRUISE_KMH + " km/h）、" + FUEL_L_PER_KM + " L/km 估算"],
-    ["6", "<b>锋面区识别</b>：连通域中心线 + 抽稀（6 km），长度 ≥ " +
+    ["5", "<b>锋面区识别</b>：连通域中心线 + 抽稀（6 km），长度 ≥ " +
       (OFData.quality(a.days[a.days.length - 1]) ? OFData.quality(a.days[a.days.length - 1]).object_min_length_km : 20) + " km 才编号"],
   ]);
   $("basisLimits").innerHTML = listRows(
@@ -1335,7 +1312,7 @@ function renderAI() {
     "%</b><small>结论由当前锋面区、距离、长度和数据覆盖计算</small></span></div>" +
     '<div class="row"><span class="i">2</span><span class="grow"><b>' +
     (target ? target.label + " · " + target.bearing + " " + target.km.toFixed(1) + " km" : "作业范围内暂无明确锋面区") +
-    "</b><small>" + (target ? "约 " + fmtHours(target.km) + " 小时可达，油耗 " + fmtFuel(target.km) + " L" :
+    "</b><small>" + (target ? (target.fallback ? "范围内暂无线索，展示最近的一条" : "范围内首选，已在地图标出") :
       "可放大作业范围或换相邻日期复核") + "</small></span></div>" +
     '<div class="row"><span class="i">3</span><span class="grow"><b>历史参照 ' +
     (climRate == null ? "样本不足" : Math.round(climRate * 100) + "%") +
