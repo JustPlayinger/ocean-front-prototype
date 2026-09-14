@@ -206,6 +206,10 @@ node tools\data-check.mjs; node tools\e2e-check.mjs; node tools\layout-check.mjs
 | GitHub Pages | **故意未开启** | 国内发布需先换合规底图 + 审图号；内网演示可直接双击 HTML |
 | Ocean 仓脚本 | `fetch_zenodo_front_samples.py`（已修改）、`export_prototype_data.py`、`fetch_sst_samples.py`（未跟踪）**尚未提交** | 该仓是协作者共享仓（`NingRuo-code/Ocean`，当前在 `chore/collab-baseline` 分支），提交前先与协作者确认分支；否则至少把这 3 个脚本备份/冻结到原型仓的 `tools/upstream/` |
 | `data/meta.js` 与脚本版本 | meta 的「已知问题」文案由 `export_prototype_data.py` 生成 | 若上游脚本长期不受控，重跑导出会覆盖文案；改文案要改脚本 |
+| **UI 基线来源** | 本版页面结构（当前 / 历史 / 预测 / AI 分析 + 时间轴播放 + 地图点选）来自协作者仓 `NingRuo-code/Ocean-front-prototype-f` 的提交 `e9c55db`（对齐 9.3 沟通），在我们 `ac06676` 之上 fast-forward 合入 | 该远端已登记为 `friend`；后续同步用 `git fetch friend && git diff friend/main` 看增量 |
+| **待办：预测页缺回测** | 「预测」页给出 7 天规则参考（5–85% + 依据完整度），口径已在页内与使用限制中标注"不等于业务预报"，但**没有回测指标**（命中率 / 与持续性基线对照） | 接入预报输入场前，先补规则基线与「今天有→明天有」持续性基线的命中率对照；没有回测就把百分数降级为风险窗口提示 |
+| **待办：AI 页命名** | 「AI 分析」实际是本地证据组织与任务编排（页内已标"本地规则"、不生成新科学数值） | 建议改名或加副标（如「分析过程 · 本地规则，不调用在线模型」），避免被读成有模型推理 |
+| **待办：历史「整年」口径** | 「整年」按钮展示的是样例年实况聚合，不是完整全年统计（文档已写明，界面按钮文字仍易误读） | 按钮改「样例年」或在结果区首行写明"非完整年度统计" |
 
 ### 6.7 三分钟演示脚本（对外讲的时候照这个顺序）
 
