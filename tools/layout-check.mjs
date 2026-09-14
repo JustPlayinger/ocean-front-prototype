@@ -11,8 +11,8 @@ const PROFILE = join(process.env.TEMP || "C:\\temp", "_edge_profile_layout");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 try { rmSync(PROFILE, { recursive: true, force: true }); } catch (e) {}
 
-const child = spawn(EDGE, ["--headless=new", "--disable-gpu", "--no-first-run", `--remote-debugging-port=${PORT}`,
-  `--user-data-dir=${PROFILE}`, "--window-size=1680,900", PAGE], { stdio: "ignore" });
+const child = spawn(EDGE, ["--headless=new", "--disable-gpu", "--no-first-run", "--remote-allow-origins=*",
+  `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`, "--window-size=1680,900", PAGE], { stdio: "ignore" });
 
 let wsUrl = null;
 for (let i = 0; i < 50 && !wsUrl; i++) {
@@ -28,8 +28,25 @@ const ws = new WebSocket(wsUrl);
 await new Promise((res) => ws.addEventListener("open", res));
 let id = 0; const pending = new Map();
 ws.addEventListener("message", (ev) => { const m = JSON.parse(ev.data); if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); p.res(m.result); } });
-const send = (method, params = {}) => { const i = ++id; ws.send(JSON.stringify({ id: i, method, params })); return new Promise((res) => pending.set(i, { res })); };
-await send("Runtime.enable");
+const send = (method, params = {}) => {
+  const i = ++id;
+  ws.send(JSON.stringify({ id: i, method, params }));
+  return new Promise((res, rej) => {
+    const timer = setTimeout(() => {
+      pending.delete(i);
+      rej(new Error("CDP 调用超时：" + method));
+    }, 8000);
+    pending.set(i, { res: (v) => { clearTimeout(timer); res(v); } });
+  });
+};
+try {
+  await send("Runtime.enable");
+} catch (e) {
+  console.log("FAIL: Edge 调试连接未响应（" + e.message + "）");
+  ws.close();
+  child.kill();
+  process.exit(1);
+}
 const evalJS = async (expr) => (await send("Runtime.evaluate", { expression: `(function(){ ${expr} })()`, returnByValue: true, awaitPromise: true })).result.value;
 
 // 数据文件变多（每天一个 <script>，60+ 天），等 OFData 与首屏渲染就绪再断言，避免竞态

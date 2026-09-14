@@ -14,7 +14,8 @@ const addIsoDays = (iso, n) => new Date(Date.parse(iso + "T00:00:00Z") + n * 864
 try { rmSync(PROFILE, { recursive: true, force: true }); } catch (e) {}
 
 const child = spawn(EDGE, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-  `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`, "--window-size=1680,900", PAGE], { stdio: "ignore" });
+  "--remote-allow-origins=*", `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`,
+  "--window-size=1680,900", PAGE], { stdio: "ignore" });
 
 let wsUrl = null;
 for (let i = 0; i < 50 && !wsUrl; i++) {
@@ -47,11 +48,27 @@ ws.addEventListener("message", (ev) => {
 const send = (method, params = {}) => {
   const id = ++msgId;
   ws.send(JSON.stringify({ id, method, params }));
-  return new Promise((res, rej) => pending.set(id, { res, rej }));
+  return new Promise((res, rej) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      rej(new Error("CDP 调用超时：" + method));
+    }, 8000);
+    pending.set(id, {
+      res: (v) => { clearTimeout(timer); res(v); },
+      rej: (e) => { clearTimeout(timer); rej(e); },
+    });
+  });
 };
 
-await send("Runtime.enable");
-await send("Page.enable");
+try {
+  await send("Runtime.enable");
+  await send("Page.enable");
+} catch (e) {
+  console.log("FAIL: Edge 调试连接未响应（" + e.message + "）");
+  ws.close();
+  child.kill();
+  process.exit(1);
+}
 
 const evalJS = async (expr) => {
   const r = await send("Runtime.evaluate", { expression: `(function(){ ${expr} })()`, returnByValue: true, awaitPromise: true });
@@ -161,28 +178,45 @@ const top = await evalJS(`return {
   nums: document.querySelectorAll(".topbar .ctx .num").length,
   labels: [].map.call(document.querySelectorAll(".topbar .ctx .ctx-lab"), function(n){ return n.textContent; }),
   dateInputs: document.querySelectorAll(".topbar input[type=date]").length,
+  railInputs: document.querySelectorAll(".topbar input[type=range]#timeRail").length,
+  playBtns: document.querySelectorAll("#datePlay").length,
+  pickOriginBtns: document.querySelectorAll("#pickOriginBtn").length,
+  railMax: document.getElementById("timeRail").max,
+  railText: document.getElementById("timeRailText").textContent,
   otherInputs: document.querySelectorAll(".topbar input[type=month], .topbar input[type=number]").length,
   hasFamily: !!document.getElementById("familySeg"),
   topText: (document.querySelector(".topbar") || {}).textContent || "",
-  rangeBtns: document.querySelectorAll("#rangeSeg button").length };`);
+  rangeBtns: document.querySelectorAll("#rangeSeg button").length,
+  fishingDefault: !!state.layers.fishing,
+  fishingPaths: document.querySelectorAll('#mapSvg [data-layer="fishing"]').length,
+  fishingLegend: (document.querySelector('.legend-row[data-layer="fishing"]') || {}).textContent || "" };`);
 check("顶栏按使用顺序分成 3 组（出发地/作业范围/出海日）",
   top.nums === 3 && top.labels.join("|") === "出发地|作业范围|出海日", top.nums + " 组 · " + top.labels.join("/"));
 check("顶栏没有第二套数据来源开关（观测/预报/气候 已删）",
   top.hasFamily === false && !/观测来源|预报|气候/.test(top.topText), "familySeg 不存在");
 check("顶栏只有 1 个日期控件，无 month/number",
   top.dateInputs === 1 && top.otherInputs === 0, JSON.stringify({ date: top.dateInputs, other: top.otherInputs }));
+check("出海日组内有同源时间轴与播放按钮",
+  top.railInputs === 1 && top.playBtns === 1 && Number(top.railMax) === boot.days.length - 1 && /\/\d+/.test(top.railText),
+  JSON.stringify({ rail: top.railInputs, play: top.playBtns, max: top.railMax, text: top.railText }));
 check("找鱼范围 3 档可直接点", top.rangeBtns === 3, "rangeBtns=" + top.rangeBtns);
+check("出发地支持输入定位和地图点选", top.pickOriginBtns === 1 && /点选/.test(top.topText), "pickOriginBtns=" + top.pickOriginBtns);
+check("推荐水域是示例层，默认关闭，避免被误读成真实渔场数据",
+  top.fishingDefault === false && top.fishingPaths === 0 && /示例，默认关/.test(top.fishingLegend),
+  JSON.stringify({ layer: top.fishingDefault, paths: top.fishingPaths, text: top.fishingLegend }));
 
 // ===== 3) 页签分层与默认态 =====
 const tabs = await evalJS(`var bs = [].slice.call(document.querySelectorAll("#tabs button"));
   return { n: bs.length,
+    labels: bs.map(function(b){ return b.textContent.trim(); }),
     primary: bs.filter(function(b){ return b.classList.contains("primary"); }).map(function(b){ return b.dataset.pane; }),
     secondary: bs.filter(function(b){ return b.classList.contains("secondary"); }).map(function(b){ return b.textContent.trim(); }),
     active: document.querySelector("#tabs button.active").dataset.pane,
     paneNow: document.getElementById("pane-now").classList.contains("active") };`);
-check("页签 = 现在/未来（主任务）+ 历史同期/数据说明（支撑）",
-  tabs.n === 4 && tabs.primary.join(",") === "now,future" && tabs.secondary.join("/") === "历史同期/数据说明", JSON.stringify(tabs));
-check("默认落在「现在」页", tabs.active === "now" && tabs.paneNow === true, tabs.active);
+check("页签 = 当前 / 历史 / 预测 / AI 分析",
+  tabs.n === 4 && tabs.primary.join(",") === "now,clim,future,ai" &&
+  tabs.labels.join("/") === "当前/历史/预测/AI 分析" && tabs.secondary.length === 0, JSON.stringify(tabs));
+check("默认落在「当前」页", tabs.active === "now" && tabs.paneNow === true, tabs.active);
 
 // ===== 4) L1 结论层（常驻，不随页签消失） =====
 const hero = await evalJS(`return {
@@ -209,6 +243,10 @@ check("「评分依据」列出分项与合计，并说明未参与评分的项"
 const now = await evalJS(`var ms = [].slice.call(document.querySelectorAll("#nowMetrics .m")).map(function(n){ return n.textContent; });
   return { ms: ms, scope: document.getElementById("nowScopeTag").textContent,
     sea: document.getElementById("seaList").textContent, seaTag: document.getElementById("seaTag").textContent,
+    cards: document.querySelectorAll("#pane-now > .card").length,
+    leadRows: document.querySelectorAll("#nowLead .row").length,
+    leadClickable: document.querySelectorAll("#nowLead .row.clickable").length,
+    detailsText: (document.querySelector("#nowFrontDetails summary") || {}).textContent || "",
     fronts: document.querySelectorAll("#nowFronts .row").length, frontTag: document.getElementById("nowFrontTag").textContent,
     dataObjects: OFData.objects(document.getElementById("timeDate").value).length,
     coverage: 100 - OFData.quality(document.getElementById("timeDate").value).nodata_percent,
@@ -217,9 +255,13 @@ check("现在页 4 个指标格（锋面区 / 最近锋面 / 所处侧 / 把握�
   now.ms.length === 4 && /锋面区/.test(now.ms[0]) && /把握/.test(now.ms[3]), now.ms.length + " 格");
 check("现在页的范围标签跟着「作业范围」走，并标出数据覆盖",
   /20 km/.test(now.scope) && new RegExp(now.coverage.toFixed(1) + "%").test(now.scope), now.scope);
-check("海况整卡标成「示例数据 · 仅供参考」，并提示以官方预报为准",
+check("海况安全提示标成「示例数据 · 仅供参考」，并提示以官方预报为准",
   /示例数据/.test(now.seaTag) && /仅供参考/.test(now.seaTag) && /官方海洋预报/.test(now.sea), now.seaTag);
-check("现在页的锋面区清单行数 = 数据文件里的对象数", now.fronts === now.dataObjects, now.fronts + " = " + now.dataObjects);
+check("当前页默认只有两张信息卡，海况作为展开项，界面不堆卡",
+  now.cards === 2 && /全部锋面区/.test(now.detailsText), "cards=" + now.cards + " · " + now.detailsText);
+check("当前页默认作业线索不超过 3 条，完整清单保留在展开项",
+  now.leadRows >= 1 && now.leadRows <= 3 && now.fronts === now.dataObjects,
+  "lead=" + now.leadRows + " / all=" + now.fronts + " / data=" + now.dataObjects);
 const shownCoverage = now.scope.match(/(\d+\.\d)%/);
 check("数据覆盖数与数据文件一致（缺测率来自真实掩码）",
   !!shownCoverage && Math.abs(parseFloat(shownCoverage[1]) - now.coverage) < 0.05,
@@ -246,24 +288,37 @@ check("地图上海温一层一档（档位数 = 数据文件里的档位数，�
   sstNow.paths > 0 && sstNow.paths === sstNow.bins, sstNow.paths + " = " + sstNow.bins);
 await shot("shot-2-now-detail.png");
 
-// ===== 6) 未来页：预报没接入就说清楚 =====
+// ===== 6) 预测页：规则预测参考，不冒充业务预报 =====
 await click('#tabs button[data-pane="future"]');
 const fut = await evalJS(`return {
+  cards: document.querySelectorAll("#pane-future > .card").length,
+  dayBox: !!document.getElementById("futureDaysBox"),
   bars: document.querySelectorAll("#futureBars i").length,
   rows: document.querySelectorAll("#futureDays .row").length,
   clickable: document.querySelectorAll("#futureDays .row.clickable").length,
-  upcoming: OFData.availableDates().filter(function (d) { return d > document.getElementById("timeDate").value; }).length,
+  windows: [].map.call(document.querySelectorAll("#futureWindow button"), function(b){ return b.textContent.trim(); }),
+  activeWindow: document.querySelector("#futureWindow button.active").dataset.window,
+  why: document.getElementById("futureWhyBody").textContent,
+  observable: [1,2,3,4,5,6,7].filter(function (n) {
+    var d = new Date(Date.parse(document.getElementById("timeDate").value + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
+    return OFData.hasDay(d);
+  }).length,
   tag: document.getElementById("futureTag").textContent,
   list: document.getElementById("futureList").textContent,
   days: OFData.availableDates() };`);
-check("未来页不再造未来天数（没有柱状图）", fut.bars === 0, "bars=" + fut.bars);
-check("未来页写明预报未接入的原因与补数据方向",
-  /预报未接入/.test(fut.tag) && /暂无锋面预报数据/.test(fut.list) && /持续性基线/.test(fut.list),
+check("预测页给出 7 天规则预测参考（有柱、有行）", fut.bars === 7 && fut.rows === 7, `bars=${fut.bars} rows=${fut.rows}`);
+check("预测页合并为一张预测卡，逐日明细放入展开项",
+  fut.cards === 1 && fut.dayBox === true, "cards=" + fut.cards);
+check("预测页支持 1 / 3 / 7 天窗口切换，并提供依据展开",
+  fut.windows.join("/") === "1 天/3 天/7 天" && fut.activeWindow === "3" &&
+  /当前信号/.test(fut.why) && /持续性/.test(fut.why) && /历史参照/.test(fut.why),
+  fut.windows.join("/") + " · active=" + fut.activeWindow);
+check("预测页写明规则参考来源与真实预报缺口",
+  /规则参考/.test(fut.tag) && /近几日持续性/.test(fut.list) && /历史同期/.test(fut.list) &&
+  /强度、AIS、海况尚未接入/.test(fut.list),
   fut.tag + " · " + fut.list.slice(0, 30));
-check("未来页列出可点的观测日期（当前日之后最多 14 条 + 汇总行）",
-  fut.clickable === Math.min(14, fut.upcoming) &&
-  fut.rows === fut.clickable + (fut.upcoming > 14 ? 2 : 1),
-  fut.clickable + " 条可点 · 之后 " + fut.upcoming + " 天 · 共 " + fut.rows + " 行");
+check("预测页只允许点已有样例日期回看实况",
+  fut.clickable === fut.observable, fut.clickable + " 条可点 · 7 天内已有实况 " + fut.observable + " 天");
 const pickDay = await evalJS(`var rows = document.querySelectorAll("#futureDays .row.clickable");
   var idx = Math.min(2, rows.length - 1);
   var d = rows[idx].dataset.date; rows[idx].click();
@@ -273,11 +328,18 @@ check("点某天 → 顶栏「出海日」同步（全站仍只有一个时间�
 await shot("shot-3-future.png");
 const stepped = await evalJS(`var before = document.getElementById("timeDate").value;
   document.getElementById("datePrev").click(); document.getElementById("datePrev").click();
-  return { before: before, after: document.getElementById("timeDate").value };`);
+  var after = document.getElementById("timeDate").value;
+  return { before: before, after: after,
+    rail: document.getElementById("timeRail").value,
+    expectedRail: String(OFData.availableDates().indexOf(after)),
+    railText: document.getElementById("timeRailText").textContent };`);
 check("「出海日」◀ 按天回退（期望值按数据推导，不写死日期）",
   stepped.after === addIsoDays(stepped.before, -2), stepped.before + " → " + stepped.after + "（期望 " + addIsoDays(stepped.before, -2) + "）");
+check("日期变化后时间轴同步",
+  stepped.rail === stepped.expectedRail && /\/\d+/.test(stepped.railText),
+  "rail=" + stepped.rail + " · expected=" + stepped.expectedRail + " · " + stepped.railText);
 
-// ===== 7) 往年同期（真实多年度统计，页内没有日期控件） =====
+// ===== 7) 历史（真实多年度统计 + 实况聚合，页内没有日期控件） =====
 await click('#tabs button[data-pane="clim"]');
 const clim = await evalJS(`var data = OFData.clim;
   return { inputs: document.querySelectorAll("#pane-clim input").length,
@@ -297,10 +359,10 @@ const clim = await evalJS(`var data = OFData.clim;
     })(),
     missingMarked: [].slice.call(document.querySelectorAll("#climBars i")).some(function(b){ return /缺测/.test(b.getAttribute("title") || ""); }),
     note: (document.querySelector("#pane-clim .hint") || {}).textContent || "" };`);
-check("往年同期页没有任何日期输入框（锚点跟着顶栏出海日）",
+check("历史页没有任何日期输入框（锚点跟着顶栏出海日）",
   clim.inputs === 0 && /出海日/.test(clim.note), "inputs=" + clim.inputs);
-check("时段只有 3 个按钮：当日 / 近三日 / 当月",
-  clim.btns.join("/") === "当日/近三日/当月", clim.btns.join("/"));
+check("历史尺度有 6 个按钮：当日 / 3日 / 7日 / 15日 / 当月 / 整年",
+  clim.btns.join("/") === "当日/3 日/7 日/15 日/当月/整年", clim.btns.join("/"));
 check("「这一天」柱数 = 数据里覆盖的全部年份（有缺样本的年份才标「缺测」）",
   clim.bars === clim.yearCount && clim.missingMarked === clim.gap,
   clim.bars + " 柱 / " + clim.yearCount + " 年 · 缺测标注=" + clim.missingMarked + "（数据里是否有缺口=" + clim.gap + "）");
@@ -316,15 +378,53 @@ const climPeriod = await evalJS(`document.querySelector('#climPeriod button[data
 check("「近三日」按年份给占比，并说明为什么要看大半径",
   climPeriod.bars === clim.yearCount && /100 km/.test(climPeriod.stat) && /为什么看 100 km/.test(climPeriod.years),
   climPeriod.stat.slice(0, 40));
+const climWeek = await evalJS(`document.querySelector('#climPeriod button[data-period="week"]').click();
+  return { bars: document.querySelectorAll("#climBars i").length,
+    heat: document.querySelectorAll("#climHeat .heat-cell").length,
+    stat: document.getElementById("climStat").textContent, years: document.getElementById("climYears").textContent,
+    hint: document.getElementById("climHint").textContent };`);
+check("「7 日」展示连续日实况窗口，并说明多年连续窗口缺口",
+  climWeek.bars > 0 && climWeek.heat === climWeek.bars && /近 7 日/.test(climWeek.stat) && /连续日实况回放/.test(climWeek.years), climWeek.hint);
+const climHalf = await evalJS(`document.querySelector('#climPeriod button[data-period="halfmonth"]').click();
+  return { bars: document.querySelectorAll("#climBars i").length,
+    heat: document.querySelectorAll("#climHeat .heat-cell").length,
+    stat: document.getElementById("climStat").textContent, years: document.getElementById("climYears").textContent,
+    hint: document.getElementById("climHint").textContent };`);
+check("「15 日」展示连续日实况窗口，并说明样本边界",
+  climHalf.bars > 0 && climHalf.heat === climHalf.bars && /近 15 日/.test(climHalf.stat) && /未导出的日期不进入分母/.test(climHalf.years), climHalf.hint);
 const climMonth = await evalJS(`document.querySelector('#climPeriod button[data-period="month"]').click();
   return { bars: document.querySelectorAll("#climBars i").length,
-    stat: document.getElementById("climStat").textContent, hint: document.getElementById("climHint").textContent };`);
-check("「这个月」样本不够就直说，不编整月数字",
-  climMonth.bars === 0 && /算不出「整月」/.test(climMonth.stat) && /样本不足/.test(climMonth.hint), climMonth.hint);
+    heat: document.querySelectorAll("#climHeat .heat-cell").length,
+    stat: document.getElementById("climStat").textContent, years: document.getElementById("climYears").textContent,
+    hint: document.getElementById("climHint").textContent };`);
+check("「当月」展示已导出实况样例，并说明多年整月缺口",
+  climMonth.bars > 0 && climMonth.heat === climMonth.bars && /当月实况/.test(climMonth.stat) && /多年整月/.test(climMonth.years), climMonth.hint);
+const climYear = await evalJS(`document.querySelector('#climPeriod button[data-period="year"]').click();
+  return { bars: document.querySelectorAll("#climBars i").length,
+    heat: document.querySelectorAll("#climHeat .heat-cell").length,
+    stat: document.getElementById("climStat").textContent, years: document.getElementById("climYears").textContent,
+    hint: document.getElementById("climHint").textContent };`);
+check("「整年」展示样例年，并说明不是完整全年统计",
+  climYear.bars > 0 && climYear.heat === climYear.bars && /整年视图/.test(climYear.stat) && /全年缺口/.test(climYear.years), climYear.hint);
 await evalJS(`document.querySelector('#climPeriod button[data-period="day"]').click(); return 1;`);
 
-// ===== 8) 依据页 =====
-await click('#tabs button[data-pane="basis"]');
+// ===== 8) AI 分析 + 数据说明 =====
+await click('#tabs button[data-pane="ai"]');
+const ai = await evalJS(`return {
+  tag: document.getElementById("aiTag").textContent,
+  summary: document.getElementById("aiSummary").textContent,
+  plan: document.getElementById("aiPlan").textContent,
+  next: document.getElementById("aiNext").textContent,
+  evidence: document.getElementById("aiEvidenceBody").textContent,
+  cards: document.querySelectorAll("#pane-ai > .card").length,
+  planBox: !!document.getElementById("aiPlanBox") };`);
+check("AI 分析只做证据组织与任务编排",
+  /证据驱动/.test(ai.tag) && /解析任务/.test(ai.plan) && /证据边界/.test(ai.plan) &&
+  /查看规则预测参考/.test(ai.next) && /当前证据/.test(ai.evidence) && /预测证据/.test(ai.evidence),
+  ai.tag + " · " + ai.plan.slice(0, 36));
+check("AI 页合并为一张复核卡，任务编排放入展开项",
+  ai.cards === 1 && ai.planBox === true, "cards=" + ai.cards);
+await evalJS(`switchTab("basis"); return 1;`);
 const basis = await evalJS(`return {
   data: document.querySelectorAll("#basisData .tr").length,
   rules: document.querySelectorAll("#basisRules .row").length,
@@ -332,17 +432,17 @@ const basis = await evalJS(`return {
   dataText: document.getElementById("basisData").textContent,
   rulesText: document.getElementById("basisRules").textContent,
   limitsText: document.getElementById("basisLimits").textContent };`);
-check("依据页：数据来源至少 12 行 / 算法 6 条 / 局限不少于 6 条",
-  basis.data >= 12 && basis.rules === 6 && basis.limits >= 6,
+check("数据说明：数据来源至少 14 行 / 算法 6 条 / 局限不少于 7 条",
+  basis.data >= 14 && basis.rules === 6 && basis.limits >= 7,
   JSON.stringify({ data: basis.data, rules: basis.rules, limits: basis.limits }));
 check("数据来源写清产品、许可与底图出处",
   /zenodo\.20356239/.test(basis.dataText) && /CC BY 4\.0/.test(basis.dataText) &&
   /Natural Earth/.test(basis.dataText), "DOI / 许可 / 底图都有了");
 check("算法说明给出口径（起评分 / 数据覆盖 / front_present）",
   /起评分/.test(basis.rulesText) && /数据覆盖/.test(basis.rulesText) && /front_present/.test(basis.rulesText), "ok");
-check("局限里逐条写明数据来源与没接入的东西（海温来源 / 强度 / 海况 / 预报 / 渔场 / -128 语义）",
+check("局限里逐条写明数据来源与没接入的东西（海温来源 / 规则预测参考 / 强度 / 海况 / 预报 / 渔场 / -128 语义）",
   /-128/.test(basis.limitsText) && /海表温度/.test(basis.limitsText) && /海况/.test(basis.limitsText) &&
-  /预报/.test(basis.limitsText), basis.limitsText.slice(0, 40));
+  /预报/.test(basis.limitsText) && /规则预测参考/.test(basis.limitsText), basis.limitsText.slice(0, 40));
 check("局限里提示底图精度与国内发布的审图号要求",
   /Natural Earth/.test(basis.limitsText) && /审图号/.test(basis.limitsText), "ok");
 await shot("shot-5-basis.png");
@@ -458,6 +558,35 @@ check("「回到定位点」复位视窗与缩放（回到初始默认视野）"
   zoom.back.w === zoom.before.w && zoom.back.x === zoom.before.x && zoom.back.y === zoom.before.y,
   JSON.stringify(zoom.back) + " = " + JSON.stringify(zoom.before));
 
+// ===== 11.6) 地图点选出发地：坐标输入与地图点击同源 =====
+const originPick = await evalJS(`var btn = document.getElementById("pickOriginBtn");
+  btn.click();
+  return { on: !!state.pickOrigin, active: btn.classList.contains("active"), text: btn.textContent,
+    mapMode: document.getElementById("map").classList.contains("pick-origin") };`);
+check("点「点选」进入地图设置出发地模式",
+  originPick.on === true && originPick.active === true && originPick.mapMode === true && /点地图/.test(originPick.text),
+  JSON.stringify(originPick));
+await clickGeo(bandPoint.lon, bandPoint.lat);
+const originAfter = await evalJS(`return { on: !!state.pickOrigin, lon: state.lon, lat: state.lat,
+  input: document.getElementById("locInput").value,
+  mapMode: document.getElementById("map").classList.contains("pick-origin"),
+  probeHidden: document.getElementById("mapProbe").hidden,
+  pickHidden: document.getElementById("mapPick").hidden };`);
+check("点地图后出发地、输入框、结论状态一起更新",
+  originAfter.on === false && originAfter.mapMode === false &&
+  Math.abs(originAfter.lon - bandPoint.lon) < 0.01 && Math.abs(originAfter.lat - bandPoint.lat) < 0.01 &&
+  originAfter.input.indexOf(originAfter.lon.toFixed(2) + "°E") >= 0 &&
+  originAfter.probeHidden === true && originAfter.pickHidden === true,
+  JSON.stringify(originAfter));
+const originTyped = await evalJS(`var input = document.getElementById("locInput");
+  input.value = "30.20N，124.50E";
+  document.getElementById("locateBtn").click();
+  return { lon: state.lon, lat: state.lat, input: input.value, scope: document.getElementById("nowScopeTag").textContent };`);
+check("坐标输入支持 N/E 标注和中文逗号，并归一成经度、纬度",
+  Math.abs(originTyped.lon - 124.5) < 0.01 && Math.abs(originTyped.lat - 30.2) < 0.01 &&
+  /124\.50°E, 30\.20°N/.test(originTyped.input) && /20 km/.test(originTyped.scope),
+  JSON.stringify(originTyped));
+
 // ===== 12) 目标鱼种已下线（本期不做）：没有第二套偏好真源 =====
 const noSpecies = await evalJS(`return {
   selects: document.querySelectorAll("#speciesSel, .topbar select").length,
@@ -506,7 +635,7 @@ check("没导出的日期给出明确原因与可选范围（不是空图）",
 // ===== 15) 键盘可达性 =====
 const kb = await evalJS(`var b = document.querySelector('#tabs button[data-pane="now"]'); b.focus();
   b.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-  return document.getElementById("pane-future").classList.contains("active");`);
+  return document.getElementById("pane-clim").classList.contains("active");`);
 check("方向键可切换页签（可访问性）", kb === true, String(kb));
 await click('#tabs button[data-pane="now"]');
 
@@ -543,7 +672,24 @@ const restored = await evalJS(`return { display: getComputedStyle(document.getEl
 check("回到有数据的日期 → 遮罩消失、结论恢复",
   restored.display === "none" && restored.date === bounds.max, restored.date + " · display=" + restored.display);
 
-// ===== 17) 运行期异常 =====
+// ===== 17) 时间播放 =====
+const playback = await evalJS(`state.date = OFData.firstDate(); refresh();
+  var before = document.getElementById("timeDate").value;
+  document.getElementById("datePlay").click();
+  return new Promise(function(resolve) {
+    setTimeout(function() {
+      var mid = document.getElementById("timeDate").value;
+      document.getElementById("datePlay").click();
+      resolve({ before: before, after: document.getElementById("timeDate").value,
+        mid: mid, playing: document.getElementById("datePlay").classList.contains("on"),
+        text: document.getElementById("datePlay").textContent });
+    }, 1050);
+  });`);
+check("播放按钮会推进日期，暂停后按钮复位",
+  playback.mid > playback.before && playback.after === playback.mid && playback.playing === false && playback.text === "▶",
+  JSON.stringify(playback));
+
+// ===== 18) 运行期异常 =====
 check("无运行期 JS 异常（含资源加载失败）", errors.length === 0, errors.slice(0, 3).join(" || ") || "none");
 
 console.log(results.join("\n"));
