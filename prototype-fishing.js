@@ -599,7 +599,6 @@ function nearestFrontFrom(lon, lat) {
       best = { id: entry.id, isObject: entry.isObject, lengthKm: entry.lengthKm, km: near.km, point: near.point };
     }
   });
-  if (best) best.bearing = bearing16([lon, lat], best.point);
   return best;
 }
 
@@ -608,9 +607,10 @@ function frontTitle(entry) {
   return entry.id ? "锋面区 " + entry.id : "短段锋面";
 }
 
+// 浮层只留 4 项：经纬度（head）/ 水温 / 最近锋面距离 / 是否锋面区（是则给冷暖侧）
 function probeHTML(lon, lat) {
   const head = '<div class="mp-coord">' + fmtCoord(lon, lat) + "</div>";
-  const foot = '<div class="mp-foot">' + timeLabel() + " · 数据来源见「数据说明」<br/>点击钉住，Esc 取消</div>";
+  const foot = '<div class="mp-foot">点击钉住 / Esc 取消</div>';
   const st = dataStatus();
   if (!st.ok) return head + '<div class="mp-note">' + st.title + "，该日期无数据，不做估算</div>" + foot;
 
@@ -624,62 +624,22 @@ function probeHTML(lon, lat) {
     return head + '<div class="mp-note">这里没有观测数据（陆地、云或未观测，数据里统一用 -128 表示）</div>' + foot;
   }
 
-  const quality = qualityOf();
-  const shortMin = quality ? quality.object_min_length_km : 20;
   let h = head;
-  const kind = cell.line ? "锋面线（编码 " + cell.code + "）" : cell.side ? cell.side : "无锋面";
-  h += '<div class="mp-row"><span class="mp-k">数据类型</span><span class="mp-v">' + kind + "</span></div>";
-  h += '<div class="mp-note">' + (cell.line
-    ? "编码 " + cell.code + "，数据集自带的锋面线编码"
-    : cell.side ? "冷暖侧来自数据原始编码 −20 / 20"
-      : "有观测，但没有锋面线，也不在冷暖侧") + "</div>";
-
-  const km = distKm([state.lon, state.lat], [lon, lat]);
-  const bearing = bearing16([state.lon, state.lat], [lon, lat]);
-  h += '<div class="mp-row"><span class="mp-k">离你</span><span class="mp-v">' + km.toFixed(1) + " km · " + bearing + "</span></div>";
-  h += '<div class="mp-note' + (km > state.range ? " mp-warn" : "") + '">' +
-    (km <= state.range ? "在作业范围内（" + state.range + " km）" : "超出作业范围（" + state.range + " km）") + "</div>";
-
-  const nf = nearestFrontFrom(lon, lat);
-  if (nf) {
-    h += '<div class="mp-row"><span class="mp-k">最近的锋面</span><span class="mp-v">' + nf.km.toFixed(1) + " km · " + nf.bearing + "</span></div>";
-    h += '<div class="mp-note">' + (nf.isObject
-      ? "锋面区 " + nf.id + " · 长 " + Math.round(nf.lengthKm) + " km"
-      : "短段锋面（< " + shortMin + " km，未单独编号）") + "</div>";
-  }
-
-  h += '<div class="mp-row"><span class="mp-k">冷暖侧</span><span class="mp-v">' + (cell.side || "锋区外") + "</span></div>";
-  // 水温：有真实数据就给数值（NOAA GHRSST，与锋面不同源），没有就直说
+  // 水温：这一格的真实档位值（NOAA GHRSST，与锋面不同源），没有就直说，绝不插值
   const sstHere = OFData.sstCell(state.date, lon, lat);
-  if (sstHere && sstHere.valueC !== null) {
-    h += '<div class="mp-row"><span class="mp-k">水温</span><span class="mp-v">' +
-      sstHere.valueC.toFixed(1) + " °C</span></div>";
-    h += '<div class="mp-note">NOAA GHRSST · 0.5 °C 分档</div>';
-  } else if (sstHere && sstHere.inGrid) {
-    h += '<div class="mp-row"><span class="mp-k">水温</span><span class="mp-v">该格无水温数据</span></div>';
-    h += '<div class="mp-note">该格为陆地 / 冰 / 缺测</div>';
-  } else {
-    h += '<div class="mp-row"><span class="mp-k">水温</span><span class="mp-v">该日期无数据</span></div>';
-    h += '<div class="mp-note">水温只覆盖部分日期</div>';
-  }
-  const spot = nearestSpotFrom(lon, lat);
-  if (spot) {
-    h += '<div class="mp-row"><span class="mp-k">推荐水域</span><span class="mp-v">' +
-      (spot.inside ? "就在 " + spot.id + " 里" : "距 " + spot.id + " " + spot.km.toFixed(1) + " km") + "</span></div>";
-    h += '<div class="mp-note">示例占位，没有真实渔场数据</div>';
-  }
-  return h + foot;
-}
+  const tempV = sstHere && sstHere.valueC !== null ? sstHere.valueC.toFixed(1) + " °C"
+    : sstHere && sstHere.inGrid ? "该格无水温数据" : "该日期无数据";
+  h += '<div class="mp-row"><span class="mp-k">水温</span><span class="mp-v">' + tempV + "</span></div>";
 
-function nearestSpotFrom(lon, lat) {
-  const list = DEMO_SPOTS.map((s) => {
-    const dx = (lon - s.lon) * kmPerLon(s.lat);
-    const dy = (lat - s.lat) * KM_PER_DEG;
-    return { id: s.id, grade: s.grade, km: Math.hypot(dx, dy),
-      bearing: bearing16([lon, lat], [s.lon, s.lat]),
-      inside: (dx * dx) / (s.rxKm * s.rxKm) + (dy * dy) / (s.ryKm * s.ryKm) <= 1 };
-  }).sort((a, b) => a.km - b.km);
-  return list.find((s) => s.inside) || list[0] || null;
+  // 最近锋面：只给距离（往哪个方向开，看地图上的锋面线与范围环）
+  const nf = nearestFrontFrom(lon, lat);
+  h += '<div class="mp-row"><span class="mp-k">最近锋面</span><span class="mp-v">' +
+    (nf ? nf.km.toFixed(1) + " km" : "—") + "</span></div>";
+
+  // 是否锋面区：落在锋面线上报「是 · 锋面线」，落在冷暖侧报侧别，其余报「否」
+  h += '<div class="mp-row"><span class="mp-k">锋面区</span><span class="mp-v">' +
+    (cell.line ? "是 · 锋面线" : cell.side ? "是 · " + cell.side : "否") + "</span></div>";
+  return h + foot;
 }
 
 function renderProbe() {

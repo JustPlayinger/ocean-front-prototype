@@ -105,7 +105,7 @@ const clickGeo = async (lon, lat) => {
 };
 const PROBE = `var b=document.getElementById("mapProbe"), m=document.getElementById("map");
   var rb=b.getBoundingClientRect(), rm=m.getBoundingClientRect();
-  return { hidden:b.hidden, text:b.textContent,
+  return { hidden:b.hidden, text:b.textContent, rows:b.querySelectorAll(".mp-row").length, h:Math.round(rb.height),
     inBounds: rb.left>=rm.left-1 && rb.top>=rm.top-1 && rb.right<=rm.right+1 && rb.bottom<=rm.bottom+1 };`;
 const results = [];
 const check = (label, cond, detail) => { results.push(`${cond ? "PASS" : "FAIL"}  ${label}${detail ? "  → " + detail : ""}`); };
@@ -462,14 +462,16 @@ const bandPoint = await evalJS(`var iso = document.getElementById("timeDate").va
     code: run[3] };`);
 await hoverGeo(bandPoint.lon, bandPoint.lat);
 const p1 = await evalJS(PROBE);
-check("鼠标移到锋面线像元 → 浮层给出坐标与「锋面线（编码 x）」",
-  p1.hidden === false && /\d+\.\d+°E, \d+\.\d+°N/.test(p1.text) && /锋面线（编码/.test(p1.text), p1.text.slice(0, 30));
-check("浮层里的编码与数据文件里的编码一致", p1.text.indexOf("编码 " + bandPoint.code) >= 0,
-  "数据 " + bandPoint.code + " / 浮层 " + (p1.text.match(/编码 (-?\d+)/) || [])[1]);
-check("浮层含离你多远 / 最近锋面 / 冷暖侧 / 真实水温（或明确说明没有）",
-  /离你/.test(p1.text) && /最近的锋面/.test(p1.text) && /冷暖侧/.test(p1.text) && /水温/.test(p1.text) &&
-  (/\d+\.\d °C/.test(p1.text) || /该格无水温数据|该日期无数据/.test(p1.text)),
-  "四项齐全");
+check("鼠标移到锋面线像元 → 浮层只给坐标 + 水温 + 最近锋面距离 + 锋面区",
+  p1.hidden === false && /\d+\.\d+°E, \d+\.\d+°N/.test(p1.text) && /水温/.test(p1.text) &&
+  /最近锋面/.test(p1.text) && /锋面区/.test(p1.text), p1.text.slice(0, 40));
+check("浮层里的「锋面区」按数据判为锋面线（与取样像元同源）",
+  p1.text.indexOf("是 · 锋面线") >= 0, "数据像元编码 " + bandPoint.code + " → 浮层判为锋面线");
+check("浮层含该格真实水温（或明确说明没有，绝不插值）",
+  /\d+\.\d °C/.test(p1.text) || /该格无水温数据|该日期无数据/.test(p1.text), "水温有值或缺省已说明");
+check("浮层已精简到 4 项（1 行坐标 + 3 行信息，不含方位 / 编码 / 数据类型 / 推荐水域）",
+  p1.rows === 3 && p1.h <= 150 && !/离你|方位|数据类型|推荐水域|编码/.test(p1.text),
+  "rows=" + p1.rows + " · h=" + p1.h + "px · " + p1.text.replace(/\s+/g, " ").slice(0, 60));
 const probeTemp = (p1.text.match(/([\d.]+) °C/) || [])[1];
 const dataTemp = await evalJS(`var c = OFData.sstCell(document.getElementById("timeDate").value, ${bandPoint.lon}, ${bandPoint.lat});
   return c && c.valueC !== null ? c.valueC.toFixed(1) : null;`);
@@ -488,7 +490,8 @@ const noDataPoint = await evalJS(`var iso = document.getElementById("timeDate").
 await hoverGeo(noDataPoint.lon, noDataPoint.lat);
 const p2 = await evalJS(PROBE);
 check("鼠标移到没有观测的像元 → 直说没有观测数据，不给任何数值",
-  /没有观测数据/.test(p2.text) && !/离你/.test(p2.text) && !/待接入/.test(p2.text), p2.text.slice(0, 30));
+  /没有观测数据/.test(p2.text) && !/离你/.test(p2.text) && !/待接入/.test(p2.text) &&
+  !/最近锋面/.test(p2.text) && p2.rows === 0, "rows=" + p2.rows + " · " + p2.text.slice(0, 30));
 
 // 钉住 / 取消 / Esc
 await hoverGeo(bandPoint.lon, bandPoint.lat);
