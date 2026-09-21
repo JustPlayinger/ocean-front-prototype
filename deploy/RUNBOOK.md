@@ -188,7 +188,7 @@ OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw /opt/ocean/venv/bin/python \
 
 | 数据 | 在哪跑 | 命令 |
 |---|---|---|
-| **锋面**（Zenodo 20356239，`front_location.zip` 18.3 GB / 15,706 天 / 1982–2024，HTTP Range 按天取 1.28 MB） | **本地 Windows 取，再上传** —— 服务器直连 Zenodo 读 zip 中央目录会反复 `IncompleteRead`，`remotezip` 开不了归档 | `backend\.venv\Scripts\python.exe backend\scripts\fetch_zenodo_front_samples.py 2024-01-01 2024-01-02`（分批，每批 ≤ 40 天）；上传后用 `chown -R ocean:ocean /srv/ocean/data/raw/front` |
+| **锋面**（Zenodo 20356239，`front_location.zip` 18.3 GB / 15,706 天 / 1982–2024，HTTP Range 按天取 1.28 MB） | **本地 Windows 取，再上传** —— 服务器直连 Zenodo 读 zip 中央目录会反复 `IncompleteRead`，`remotezip` 开不了归档 | ① 本地：`backend\.venv\Scripts\python.exe backend\scripts\fetch_zenodo_front_samples.py 2024-01-01 2024-01-02`（分批，每批 ≤ 40 天）<br>② 上传：`scp -r data\raw\front\2024 root@116.62.54.140:/srv/ocean/data/raw/front/`<br>③ 服务器：`chown -R ocean:ocean /srv/ocean/data/raw/front` |
 | **海温**（NOAA CoastWatch ERDDAP `noaacwBLendedCsstDaily`，0.05°，2002 至今，0.12 MB/天） | **服务器直连**（稳定） | `OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw /opt/ocean/venv/bin/python backend/scripts/fetch_sst_samples.py 2024-01-01 2024-01-02` |
 
 **加完数据必须重建索引**，否则接口按旧清单找文件、新日期会 404：

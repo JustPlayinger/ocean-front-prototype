@@ -10,16 +10,37 @@ from .data_access import FRONT_COLD_CODE, FRONT_LINE_CODES, FRONT_WARM_CODE
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _SST_STOPS = (
-    (22.0, (34, 94, 168)),
-    (25.0, (65, 182, 196)),
-    (28.0, (255, 255, 191)),
-    (30.0, (253, 174, 97)),
-    (33.0, (215, 25, 28)),
+    (0.0, (34, 94, 168)),
+    (0.33, (65, 182, 196)),
+    (0.66, (255, 255, 191)),
+    (0.83, (253, 174, 97)),
+    (1.0, (215, 25, 28)),
 )
+_SST_MIN_SPAN = 4.0   # 色标至少要 4 ℃ 跨度，否则平稳海域会被拉成噪声
 
 
-def render_sst_png(values_celsius: np.ndarray) -> bytes:
-    rgba = _sst_rgba(values_celsius)
+def sst_scale(values_celsius: np.ndarray) -> tuple[float, float]:
+    """按当前窗口的真实取值算色标上下限（模型里固定 22–33 ℃ 的夏季色标在冬季会整幅一个色）。
+
+    用 2% / 98% 分位抗离群，并保证至少 4 ℃ 跨度；实际用的上下限会随响应头一起给前端，
+    这样图例能标出真实数值，而不是猜一个固定色标。
+    """
+    values = np.asarray(values_celsius, dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return (0.0, _SST_MIN_SPAN)
+    low = float(np.percentile(finite, 2))
+    high = float(np.percentile(finite, 98))
+    span = high - low
+    if span < _SST_MIN_SPAN:
+        center = (low + high) / 2
+        low = center - _SST_MIN_SPAN / 2
+        high = center + _SST_MIN_SPAN / 2
+    return (round(low, 2), round(high, 2))
+
+
+def render_sst_png(values_celsius: np.ndarray, scale: tuple[float, float] | None = None) -> bytes:
+    rgba = _sst_rgba(values_celsius, scale)
     return encode_rgba_png(_north_up(rgba))
 
 
@@ -34,8 +55,12 @@ def render_front_png(front_values: np.ndarray) -> bytes:
     return encode_rgba_png(_north_up(rgba))
 
 
-def render_combined_png(sst_celsius: np.ndarray, front_values: np.ndarray) -> bytes:
-    base = _sst_rgba(sst_celsius)
+def render_combined_png(
+    sst_celsius: np.ndarray,
+    front_values: np.ndarray,
+    scale: tuple[float, float] | None = None,
+) -> bytes:
+    base = _sst_rgba(sst_celsius, scale)
     overlay = np.zeros_like(base)
     cold = front_values == FRONT_COLD_CODE
     warm = front_values == FRONT_WARM_CODE
@@ -65,28 +90,29 @@ def encode_rgba_png(rgba: np.ndarray) -> bytes:
     )
 
 
-def _sst_rgba(values_celsius: np.ndarray) -> np.ndarray:
+def _sst_rgba(values_celsius: np.ndarray, scale: tuple[float, float] | None = None) -> np.ndarray:
     values = np.asarray(values_celsius, dtype=float)
     rgba = np.zeros((*values.shape, 4), dtype=np.uint8)
     valid = np.isfinite(values)
     if not valid.any():
         return rgba
-    clipped = np.clip(values, _SST_STOPS[0][0], _SST_STOPS[-1][0])
-    red = np.zeros_like(clipped, dtype=float)
-    green = np.zeros_like(clipped, dtype=float)
-    blue = np.zeros_like(clipped, dtype=float)
+    low, high = scale if scale else sst_scale(values)
+    if high - low < 1e-6:
+        high = low + 1e-6
+    # 归一化到 0~1，再按固定色带取色：色带本身不随日期变，只有映射区间随窗口变
+    norm = np.clip((values - low) / (high - low), 0.0, 1.0)
+    red = np.zeros_like(norm)
+    green = np.zeros_like(norm)
+    blue = np.zeros_like(norm)
     for left, right in pairwise(_SST_STOPS):
-        left_value, left_color = left
-        right_value, right_color = right
-        segment = (clipped >= left_value) & (clipped <= right_value)
-        ratio = (clipped[segment] - left_value) / (right_value - left_value)
-        red[segment] = left_color[0] + (right_color[0] - left_color[0]) * ratio
-        green[segment] = left_color[1] + (right_color[1] - left_color[1]) * ratio
-        blue[segment] = left_color[2] + (right_color[2] - left_color[2]) * ratio
-    below = clipped <= _SST_STOPS[0][0]
-    above = clipped >= _SST_STOPS[-1][0]
-    red[below], green[below], blue[below] = _SST_STOPS[0][1]
-    red[above], green[above], blue[above] = _SST_STOPS[-1][1]
+        left_pos, left_color = left
+        right_pos, right_color = right
+        segment = (norm >= left_pos) & (norm <= right_pos)
+        span = right_pos - left_pos
+        ratio = np.zeros_like(norm) if span <= 0 else (norm - left_pos) / span
+        red[segment] = left_color[0] + (right_color[0] - left_color[0]) * ratio[segment]
+        green[segment] = left_color[1] + (right_color[1] - left_color[1]) * ratio[segment]
+        blue[segment] = left_color[2] + (right_color[2] - left_color[2]) * ratio[segment]
     rgba[..., 0] = np.where(valid, red, 0).astype(np.uint8)
     rgba[..., 1] = np.where(valid, green, 0).astype(np.uint8)
     rgba[..., 2] = np.where(valid, blue, 0).astype(np.uint8)

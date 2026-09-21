@@ -34,7 +34,13 @@ from .history import (
     get_history_index,
 )
 from .main_analysis import compute_analysis_response
-from .raster_render import render_combined_png, render_fishing_png, render_front_png, render_sst_png
+from .raster_render import (
+    render_combined_png,
+    render_fishing_png,
+    render_front_png,
+    render_sst_png,
+    sst_scale,
+)
 from .reporting import compute_report_response
 from .schemas import (
     AiAnalysisRequest,
@@ -426,16 +432,16 @@ def analysis_raster(
         kind=kind,
     )
     if cache_path.is_file():
-        return Response(
-            content=cache_path.read_bytes(),
-            media_type="image/png",
-            headers={
-                "Cache-Control": "public, max-age=3600",
-                "X-Raster-Bounds": ",".join(str(value) for value in _query_bounds(longitude, latitude, radius_deg)),
-                "X-Raster-Cache": "hit",
-                "X-Raster-Kind": kind,
-            },
-        )
+        headers = {
+            "Cache-Control": "public, max-age=3600",
+            "X-Raster-Bounds": ",".join(str(value) for value in _query_bounds(longitude, latitude, radius_deg)),
+            "X-Raster-Cache": "hit",
+            "X-Raster-Kind": kind,
+        }
+        scale_path = cache_path.with_suffix(".scale")
+        if scale_path.is_file():
+            headers["X-Raster-Scale"] = scale_path.read_text(encoding="utf-8").strip()
+        return Response(content=cache_path.read_bytes(), media_type="image/png", headers=headers)
     front_record = match_front_record(list(index.front_records), observation_date)
     sst_record = match_sst_record(list(index.sst_records), observation_date)
     if front_record is None:
@@ -453,8 +459,10 @@ def analysis_raster(
         raise HTTPException(status_code=422, detail=f"栅格图像生成失败: {exc}") from exc
 
     if kind == "sst":
-        content = render_sst_png(sst_celsius)
+        scale = sst_scale(sst_celsius)
+        content = render_sst_png(sst_celsius, scale)
     elif kind == "front":
+        scale = None
         content = render_front_png(front)
     else:
         # combined 需要两张图逐像元对应：front 是全局 0.05° 网格，而 SST 只覆盖数据集裁剪过的窗口，
@@ -463,9 +471,13 @@ def analysis_raster(
         sst_celsius, front, bounds = _align_combined_grids(
             sst_var, front_var, _query_bounds(longitude, latitude, radius_deg)
         )
-        content = render_combined_png(sst_celsius, front)
+        scale = sst_scale(sst_celsius)
+        content = render_combined_png(sst_celsius, front, scale)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(content)
+    # 色标随图一起缓存：缓存命中时也要能把 X-Raster-Scale 还给前端（图例要用真实数值）
+    if scale:
+        cache_path.with_suffix(".scale").write_text(f"{scale[0]},{scale[1]}", encoding="utf-8")
     if kind != "combined":
         bounds = _query_bounds(longitude, latitude, radius_deg)
     return Response(
@@ -476,6 +488,7 @@ def analysis_raster(
             "X-Raster-Bounds": ",".join(str(value) for value in bounds),
             "X-Raster-Cache": "miss",
             "X-Raster-Kind": kind,
+            **({"X-Raster-Scale": f"{scale[0]},{scale[1]}"} if scale else {}),
         },
     )
 
