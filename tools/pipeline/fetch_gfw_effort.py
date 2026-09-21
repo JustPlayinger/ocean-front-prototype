@@ -1,0 +1,386 @@
+"""抓取 Global Fishing Watch 的 AIS「表观捕捞努力量」（渔场数据）到本仓 data/raw/fishing/。
+
+数据出处（Kroodsma et al., Science 2018, doi:10.1126/science.aao5646 发布的数据产品）
+- 接口：GFW API v3 · 4Wings report（POST https://gateway.api.globalfishingwatch.org/v3/4wings/report）
+- 数据集：public-global-fishing-effort:latest（表观捕捞努力量，小时）
+          public-global-presence:latest（全部船舶存在时长，--dataset presence）
+- 覆盖：2017 年至今（约 5 天前）；分辨率 LOW=0.1° / HIGH=0.01°；粒度 HOURLY/DAILY/MONTHLY/YEARLY
+- 许可：GFW 公开数据 CC BY-SA 4.0；**API 使用条款限定非商业用途**（课程/科研可用，页面必须标注来源）
+
+契约要点（照抄官方 R 客户端 gfwr 源码，避免猜错）
+- 认证：`Authorization: Bearer <token>`；`Content-Type: application/json`
+- 查询参数：`datasets[0]`、`spatial-resolution`、`temporal-resolution`、`date-range`(start,end；end 不含，跨度 ≤366 天)、`format=CSV`
+- 请求体：`{"geojson": <多边形>}`（自定区域必须包在 geojson 键下）
+- 返回：zip 压缩包，内含 CSV
+
+用法
+    # 只打印将发出的请求，不调用 API（无需 token）
+    python tools/pipeline/fetch_gfw_effort.py --start 2024-07-01 --end 2024-09-01 --dry-run
+    # 真取数（token 放环境变量 GFW_TOKEN）
+    python tools/pipeline/fetch_gfw_effort.py --start 2024-07-01 --end 2024-09-01
+    # 按锋面数据的实际覆盖日期取（自动合并连续区间）
+    python tools/pipeline/fetch_gfw_effort.py --from-front-data
+
+申请 token：https://globalfishingwatch.org/our-apis/tokens （免费账号；服务器上建议存 /etc/ocean/gfw.env）
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import io
+import json
+import os
+import re
+import sys
+import time
+import zipfile
+from datetime import date, timedelta
+from pathlib import Path
+
+import requests
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUT_DIR = REPO_ROOT / "data" / "raw" / "fishing"
+DEFAULT_FRONT_DIR = REPO_ROOT / "data" / "raw" / "front"
+# 与 meta.js / 后端一致的东海窗口
+DEFAULT_BBOX = (120.0, 27.0, 128.0, 34.0)
+
+API_URL = "https://gateway.api.globalfishingwatch.org/v3/4wings/report"
+DATASETS = {
+    "effort": "public-global-fishing-effort:latest",
+    "presence": "public-global-presence:latest",
+}
+EARLIEST_DATE = date(2017, 1, 1)   # GFW 4Wings 自 2017 年起有数据
+MAX_RANGE_DAYS = 366               # GFW 单次 date-range 限制
+
+def parse_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"日期格式应为 YYYY-MM-DD，收到 {value!r}") from exc
+
+
+def parse_bbox(value: str) -> tuple[float, float, float, float]:
+    parts = [item.strip() for item in value.split(",")]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("bbox 需要 4 个数：minLon,minLat,maxLon,maxLat")
+    lon0, lat0, lon1, lat1 = (float(item) for item in parts)
+    return lon0, lat0, lon1, lat1
+
+
+def bbox_polygon(bbox: tuple[float, float, float, float]) -> dict[str, object]:
+    lon0, lat0, lon1, lat1 = bbox
+    ring = [[lon0, lat0], [lon1, lat0], [lon1, lat1], [lon0, lat1], [lon0, lat0]]
+    return {"type": "Polygon", "coordinates": [ring]}
+
+
+def dates_from_front_data(front_dir: Path) -> list[date]:
+    """锋面数据实际覆盖的日期（文件名形如 front_location20240805.nc）。"""
+    pattern = re.compile(r"(\d{8})")
+    found: set[date] = set()
+    for path in sorted(front_dir.rglob("*.nc")):
+        match = pattern.search(path.stem)
+        if not match:
+            continue
+        try:
+            found.add(date(int(match.group(1)[:4]), int(match.group(1)[4:6]), int(match.group(1)[6:8])))
+        except ValueError:
+            continue
+    return sorted(found)
+
+
+def to_ranges(dates: list[date]) -> list[tuple[date, date]]:
+    """把日期列表合并成连续区间（GFW 的 date-range 是闭开区间）。"""
+    ranges: list[tuple[date, date]] = []
+    for item in sorted(dates):
+        if ranges and item == ranges[-1][1]:
+            start, _ = ranges[-1]
+            ranges[-1] = (start, item + timedelta(days=1))
+        else:
+            ranges.append((item, item + timedelta(days=1)))
+    return ranges
+
+
+def split_long_ranges(ranges: list[tuple[date, date]]) -> list[tuple[date, date]]:
+    """GFW 限制单次请求跨度 ≤ 366 天，超出就切开。"""
+    out: list[tuple[date, date]] = []
+    for start, end in ranges:
+        cursor = start
+        while (end - cursor).days > MAX_RANGE_DAYS:
+            out.append((cursor, cursor + timedelta(days=MAX_RANGE_DAYS)))
+            cursor = cursor + timedelta(days=MAX_RANGE_DAYS)
+        out.append((cursor, end))
+    return out
+
+
+def build_request(
+    *,
+    bbox: tuple[float, float, float, float],
+    start: date,
+    end: date,
+    dataset: str,
+    resolution: str,
+    temporal: str,
+) -> tuple[str, dict[str, str], dict[str, object]]:
+    params = {
+        "datasets[0]": DATASETS[dataset],
+        "spatial-resolution": resolution,
+        "temporal-resolution": temporal,
+        "date-range": f"{start.isoformat()},{end.isoformat()}",
+        "format": "CSV",
+    }
+    body = {"geojson": bbox_polygon(bbox)}
+    return API_URL, params, body
+
+def fetch_range(
+    *,
+    bbox: tuple[float, float, float, float],
+    start: date,
+    end: date,
+    dataset: str,
+    resolution: str,
+    temporal: str,
+    token: str,
+    timeout: float,
+    retries: int,
+) -> list[dict[str, float | str]]:
+    url, params, body = build_request(
+        bbox=bbox, start=start, end=end, dataset=dataset, resolution=resolution, temporal=temporal
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "ocean-front-prototype/0.1 (course prototype; non-commercial)",
+    }
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            response = requests.post(url, params=params, json=body, headers=headers, timeout=timeout)
+            if response.status_code == 401:
+                raise SystemExit(
+                    "401 未授权：token 无效或已过期，请到 "
+                    "https://globalfishingwatch.org/our-apis/tokens 重新申请"
+                )
+            if response.status_code == 429:
+                wait = 20 * attempt
+                print(f"  429 速率受限，{wait}s 后重试（{attempt}/{retries}）", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            return parse_response(response.content, dataset)
+        except SystemExit:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 网络/解析异常统一转重试
+            last_error = exc
+            wait = 5 * attempt
+            print(f"  第 {attempt} 次请求失败（{exc}），{wait}s 后重试", file=sys.stderr)
+            time.sleep(wait)
+    raise RuntimeError(f"{start}~{end} 取数失败：{last_error}")
+
+
+def parse_response(payload: bytes, dataset: str) -> list[dict[str, float | str]]:
+    """GFW 返回的是 zip（内含 CSV）。列名做兼容处理，不同版本字段名略有差异。"""
+    if payload[:2] == b"PK":
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
+            if not names:
+                raise ValueError(f"返回的 zip 里没有 CSV：{archive.namelist()}")
+            text = archive.read(names[0]).decode("utf-8-sig")
+    else:
+        text = payload.decode("utf-8-sig")
+
+    reader = csv.DictReader(io.StringIO(text))
+    fieldnames = reader.fieldnames or []
+    if not fieldnames:
+        return []
+
+    def pick(*candidates: str) -> str | None:
+        for name in fieldnames:
+            lowered = name.strip().lower()
+            if lowered in candidates or any(candidate in lowered for candidate in candidates):
+                return name
+        return None
+
+    lat_key = pick("cell_ll_lat", "lat")
+    lon_key = pick("cell_ll_lon", "lon")
+    hours_key = pick("hours", "fishing_hours", "effort")
+    date_key = pick("date", "time range", "time_range", "day")
+    rows: list[dict[str, float | str]] = []
+    for row in reader:
+        try:
+            record: dict[str, float | str] = {
+                "lat": round(float(str(row[lat_key]).strip()), 4) if lat_key else None,
+                "lon": round(float(str(row[lon_key]).strip()), 4) if lon_key else None,
+                "hours": round(float(str(row[hours_key]).strip()), 4) if hours_key else None,
+            }
+        except (TypeError, ValueError):
+            continue
+        record["date"] = str(row.get(date_key, "")).strip()[:10] if date_key else ""
+        record["dataset"] = dataset
+        rows.append(record)
+    return rows
+
+
+def group_by_date(rows: list[dict[str, float | str]]) -> dict[str, list[dict[str, float | str]]]:
+    grouped: dict[str, list[dict[str, float | str]]] = {}
+    for row in rows:
+        iso = str(row.get("date") or "")[:10]
+        if iso:
+            grouped.setdefault(iso, []).append(row)
+    return grouped
+
+
+def write_day(
+    *,
+    out_dir: Path,
+    iso: str,
+    cells: list[dict[str, float | str]],
+    dataset: str,
+    resolution: str,
+    bbox: tuple[float, float, float, float],
+) -> dict[str, object]:
+    kept = [
+        {"lon": cell["lon"], "lat": cell["lat"], "hours": cell["hours"]}
+        for cell in cells
+        if cell.get("hours") is not None
+    ]
+    kept.sort(key=lambda cell: (-float(cell["hours"]), float(cell["lat"]), float(cell["lon"])))
+    total = round(sum(float(cell["hours"]) for cell in kept), 3)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "date": iso,
+        "source": {
+            "name": "Global Fishing Watch · AIS apparent fishing effort",
+            "api": "4Wings report v3",
+            "dataset": DATASETS[dataset],
+            "citation": "Kroodsma et al. 2018, Science, doi:10.1126/science.aao5646",
+            "license": "CC BY-SA 4.0（API 条款：仅限非商业用途）",
+            "retrieved_at": date.today().isoformat(),
+        },
+        "spatial_resolution": resolution,
+        "bbox": list(bbox),
+        "cell_count": len(kept),
+        "total_hours": total,
+        "cells": kept,
+    }
+    target = out_dir / f"effort-{iso.replace('-', '')}.json"
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"date": iso, "cell_count": len(kept), "total_hours": total, "file": target.name}
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="抓取 GFW AIS 表观捕捞努力量（渔场数据）到 data/raw/fishing/")
+    parser.add_argument("--start", type=parse_date, help="起始日期（含）")
+    parser.add_argument("--end", type=parse_date, help="结束日期（不含）")
+    parser.add_argument("--dates", type=parse_date, nargs="*", help="只取这些日期（与 --start/--end 二选一）")
+    parser.add_argument("--from-front-data", action="store_true", help="按 data/raw/front 实际覆盖日期取（自动合并连续区间）")
+    parser.add_argument("--front-dir", type=Path, default=DEFAULT_FRONT_DIR, help="锋面数据目录（配合 --from-front-data）")
+    parser.add_argument("--bbox", type=parse_bbox, default=DEFAULT_BBOX, help="minLon,minLat,maxLon,maxLat")
+    parser.add_argument("--dataset", choices=sorted(DATASETS), default="effort", help="effort=捕捞努力量；presence=船舶存在时长")
+    parser.add_argument("--resolution", choices=("LOW", "HIGH"), default="LOW", help="LOW=0.1°；HIGH=0.01°")
+    parser.add_argument("--temporal", choices=("HOURLY", "DAILY", "MONTHLY", "YEARLY"), default="DAILY")
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--token", default=None, help="GFW API token（默认读环境变量 GFW_TOKEN）")
+    parser.add_argument("--token-file", type=Path, default=None, help="从文件首行读 token")
+    parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument("--retries", type=int, default=4)
+    parser.add_argument("--dry-run", action="store_true", help="只打印将发出的请求，不调用 API（无需 token）")
+    args = parser.parse_args()
+
+    # ---- 组装日期区间 ----
+    if args.from_front_data:
+        front_dates = dates_from_front_data(args.front_dir)
+        if not front_dates:
+            print(f"没有在 {args.front_dir} 找到锋面文件，无法推断日期", file=sys.stderr)
+            return 2
+        skipped = [item for item in front_dates if item < EARLIEST_DATE]
+        if skipped:
+            print(
+                f"注意：GFW 数据自 {EARLIEST_DATE} 起才有，锋面数据里 {len(skipped)} 天"
+                f"（最早 {skipped[0]}）会被跳过",
+                file=sys.stderr,
+            )
+        ranges = to_ranges([item for item in front_dates if item >= EARLIEST_DATE])
+    elif args.dates:
+        ranges = to_ranges(args.dates)
+    elif args.start and args.end:
+        if args.end <= args.start:
+            parser.error("--end 必须晚于 --start（GFW 的 end 是不含的）")
+        ranges = [(args.start, args.end)]
+    else:
+        parser.error("请给出 --start/--end、--dates 或 --from-front-data 之一")
+
+    ranges = split_long_ranges(ranges)
+    if not ranges:
+        print("没有落在 GFW 覆盖范围内的日期（2017-01-01 起）", file=sys.stderr)
+        return 2
+
+    # ---- token ----
+    token = args.token or os.environ.get("GFW_TOKEN", "")
+    if not token and args.token_file and args.token_file.is_file():
+        token = args.token_file.read_text(encoding="utf-8").strip().splitlines()[0]
+    if not token and not args.dry_run:
+        print(
+            "缺少 GFW API token：请到 https://globalfishingwatch.org/our-apis/tokens 申请"
+            "（免费，限非商业用途），然后设置环境变量 GFW_TOKEN，或用 --token-file 指定文件；\n"
+            "也可以先加 --dry-run 只查看将要发出的请求。",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"数据集 {DATASETS[args.dataset]} · 分辨率 {args.resolution} · 粒度 {args.temporal}")
+    print(f"窗口 bbox={args.bbox} · 需要 {len(ranges)} 次请求")
+
+    summaries: list[dict[str, object]] = []
+    for index, (start, end) in enumerate(ranges, start=1):
+        url, params, body = build_request(
+            bbox=args.bbox, start=start, end=end, dataset=args.dataset,
+            resolution=args.resolution, temporal=args.temporal,
+        )
+        print(f"[{index}/{len(ranges)}] {start} ~ {end}")
+        if args.dry_run:
+            print(f"  POST {url}")
+            print(f"  params={json.dumps(params, ensure_ascii=False)}")
+            print(f"  body={json.dumps(body, ensure_ascii=False)[:200]}")
+            continue
+        rows = fetch_range(
+            bbox=args.bbox, start=start, end=end, dataset=args.dataset,
+            resolution=args.resolution, temporal=args.temporal,
+            token=token, timeout=args.timeout, retries=args.retries,
+        )
+        grouped = group_by_date(rows)
+        if not grouped:
+            print("  该区间没有返回任何格点（可能这几天海域内无 AIS 捕捞活动）")
+        for iso in sorted(grouped):
+            summary = write_day(
+                out_dir=args.out_dir, iso=iso, cells=grouped[iso],
+                dataset=args.dataset, resolution=args.resolution, bbox=args.bbox,
+            )
+            summaries.append(summary)
+            print(f"  {iso}: {summary['cell_count']} 个格点 · {summary['total_hours']} 小时")
+
+    if args.dry_run:
+        print("\n--dry-run 结束：未调用 API、未写文件。")
+        return 0
+
+    manifest = {
+        "dataset": DATASETS[args.dataset],
+        "spatial_resolution": args.resolution,
+        "temporal_resolution": args.temporal,
+        "bbox": list(args.bbox),
+        "days": summaries,
+        "generated_at": date.today().isoformat(),
+    }
+    (args.out_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+    total_hours = round(sum(float(item["total_hours"]) for item in summaries), 3)
+    print(f"\n完成：{len(summaries)} 天 · 合计 {total_hours} 小时 · 输出目录 {args.out_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+

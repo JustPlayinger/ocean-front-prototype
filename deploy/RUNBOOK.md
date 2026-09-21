@@ -149,6 +149,21 @@ ssh root@116.62.54.140 "curl -fsS -X POST http://127.0.0.1/api/data/index/rebuil
 | 远程命令里的 `-H "Host: x"` 到服务器变成 `-H Host:` + IP 被当成主机名（curl 报 `Bad hostname`、nginx 返 400） | PowerShell 5.1 向原生程序（ssh.exe）传参时会**吞掉内层双引号** | 远程命令尽量不用引号：直连 `http://127.0.0.1:8000/...`，传 query 用 `curl --get -d k=v`；必须用 Host 头时写 `-H Host:1.2.3.4`（无空格） |
 | 轮询部署进度永远是 `RUNNING` | `pgrep -f ocean-remote-setup.sh` **会匹配到轮询命令自己的命令行** | 改成看日志收尾标志：`grep -q curlexe /var/log/ocean-setup.log`；`deploy.ps1` 已修正 |
 
+### GFW token（渔场数据取数用）
+
+GFW API 需要 token，**只用于数据准备阶段**（不在常驻服务里），建议存服务器上：
+
+```bash
+sudo install -d -m 700 /etc/ocean
+echo 'GFW_TOKEN=粘贴你的token' | sudo tee /etc/ocean/gfw.env >/dev/null
+sudo chmod 600 /etc/ocean/gfw.env
+# 用的时候（一次性生效）
+set -a; . /etc/ocean/gfw.env; set +a
+cd /opt/ocean && /opt/ocean/venv/bin/python tools/pipeline/fetch_gfw_effort.py --from-front-data
+```
+
+> 取数脚本已随代码部署到 `/opt/ocean/tools/pipeline/fetch_gfw_effort.py`；token 不要写进仓库、不要提交。
+
 ## 编码约定（改动后必须遵守，`.gitattributes` 已锁死前三项）
 
 | 文件 | 换行 | 编码 | 由谁保证 |
