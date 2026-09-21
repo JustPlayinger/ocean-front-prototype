@@ -51,10 +51,36 @@ function Write-Step([string]$Text) { Write-Host ""; Write-Host "=== $Text ===" -
 function Assert-LastExit([string]$What) {
   if ($LASTEXITCODE -ne 0) { throw "$What 失败（退出码 $LASTEXITCODE）" }
 }
+$SshTarget = "$User@$ServerIp"
+$SshArgs = @("-o", "StrictHostKeyChecking=accept-new")
+$ScpArgs = @("-o", "StrictHostKeyChecking=accept-new")
+if ($KeyFile) {
+  $SshArgs = @("-i", $KeyFile) + $SshArgs
+  $ScpArgs = @("-i", $KeyFile) + $ScpArgs
+}
 function Invoke-Ssh([string]$Command) {
-  if ($KeyFile) { & ssh -i $KeyFile -o StrictHostKeyChecking=accept-new "$User@$ServerIp" $Command }
-  else { & ssh -o StrictHostKeyChecking=accept-new "$User@$ServerIp" $Command }
+  & ssh @SshArgs $SshTarget $Command
   Assert-LastExit "ssh 执行"
+}
+function Invoke-SshCapture([string]$Command) {
+  $result = & ssh @SshArgs $SshTarget $Command
+  Assert-LastExit "ssh 执行"
+  return $result
+}
+function Invoke-RemoteSetup([string]$SetupArgs) {
+  # 远程安装要跑几分钟（apt + pip）：若在前台 ssh 里等，网络抖动或本地中断都会让远端脚本被杀。
+  # 因此改成 setsid 后台执行 + 轮询日志，断了也不影响服务器上的进度（脚本本身幂等）。
+  $log = "/var/log/ocean-setup.log"
+  Invoke-Ssh "setsid nohup bash /tmp/ocean-remote-setup.sh $SetupArgs > $log 2>&1 < /dev/null & echo setup-started"
+  $deadline = (Get-Date).AddMinutes(30)
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 15
+    $state = (Invoke-SshCapture "pgrep -f ocean-remote-setup.sh >/dev/null && echo RUNNING || echo DONE") -join " "
+    $tail = (Invoke-SshCapture "tail -n 3 $log") -join " | "
+    Write-Host ("  [{0}] {1}" -f $state.Trim(), $tail)
+    if ($state -match "DONE") { break }
+  }
+  Write-Host "远程安装日志：ssh $SshTarget 'tail -n 40 $log'" -ForegroundColor DarkGray
 }
 
 Write-Step "0/6 预检"
@@ -84,19 +110,17 @@ if (-not $SkipUpload) {
   Write-Host "应用包：$Package（$mb MB）" -ForegroundColor Green
 
   Write-Step "2/6 上传应用包与安装脚本"
-  $scpCommon = @()
-  if ($KeyFile) { $scpCommon += @("-i", $KeyFile, "-o", "StrictHostKeyChecking=accept-new") }
-  & scp @scpCommon $Package "$User@${ServerIp}:/tmp/$PkgName"
+  & scp @ScpArgs $Package "$User@${ServerIp}:/tmp/$PkgName"
   Assert-LastExit "scp 应用包"
-  & scp @scpCommon (Join-Path $PSScriptRoot "remote-setup.sh") "$User@${ServerIp}:/tmp/ocean-remote-setup.sh"
+  & scp @ScpArgs (Join-Path $PSScriptRoot "remote-setup.sh") "$User@${ServerIp}:/tmp/ocean-remote-setup.sh"
   Assert-LastExit "scp 安装脚本"
 
-  Write-Step "3/6 远程安装与部署（约 3~8 分钟，首次装 Node/Python/MySQL 更久）"
-  Invoke-Ssh "bash /tmp/ocean-remote-setup.sh $ServerIp /tmp/$PkgName"
+  Write-Step "3/6 远程安装与部署（后台执行 + 轮询，约 3~8 分钟）"
+  Invoke-RemoteSetup "$ServerIp /tmp/$PkgName"
 }
 else {
   Write-Step "1-3/6 跳过上传，改为重跑远程环境与服务"
-  Invoke-Ssh "bash /tmp/ocean-remote-setup.sh $ServerIp"
+  Invoke-RemoteSetup "$ServerIp"
 }
 
 if (-not $SkipData) {
@@ -109,11 +133,11 @@ if (-not $SkipData) {
     Assert-LastExit "tar 打包数据"
     $mb = [math]::Round((Get-Item $DataPackage).Length / 1MB, 2)
     Write-Host "数据包：$DataPackage（$mb MB）" -ForegroundColor Green
-    & scp @scpCommon $DataPackage "$User@${ServerIp}:/tmp/$DataPkgName"
+    & scp @ScpArgs $DataPackage "$User@${ServerIp}:/tmp/$DataPkgName"
     Assert-LastExit "scp 数据包"
     Invoke-Ssh "mkdir -p /srv/ocean/data/raw && tar -xzf /tmp/$DataPkgName -C /srv/ocean/data/raw && rm -f /tmp/$DataPkgName && find /srv/ocean/data/raw -name '*.nc' | wc -l"
     Write-Step "5/6 重跑权限收口与服务重启（remote-setup.sh 幂等）"
-    Invoke-Ssh "bash /tmp/ocean-remote-setup.sh $ServerIp"
+    Invoke-RemoteSetup "$ServerIp"
   }
 }
 else {

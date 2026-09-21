@@ -20,9 +20,18 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$ServerIp,
-  [int[]]$Ports = @(22, 80, 443, 3389),
+  # 注意：用 powershell -File 调用时无法传数组，所以这里收字符串再自己拆
+  # 例：-Ports "22,80,443,3389"
+  [string]$Ports = "22,80,443,3389",
   [int]$TimeoutMs = 5000
 )
+
+$portList = @()
+foreach ($item in ($Ports -split ',')) {
+  $trimmed = $item.Trim()
+  if ($trimmed -ne "") { $portList += [int]$trimmed }
+}
+if ($portList.Count -eq 0) { throw '没有可探测的端口，请用 -Ports "22,80" 这种写法' }
 
 function Test-TcpPort {
   # 注意：参数不能叫 -Host —— 那是 PowerShell 的只读自动变量，赋值会报「无法覆盖变量 Host」
@@ -45,7 +54,7 @@ function Test-TcpPort {
 }
 
 Write-Host "探测 $ServerIp（超时 ${TimeoutMs}ms）" -ForegroundColor Cyan
-foreach ($port in $Ports) {
+foreach ($port in $portList) {
   $result = Test-TcpPort -Target $ServerIp -Port $port -TimeoutMs $TimeoutMs
   $state = [string]$result.State
   $ms = [string]$result.Ms
