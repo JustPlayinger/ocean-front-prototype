@@ -57,6 +57,16 @@ DATASETS = {
 EARLIEST_DATE = date(2017, 1, 1)   # GFW 4Wings 自 2017 年起有数据
 MAX_RANGE_DAYS = 366               # GFW 单次 date-range 限制
 
+
+def clean_token(value: str) -> str:
+    """规范化 token：去掉 CR/LF/首尾空白与仓库常见的包裹引号。
+
+    ⚠️ 实测坑：在 Windows 上生成的 env 文件是 CRLF，scp 到 Linux 后 token 尾部会带 \\r，
+    请求头变成 `Bearer <token>\\r`，GFW 直接拒绝：
+    `Invalid leading whitespace, reserved character(s), or return character(s) in header value`。
+    """
+    return value.replace("\r", "").replace("\n", "").strip().strip('"').strip("'")
+
 def parse_date(value: str) -> date:
     try:
         return date.fromisoformat(value)
@@ -403,9 +413,10 @@ def main() -> int:
         return 2
 
     # ---- token ----
-    token = args.token or os.environ.get("GFW_TOKEN", "")
+    token = clean_token(args.token or os.environ.get("GFW_TOKEN", ""))
     if not token and args.token_file and args.token_file.is_file():
-        token = args.token_file.read_text(encoding="utf-8").strip().splitlines()[0]
+        raw = args.token_file.read_text(encoding="utf-8").strip()
+        token = clean_token(raw.split("=", 1)[1] if raw.startswith("GFW_TOKEN=") else raw)
     if not token and not args.dry_run:
         print(
             "缺少 GFW API token：请到 https://globalfishingwatch.org/our-apis/tokens 申请"
