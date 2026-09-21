@@ -188,7 +188,7 @@ OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw /opt/ocean/venv/bin/python \
 
 | 数据 | 在哪跑 | 命令 |
 |---|---|---|
-| **锋面**（Zenodo 20356239，`front_location.zip` 18.3 GB / 15,706 天 / 1982–2024，HTTP Range 按天取 1.28 MB） | **本地 Windows 取，再上传** —— 服务器直连 Zenodo 读 zip 中央目录会反复 `IncompleteRead`，`remotezip` 开不了归档 | ① 本地：`backend\.venv\Scripts\python.exe backend\scripts\fetch_zenodo_front_samples.py 2024-01-01 2024-01-02`（分批，每批 ≤ 40 天）<br>② 上传：`scp -r data\raw\front\2024 root@116.62.54.140:/srv/ocean/data/raw/front/`<br>③ 服务器：`chown -R ocean:ocean /srv/ocean/data/raw/front` |
+| **锋面**（Zenodo 20356239，`front_location.zip` 18.3 GB / 15,706 天 / 1982–2024，HTTP Range 按天取 1.28 MB） | **本地 Windows 取，再上传** —— 服务器直连 Zenodo 读 zip 中央目录会反复 `IncompleteRead`，`remotezip` 开不了归档 | ① 本地：`backend\.venv\Scripts\python.exe backend\scripts\fetch_zenodo_front_samples.py 2024-01-01 2024-01-02`（分批，每批 ≤ 40 天；用 `C:\temp\fetch_front_batch.py` 那种驱动可 3 路并发）<br>② 同步：`powershell -File tools\pipeline\sync-front-to-server.ps1`（只传服务器缺的，幂等，末尾自动 chown + 重建索引） |
 | **海温**（NOAA CoastWatch ERDDAP `noaacwBLendedCsstDaily`，0.05°，2002 至今，0.12 MB/天） | **服务器直连**（稳定） | `OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw /opt/ocean/venv/bin/python backend/scripts/fetch_sst_samples.py 2024-01-01 2024-01-02` |
 
 **加完数据必须重建索引**，否则接口按旧清单找文件、新日期会 404：
@@ -197,9 +197,20 @@ OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw /opt/ocean/venv/bin/python \
 curl -X POST http://127.0.0.1:8000/api/data/index/rebuild
 ```
 
-批量任务的两条实测建议：
-* **并发 3 路最快**（网络等待型）：SST 单进程约 24 s/天 → 3 路约 3.7 s/天；锋面单进程 6–20 s/天。
+（用 `tools/pipeline/sync-front-to-server.ps1` 同步锋面时会自动做这一步。）
+
+批量任务的三条实测建议：
+* **并发 3 路最快**（网络等待型）：SST 单进程约 24 s/天 → 3 路约 2.6 s/天（实测 731 天无失败跑完）；锋面单进程 6–20 s/天，3 路后 731 天约 1 小时。
 * **单次调用别传太多日期**：一次给 731 个日期当命令行参数，外部命令会直接启动失败（exit 为空、无输出），分批即可，脚本本身会跳过已存在的文件（可中断续跑）。
+* **.ps1 上传脚本要带 BOM**：无 BOM 的 UTF-8 中文注释会被 PowerShell 5.1 当 GBK 读，报「表达式或语句中包含意外的标记」；写文件时用 `Set-Content -Encoding utf8`（PS 5.1 会写 BOM）。
+
+## SST 色标自适应（2026-09 修）
+
+图层色标原先固定 22–33 ℃（按夏季调的），新增全年数据后 **2024-01-15（13.2–18.2 ℃）与 2024-12-01（18.8–21.4 ℃）渲染出来只有 1 种颜色、整幅一个平色**。
+现在 `raster_render.sst_scale()` 按当前窗口 2%/98% 分位算上下限、并保证至少 4 ℃ 跨度；
+实际色标通过 **`X-Raster-Scale: vmin,vmax`** 响应头返回（缓存命中时也返回，存在同目录 `.scale` 旁车文件里），前端图例直接用它。
+实测：2024-01-15 由 1 色变 402 色、2024-12-01 由 1 色变 216 色；极平稳场（30.0–30.2 ℃）保持 41 色、不会被拉成噪声。
+**改了色标要清缓存**：`rm -f /srv/ocean/data/cache/rasters/*`，否则会继续返回旧的平色图。
 
 **实测踩过的坑（照做可避免）：**
 
