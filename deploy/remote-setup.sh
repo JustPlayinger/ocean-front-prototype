@@ -62,6 +62,13 @@ fi
 # ---------- 5. Python 环境与依赖 ----------
 if [ -f "$APP_DIR/backend/pyproject.toml" ]; then
   log "5/8 安装后端 Python 依赖（venv + pip install backend）"
+  # 后端 pyproject 声明 requires-python >= 3.11：
+  # Ubuntu 22.04 自带 3.10 会在 pip 阶段硬失败，这里先给出明确原因，别让人去猜 pip 的报错。
+  if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+    warn "系统 python3 版本过低：$(python3 -V)。后端要求 >= 3.11。"
+    warn "请改用 Ubuntu 24.04 LTS 镜像（自带 3.12），或自行安装 python3.12 后重跑本脚本。"
+    exit 1
+  fi
   [ -d "$APP_DIR/venv" ] || python3 -m venv "$APP_DIR/venv"
   "$APP_DIR/venv/bin/pip" install --upgrade pip wheel >/dev/null
   "$APP_DIR/venv/bin/pip" install "$APP_DIR/backend"
