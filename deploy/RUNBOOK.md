@@ -133,6 +133,7 @@ ssh root@116.62.54.140 "curl -fsS -X POST http://127.0.0.1/api/data/index/rebuil
 | `nginx -t` 报 `duplicate default server` | 自己那份配置里写了 `default_server` | 本仓配置已经避让：只用真实 IP 作 `server_name` |
 | 403 Forbidden | 目录权限或 SELinux 上下文 | `chown -R ocean:ocean /opt/ocean`；RHEL 系加 `chcon -R -t httpd_sys_content_t` |
 | 浏览器接口 404 / 502 | `ocean-api` 没起来 | `journalctl -u ocean-api -n 50 --no-pager`，多半是 venv 依赖没装或数据目录不存在 |
+| **服务器上** `curl http://127.0.0.1/api/...` 返回 nginx 404 | Host 头是 `127.0.0.1`，匹配不到 `server_name <公网IP>` 的站点，请求落到了发行版默认站点（**与后端无关**） | 加 Host 头：`curl -H 'Host: <公网IP>' http://127.0.0.1/api/health`；或直连后端 `curl http://127.0.0.1:8000/api/health` |
 | 接口 200 但图是空白 | `/srv/ocean/data/raw` 里没有对应日期的 NetCDF | `find /srv/ocean/data/raw -name '*.nc' \| wc -l`，重跑数据同步 |
 | 数据上传后接口报权限错误 | 上传文件属 root，服务以 ocean 运行 | 重跑 `bash /tmp/ocean-remote-setup.sh <IP>`（幂等，会收权限） |
 | `remote-setup.sh` 报 `invalid option` / `bad interpreter` | 文件被存成 CRLF 或带 BOM | 保持 **LF + UTF-8 无 BOM**；git 里已按此约定提交 |

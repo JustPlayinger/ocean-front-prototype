@@ -120,10 +120,13 @@ RAW_COUNT="$(find "$DATA_DIR/raw" -name '*.nc' 2>/dev/null | wc -l | tr -d ' ')"
 echo "已就位原始数据文件数：$RAW_COUNT（0 表示还没上传数据）"
 
 echo "-- API 健康检查 --"
-curl -fsS "http://127.0.0.1/api/health" || warn "API 未就绪，排查：journalctl -u $SERVICE_NAME -n 50 --no-pager"
+# 必须带 Host 头：Nginx 站点用真实 IP 作 server_name，
+# 若用 `curl http://127.0.0.1/api/health`（Host=127.0.0.1）会匹配不到本站点、落到发行版默认站点，
+# 表现为 nginx 的 404 —— 与后端无关，纯属自检写法问题。
+curl -fsS -H "Host: $SERVER_IP" "http://127.0.0.1/api/health" || warn "API 未就绪，排查：journalctl -u $SERVICE_NAME -n 50 --no-pager"
 echo
 echo "-- 站点状态码 --"
-printf 'GET http://127.0.0.1/  → HTTP=%s\n' "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/)"
+printf 'GET http://127.0.0.1/  → HTTP=%s\n' "$(curl -sS -o /dev/null -w '%{http_code}' -H "Host: $SERVER_IP" http://127.0.0.1/)"
 
 log "完成。公网验收（在你本机用 curl.exe 执行，别用 Invoke-WebRequest）："
 printf 'curlexe "http://%s/api/health"\n' "$SERVER_IP"
