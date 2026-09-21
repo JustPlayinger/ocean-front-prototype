@@ -1,4 +1,5 @@
 import argparse
+import os
 import shutil
 import sys
 import time
@@ -17,6 +18,10 @@ ARCHIVE_URL = (
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
+
+# 与后端同一套约定：服务器上用 OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw，本地退回仓内 data/raw
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+RAW_ROOT = Path(os.environ["OCEAN_RAW_DATA_DIR"]) if os.environ.get("OCEAN_RAW_DATA_DIR") else _REPO_ROOT / "data" / "raw"
 
 
 def parse_date(value: str) -> date:
@@ -203,7 +208,7 @@ def main() -> None:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path(__file__).resolve().parents[2] / "data" / "raw" / "front",
+        default=RAW_ROOT / "front",
     )
     parser.add_argument("--force", action="store_true", help="overwrite files that already exist")
     parser.add_argument(

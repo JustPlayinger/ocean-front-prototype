@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from datetime import date
@@ -32,6 +33,10 @@ from urllib3.util.retry import Retry
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
+
+# 与后端同一套约定：服务器上用 OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw，本地退回仓内 data/raw
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+RAW_ROOT = Path(os.environ["OCEAN_RAW_DATA_DIR"]) if os.environ.get("OCEAN_RAW_DATA_DIR") else _REPO_ROOT / "data" / "raw"
 
 DEFAULT_BASE_URL = "https://coastwatch.noaa.gov/erddap"
 DEFAULT_DATASET = "noaacwBLENDEDCsstDaily"
@@ -164,7 +169,7 @@ def main() -> None:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path(__file__).resolve().parents[2] / "data" / "raw" / "sst",
+        default=RAW_ROOT / "sst",
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
