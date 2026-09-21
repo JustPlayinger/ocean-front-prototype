@@ -108,12 +108,19 @@ ssh root@116.62.54.140 "curl -fsS -X POST http://127.0.0.1/api/data/index/rebuil
 | 本机验证接口报 502 | `Invoke-WebRequest` 走了系统代理 | 一律用 `curl.exe` |
 | `tools/e2e-check.mjs` 在服务器上起不来 | 默认探测的是 Edge，且 Chromium **不能以 root 跑** | `export TEMP=/tmp EDGE=/usr/bin/chromium`，并用非 root 用户执行（脚本已自动加 `--no-sandbox`） |
 
-## 编码约定（改动后必须遵守）
+## 编码约定（改动后必须遵守，`.gitattributes` 已锁死前三项）
 
-| 文件 | 换行 | 编码 |
-|---|---|---|
-| `deploy/remote-setup.sh`、`deploy/nginx/ocean.conf`、`deploy/systemd/*.service` | **LF** | UTF-8 **无 BOM** |
-| `deploy/deploy.ps1`、`deploy/RUNBOOK.md` | CRLF | UTF-8 **带 BOM** |
+| 文件 | 换行 | 编码 | 由谁保证 |
+|---|---|---|---|
+| `deploy/remote-setup.sh`、`deploy/nginx/ocean.conf`、`deploy/systemd/*.service` | **LF** | UTF-8 **无 BOM** | `.gitattributes` 里 `eol=lf`，即使本机 `core.autocrlf=true` 也不会被换成 CRLF |
+| `deploy/deploy.ps1`、`deploy/probe-ports.ps1` | **CRLF** | UTF-8 **带 BOM** | `.gitattributes` 里 `eol=crlf`；**BOM 属于内容，必须自己保留**（缺 BOM 时 PowerShell 5.1 按 GBK 解中文 → 一堆假语法错误） |
+| `*.md` 文档 | 由 git 归一化为 LF | UTF-8 | `* text=auto eol=lf`，无需手工干预 |
+
+> 自查命令（逐字节看 BOM 与 CR）：
+> ```powershell
+> $p='deploy\remote-setup.sh'; $b=[System.IO.File]::ReadAllBytes((Resolve-Path $p)); 'BOM=' + ($b[0] -eq 239) + ' CR=' + (($b | Where-Object { $_ -eq 13 } | Measure-Object).Count)
+> ```
+> 期望：`.sh/.conf/.service` → `BOM=False CR=0`；`.ps1` → `BOM=True CR>0`。
 
 ## 回滚 / 迁移 / 成本
 
