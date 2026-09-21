@@ -182,6 +182,25 @@ OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw /opt/ocean/venv/bin/python \
 > 取数脚本随代码部署在 `/opt/ocean/tools/pipeline/fetch_gfw_effort.py`；token 不要写进仓库、不要提交。
 > 数据落在 `/srv/ocean/data/raw/fishing/`（`effort-YYYYMMDD.json` + `manifest.json`），接口见 `/api/fishing/*`。
 
+### 锋面 / 海温取数（Zenodo + NOAA ERDDAP）
+
+两条通路分工**不一样**（都是实测踩出来的）：
+
+| 数据 | 在哪跑 | 命令 |
+|---|---|---|
+| **锋面**（Zenodo 20356239，`front_location.zip` 18.3 GB / 15,706 天 / 1982–2024，HTTP Range 按天取 1.28 MB） | **本地 Windows 取，再上传** —— 服务器直连 Zenodo 读 zip 中央目录会反复 `IncompleteRead`，`remotezip` 开不了归档 | `backend\.venv\Scripts\python.exe backend\scripts\fetch_zenodo_front_samples.py 2024-01-01 2024-01-02`（分批，每批 ≤ 40 天）；上传后用 `chown -R ocean:ocean /srv/ocean/data/raw/front` |
+| **海温**（NOAA CoastWatch ERDDAP `noaacwBLendedCsstDaily`，0.05°，2002 至今，0.12 MB/天） | **服务器直连**（稳定） | `OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw /opt/ocean/venv/bin/python backend/scripts/fetch_sst_samples.py 2024-01-01 2024-01-02` |
+
+**加完数据必须重建索引**，否则接口按旧清单找文件、新日期会 404：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/data/index/rebuild
+```
+
+批量任务的两条实测建议：
+* **并发 3 路最快**（网络等待型）：SST 单进程约 24 s/天 → 3 路约 3.7 s/天；锋面单进程 6–20 s/天。
+* **单次调用别传太多日期**：一次给 731 个日期当命令行参数，外部命令会直接启动失败（exit 为空、无输出），分批即可，脚本本身会跳过已存在的文件（可中断续跑）。
+
 **实测踩过的坑（照做可避免）：**
 
 | 现象 | 原因 | 处理 |
