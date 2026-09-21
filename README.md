@@ -95,6 +95,7 @@ ocean-front-prototype/                    # 产品仓（origin: JustPlayinger/oc
 │   └── layout-check.mjs                  # 布局几何断言（23 项）
 ├── deploy/                               # 部署件（Windows → 阿里云 Ubuntu）
 │   ├── deploy.ps1 · remote-setup.sh      # 本地编排 / 服务器端幂等安装
+│   ├── probe-ports.ps1                   # 端口探测（安全组放行了吗 / 服务起来了吗）
 │   ├── nginx/ocean.conf                  # 站点：/ → 前端，/api/ → 127.0.0.1:8000
 │   ├── systemd/ocean-api.service         # uvicorn 常驻
 │   └── RUNBOOK.md                        # 实施手册（含排错对照表与编码约定）

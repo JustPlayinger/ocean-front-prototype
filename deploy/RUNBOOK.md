@@ -1,11 +1,13 @@
 ﻿# 部署实施手册（RUNBOOK）
 
-> 服务器资产（来自 2026-09-21 实测，换系统盘后以控制台为准）：
-> 实例 `i-bp1hr21nr07vhujhsojy` · 华北2（张家口）· 公网 **`116.62.54.140`** · 2 vCPU / 4 GiB · 系统盘 40 GiB ESSD Entry ·
-> 当前系统 **Windows Server 2022（未换）** · 安全组**仅放行 3389** · 按量付费 + 100 Mbps 峰值按流量计费 ·
+> 服务器资产（2026-09-21 控制台复核 + 端口实测）：
+> 实例 `i-bp1hr21nr07vhujhsojy`（实例名 `iZr07vhujhsoywZ`）· **华东1（杭州）** · 公网 **`116.62.54.140`** · 私网 `172.25.177.210` ·
+> 2 vCPU / 4 GiB（`ecs.e-c1m2.large`）· 系统盘 40 GiB ESSD Entry · 当前系统 **Windows Server 2022（未换）** ·
+> 安全组**仅放行 3389**（22/80/443/3306 实测均不通）· 按量付费 + 100 Mbps 峰值按流量计费 ·
 > 试用期 **2026-09-21 ~ 2026-12-21**。
 >
 > 一句话：**「准备」完成，服务器上还没装任何东西。**
+> 注：根目录 `交接文档.md` 把地域记成「华北2（张家口）」，以控制台显示为准（华东1 杭州），其余资产信息一致。
 
 ## 目标形态
 
@@ -26,20 +28,24 @@ MySQL 8 · db_prac              仅监听 127.0.0.1，远程走 SSH 隧道
 
 | # | 操作 | 说明 |
 |---|---|---|
-| A1 | 安全组放行入方向 `22`（源填你的公网 IP `/32`）+ `80`（源 `0.0.0.0/0`） | 不放行 22，后面全部无法执行 |
+| A1 | 安全组放行入方向 `22`（源填你的公网 IP `/32`）+ `80`（源 `0.0.0.0/0`）<br>路径：实例 → **网络与安全组** → 安全组 → 配置规则 → 入方向 → 手动添加 | 2026-09-21 实测 22/80/443/3306 全部不通、仅 3389 通；不放行 22，后面全部无法执行 |
 | A2 | 实例 → 更多 → 实例状态 → **停止** | ⚠️ **不要勾「节省停机模式」**，否则公网 IP 会被释放 |
-| A3 | 实例 → 更多 → 磁盘和镜像 → **更换操作系统** → 公共镜像 **Ubuntu 22.04 LTS 64 位** | 会清空系统盘（当前无数据，代价为零） |
-| A4 | 网络与安全 → 密钥对 → 导入本机公钥（推荐） | 本机 `C:\Users\<你>\.ssh\` 目前只有 `known_hosts`，需先生成 `ssh-keygen -t ed25519` 再导入 |
+| A3 | 实例 → 更多 → 磁盘和镜像 → **更换操作系统** → 公共镜像 **Ubuntu 22.04 LTS 64 位** | 会清空系统盘（当前无数据，代价为零）；换完开机确认 `22` 能连 |
+| A4 | 网络与安全 → 密钥对 → **导入已有密钥对** → 粘贴下面这行公钥 | 本机公钥**已生成**：`C:\Users\崔家瑞\.ssh\id_ed25519_ocean`（私钥同目录，无口令）<br>`ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHD19i9zSlPPo/cxo84CJ1lYk1jsT98DnqUipMwjUTpU ocean-front-ecs`<br>导入后回到实例：更多 → 密码/密钥 → **绑定密钥对**（需重启实例生效） |
 | A5 | 确认公网 IP | 若变化，后面所有命令、`deploy.ps1` 与 Nginx 配置都用新 IP |
+
+> A1/A2/A3 之间**无先后强约束**，但 A3 需要实例处于「已停止」。控制台首页显示的「实例健康状态数据不足」是没装云助手导致的，不影响部署。
 
 ## 阶段 B · 一键部署
 
 ```powershell
 cd "f:\project\海洋锋面\ocean-front-prototype"
-# 有密钥：
-powershell -ExecutionPolicy Bypass -File .\deploy\deploy.ps1 -ServerIp 116.62.54.140 -KeyFile C:\Users\你\.ssh\id_ed25519
+# 有密钥（本机已生成，见阶段 A4）：
+powershell -ExecutionPolicy Bypass -File .\deploy\deploy.ps1 -ServerIp 116.62.54.140 -KeyFile "$env:USERPROFILE\.ssh\id_ed25519_ocean"
 # 没密钥（会提示输密码）：
 powershell -ExecutionPolicy Bypass -File .\deploy\deploy.ps1 -ServerIp 116.62.54.140
+# 先探一下端口（安全组是否放行 / 服务是否起来）：
+powershell -ExecutionPolicy Bypass -File .\deploy\probe-ports.ps1 -ServerIp 116.62.54.140
 # 先不上传数据（只跑通站点与接口）：
 powershell -ExecutionPolicy Bypass -File .\deploy\deploy.ps1 -ServerIp 116.62.54.140 -SkipData
 # 只重跑远程环境/权限/服务（代码与数据不动）：
