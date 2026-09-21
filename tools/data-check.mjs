@@ -1,8 +1,8 @@
-/* 数据完整性校验：确认 data/ 下生成的文件结构正确、数值自洽、没有编造字段
+/* 数据完整性校验：确认 frontend/prototype/data/ 下生成的文件结构正确、数值自洽、没有编造字段
  *
  * 用法：node tools/data-check.mjs
  *
- * 这些断言的意义：原型里所有数字都必须能追溯到 data/ 文件，
+ * 这些断言的意义：原型里所有数字都必须能追溯到 frontend/prototype/data/ 文件，
  * 所以这里既查结构（字段/取值），也查自洽（RLE 还原出的像元数必须等于 quality 里的统计）。
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -10,7 +10,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const DATA = join(ROOT, "data");
+// 前端与其离线数据在产品仓里是一体的：frontend/prototype/ 下 html + js + data/ 同目录，
+// 页面用相对路径引 data/**，所以这里也必须指向同一处。
+const DATA = join(ROOT, "frontend", "prototype", "data");
 const results = [];
 const check = (label, cond, detail) => results.push(`${cond ? "PASS" : "FAIL"}  ${label}${detail ? "  → " + detail : ""}`);
 const readJs = (rel) => {

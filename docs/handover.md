@@ -13,7 +13,7 @@
 
 ```powershell
 # ① 打开页面（无需服务器）
-start prototype-fishing.html
+start frontend\prototype\prototype-fishing.html
 
 # ② 三项检查（Node 18+；e2e 需要本机装有 Edge）
 node tools/data-check.mjs     # 数据文件结构与自洽：890 项断言
@@ -125,52 +125,75 @@ node tools/layout-check.mjs   # 布局几何（1280 / 1680 两档）：23 项断
 ### 6.1 目录与文件职责
 
 ```
-ocean-front-prototype/
-├── prototype-fishing.html      结构 + 样式（L0 顶栏 / 地图 / L1 结论 / L2 页签）
-├── prototype-fishing.js        状态机 + 渲染 + 交互（唯一改动入口，只从 OFData 取数）
-├── prototype-data.js           数据适配层：页面唯一数据入口 window.OFData
-├── data/                       脚本生成的数据（**不要手改**）
-│   ├── meta.js                 数据产品 / 许可 / 可用日期 / 已知问题（数据说明读它）
-│   ├── days.js                 清单：已导出的锋面与水温日期（HTML 按它注入 <script>）
-│   ├── day/<日期>.js           单日锋面：对象中心线、锋面带、冷暖侧、缺测掩码、质量统计
-│   ├── sst/<日期>.js           单日水温：按 0.5 °C 分箱的逐行游程
-│   ├── clim/same-period.js     历史同期统计（front_present 口径）
-│   └── base/basemap.js         底图（Natural Earth 裁剪抽稀结果）
+ocean-front-prototype/                  产品仓（前端 + vendored 后端 + 部署件）
+├── frontend/prototype/                 唯一主界面「渔场向导」（纯静态、无构建）
+│   ├── prototype-fishing.html          结构 + 样式（L0 顶栏 / 地图 / L1 结论 / L2 页签）
+│   ├── prototype-fishing.js            状态机 + 渲染 + 交互（唯一改动入口，只从 OFData 取数）
+│   ├── prototype-data.js               数据适配层：页面唯一数据入口 window.OFData
+│   └── data/                           脚本生成的数据（**不要手改**，随页面一起发布）
+│       ├── meta.js                     数据产品 / 许可 / 可用日期 / 已知问题（数据说明读它）
+│       ├── days.js                     清单：已导出的锋面与水温日期（HTML 按它注入 <script>）
+│       ├── day/<日期>.js               单日锋面：对象中心线、锋面带、冷暖侧、缺测掩码、质量统计
+│       ├── sst/<日期>.js               单日水温：按 0.5 °C 分箱的逐行游程
+│       ├── clim/same-period.js         历史同期统计（front_present 口径）
+│       └── base/basemap.js             底图（Natural Earth 裁剪抽稀结果）
+├── backend/                            后端（上游 Ocean 仓快照，来源与改动见 UPSTREAM.md）
+│   ├── app/                            FastAPI：服务器端渲染 PNG + GeoJSON + 点查询 + 历史统计
+│   ├── scripts/                        数据拉取与导出（fetch_* / export_prototype_data.py）
+│   ├── tests/                          pytest（4 项）
+│   └── UPSTREAM.md
+├── data/                               运行时数据（不入 git，本地与服务器同路径）
+│   ├── raw/{front,sst}/                原始 NetCDF（front 89 天 + sst 62 天 ≈ 118 MB）
+│   ├── processed/ · cache/ · manifest/
+│   └── README.md
 ├── tools/
-│   ├── build-basemap.mjs       拉 Natural Earth → 裁剪抽稀 → data/base/basemap.js
-│   ├── data-check.mjs          数据断言（890）
-│   ├── e2e-check.mjs           交互断言（97，无头 Edge + CDP，产出截图）
-│   └── layout-check.mjs        布局断言（22）
+│   ├── build-basemap.mjs               拉 Natural Earth → 裁剪抽稀 → frontend/prototype/data/base/basemap.js
+│   ├── data-check.mjs                  数据断言（890）
+│   ├── e2e-check.mjs                   交互断言（100，无头浏览器 + CDP，产出截图）
+│   └── layout-check.mjs                布局断言（23）
+├── deploy/                             部署件（Windows → 阿里云 Ubuntu）
+│   ├── deploy.ps1 · remote-setup.sh
+│   ├── nginx/ocean.conf · systemd/ocean-api.service
+│   └── RUNBOOK.md                      实施手册 + 排错对照表
 └── docs/
-    ├── handover.md             本文件
-    ├── data-schema.md          数据契约（字段 / 编码 / 生成方式 / 已知问题）
-    ├── requirements-fishing-ground.md   需求规格（v0.10）
-    └── ux-spec.md              信息架构与交互规范（v1.8）
+    ├── handover.md                     本文件
+    ├── data-schema.md                  数据契约（字段 / 编码 / 生成方式 / 已知问题）
+    ├── requirements-fishing-ground.md  需求规格（v0.10）
+    └── ux-spec.md                      信息架构与交互规范（v1.8）
 ```
 
-上游数据脚本在**另一个仓库**：`Ocean/backend/scripts/`（`fetch_zenodo_front_samples.py`、`fetch_sst_samples.py`、`export_prototype_data.py`）。原型仓只消费 `data/`，不包含抓取逻辑。
+上游数据脚本（`fetch_zenodo_front_samples.py`、`fetch_sst_samples.py`、`export_prototype_data.py`）已连同 FastAPI 服务**一并 vendor 进本仓 `backend/`**，来源 commit 与本仓改动清单见 `backend/UPSTREAM.md`；上游仓 `Ocean` 仍是它们的权威版本。
 
 ### 6.2 环境与常用命令
 
 ```powershell
-# 上游（Ocean 仓）：虚拟环境在 Ocean/backend/.venv（已装 netCDF4、requests）
-cd Ocean\backend
+# 首次准备 Python 环境（在仓根目录）
+python -m venv backend\.venv
+backend\.venv\Scripts\python.exe -m pip install -e backend
 
-# ① 拉数据（示例：一天 / 一段日期）
-.\.venv\Scripts\python.exe scripts\fetch_zenodo_front_samples.py 2024-08-05
-.\.venv\Scripts\python.exe scripts\fetch_sst_samples.py 2024-08-05 2024-08-06
+# ① 拉数据（示例：一天 / 一段日期）→ 落在 data/raw
+backend\.venv\Scripts\python.exe backend\scripts\fetch_zenodo_front_samples.py 2024-08-05
+backend\.venv\Scripts\python.exe backend\scripts\fetch_sst_samples.py 2024-08-05 2024-08-06
 
-# ② 导出到原型仓 data/
-.\.venv\Scripts\python.exe scripts\export_prototype_data.py            # days 模式：扫描 data/raw 全量导出
-.\.venv\Scripts\python.exe scripts\export_prototype_data.py --mode clim --clim-dates ...   # 历史同期统计
+# ② 导出到前端目录 frontend/prototype/data
+backend\.venv\Scripts\python.exe backend\scripts\export_prototype_data.py            # days 模式：扫描 data/raw 全量导出
+backend\.venv\Scripts\python.exe backend\scripts\export_prototype_data.py --mode clim --clim-dates ...   # 历史同期统计
 # 快通道（只重生成 meta.js / days.js，几十秒）：
-.\.venv\Scripts\python.exe scripts\export_prototype_data.py --mode days --dates 2024-08-05 --no-sst --out-dir ..\..\ocean-front-prototype\data
+backend\.venv\Scripts\python.exe backend\scripts\export_prototype_data.py --mode days --dates 2024-08-05 --no-sst
 
 # ③ 底图（需要网络，走 jsDelivr 上的 Natural Earth）
 node tools\build-basemap.mjs
 
-# ④ 三项检查（原型仓）
+# ④ 三项检查
 node tools\data-check.mjs; node tools\e2e-check.mjs; node tools\layout-check.mjs
+
+# ⑤ 后端（本地起服务，验证服务器端渲染那条链路）
+backend\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+curl.exe -sS "http://127.0.0.1:8000/api/analysis/2024-08-05?longitude=124.5&latitude=30.2&radius_deg=1"
+backend\.venv\Scripts\python.exe -m pytest backend\tests -q
+
+# ⑥ 部署（见 deploy/RUNBOOK.md）
+powershell -ExecutionPolicy Bypass -File .\deploy\deploy.ps1 -ServerIp <公网IP>
 ```
 
 ### 6.3 数据更新流程（照这个顺序做）

@@ -26,7 +26,7 @@ const LAYERS = [
 ];
 // 陆地多边形只需外环填充，用粗一点的容差；等深线/海岸线要保持形状
 const LAND_KEYS = new Set(["land"]);
-const OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "data", "base", "basemap.js");
+const OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "frontend", "prototype", "data", "base", "basemap.js");
 
 const KM_PER_DEG = 111.195;
 const round3 = (v) => Math.round(v * 1000) / 1000;

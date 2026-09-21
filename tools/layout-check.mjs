@@ -1,17 +1,33 @@
 import { spawn } from "node:child_process";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // 用法：node tools/layout-check.mjs  （可用环境变量 EDGE / PAGE 覆盖）
-const EDGE = process.env.EDGE || "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
-const PAGE = process.env.PAGE || pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "prototype-fishing.html")).href;
+// EDGE：留空时按平台依次探测 Edge / Chromium / Chrome；Linux 上建议显式 EDGE=/usr/bin/chromium
+const EDGE_CANDIDATES = [
+  process.env.EDGE,
+  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+  "/usr/bin/microsoft-edge",
+  "/usr/bin/microsoft-edge-stable",
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser",
+  "/usr/bin/google-chrome",
+].filter(Boolean);
+const EDGE = EDGE_CANDIDATES.find((p) => existsSync(p)) || EDGE_CANDIDATES[0];
+const PAGE = process.env.PAGE || pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "frontend", "prototype", "prototype-fishing.html")).href;
 const PORT = 9341;
-const PROFILE = join(process.env.TEMP || "C:\\temp", "_edge_profile_layout");
+const TMP = process.env.TEMP || tmpdir();
+const PROFILE = join(TMP, "_edge_profile_layout");
+// Linux（尤其容器/root）下 Chromium 需要放开沙箱；Windows / macOS 不加这两个参数
+const SANDBOX_ARGS = process.platform === "linux" ? ["--no-sandbox", "--disable-dev-shm-usage"] : [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 try { rmSync(PROFILE, { recursive: true, force: true }); } catch (e) {}
 
 const child = spawn(EDGE, ["--headless=new", "--disable-gpu", "--no-first-run", "--remote-allow-origins=*",
+  ...SANDBOX_ARGS,
   `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`, "--window-size=1680,900", PAGE], { stdio: "ignore" });
 
 let wsUrl = null;

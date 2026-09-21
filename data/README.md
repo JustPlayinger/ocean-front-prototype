@@ -1,28 +1,53 @@
-# data/ · 生成物（不要手改）
+# data/ · 运行时数据（不入 git）
 
-这些 `.js` 文件由脚本生成，页面用 `<script>` 直接引入（可离线双击打开，不需要本地服务器）：
+本地与服务器**同路径**，用 `deploy/deploy.ps1` 或手工 `scp` 同步；服务器上落在 `/srv/ocean/data`。
+（前端随页面发布的那份导出物在 [`../frontend/prototype/data/`](../frontend/prototype/data/)，那是**要入库**的离线兜底数据。）
 
-| 文件 | 生成者 | 内容 |
-|---|---|---|
-| `meta.js` | `Ocean/backend/scripts/export_prototype_data.py` | 数据产品 / 许可 / 可用日期 / 缺什么 |
-| `days.js` | 同上（每次导出都会重写） | 清单：已导出的锋面/海温日期（页面按它注入 `<script>`，加日期不用改 HTML） |
-| `day/<日期>.js` | 同上（扫描 `data/raw/front/`，`--dates` 可指定） | 真实锋面：对象中心线、锋面带、冷暖侧、缺测掩码、质量统计 |
-| `sst/<日期>.js` | 同上（扫描 `data/raw/sst/`，`--no-sst` 可跳过） | 真实海温：NOAA GHRSST 0.05° 逐日，按 0.5 °C 分箱的逐行游程 |
-| `clim/same-period.js` | 同上（`--mode clim`） | 往年同期统计（唯一口径：front_present = 半径内线像元 > 0） |
-| `base/basemap.js` | `tools/build-basemap.mjs` | Natural Earth 公有领域底图（陆地 / 海岸线 / 200 m·1000 m 等深线） |
+| 路径 | 内容 | 谁写 | 入库 |
+|---|---|---|---|
+| `raw/front/<年>/front_location<YYYYMMDD>.nc` | Zenodo 20356239 全球逐日中尺度锋面（CC BY 4.0）东海裁剪 | `backend/scripts/fetch_zenodo_front_samples.py` | ❌ |
+| `raw/sst/<年>/sst_<YYYYMMDD>.nc` | NOAA GHRSST 逐日海温子集（免账号 ERDDAP） | `backend/scripts/fetch_sst_samples.py` | ❌ |
+| `processed/data_index.sqlite` | front/SST 文件索引（按日期定位源文件） | `build_data_index.py` 或 `POST /api/data/index/rebuild` | ❌ |
+| `processed/data_manifest.json` | 数据清单与配对情况 | `build_data_manifest.py` | ❌ |
+| `cache/rasters/*.png` | **服务器端渲染**出来的 PNG 缓存（可删，命中不到会重算） | 后端按需写入 | ❌ |
+| `cache/history/*.json` | 历史统计缓存 | 后端 | ❌ |
+| `manifest/` | 覆盖与缺口报告（预留） | — | ❌ |
+
+## 当前覆盖（2026-09-21 实测）
+
+| 数据 | 覆盖日期 | 文件数 | 体积 |
+|---|---|---|---|
+| front | 2015–2023 每年 08-05~08-07（27 天）+ 2024-07-01 ~ 2024-08-31（62 天） | 89 | 110.7 MB |
+| sst | 2024-07-01 ~ 2024-08-31 | 62 | 7.2 MB |
+
+⚠️ **2015–2023 那 27 天只有锋面、没有 SST**：`/api/analysis/{date}`（要求 front+sst 配对）与 `/api/point/{date}` 现在会对这些日期返回 404。
+两条出路：① 用 `fetch_sst_samples.py` 把那 27 天的 SST 补下来；② 按计划改造接口，缺 SST 时返回 `sst_celsius: null` 而不是 404（见 `docs/handover.md` 待办）。
+
+## 常用命令（在仓根目录执行）
+
+首次准备 Python 环境：
 
 ```powershell
-# 重新生成（在 Ocean/backend 下）
-# ① 拉数据（Zenodo 按日期抽单日文件；海温走 NOAA CoastWatch ERDDAP 子集，免账号）
-.\.venv\Scripts\python.exe scripts\fetch_zenodo_front_samples.py 2024-08-05 2024-08-06
-.\.venv\Scripts\python.exe scripts\fetch_sst_samples.py 2024-08-05 2024-08-06
-# ② 导出（扫 raw 目录里所有日期；海温自动跟着导出）
-.\.venv\Scripts\python.exe scripts\export_prototype_data.py
-.\.venv\Scripts\python.exe scripts\export_prototype_data.py --mode clim
-# 底图（在本仓根目录）
-node tools\build-basemap.mjs
-# 校验
+python -m venv backend\.venv
+backend\.venv\Scripts\python.exe -m pip install -e backend      # 依赖见 backend\pyproject.toml
+```
+
+拉数据 → 导出 → 校验：
+
+```powershell
+backend\.venv\Scripts\python.exe backend\scripts\fetch_zenodo_front_samples.py 2024-09-01 2024-09-02
+backend\.venv\Scripts\python.exe backend\scripts\fetch_sst_samples.py 2024-09-01 2024-09-02
+backend\.venv\Scripts\python.exe backend\scripts\export_prototype_data.py          # 写进 frontend\prototype\data
+backend\.venv\Scripts\python.exe backend\scripts\export_prototype_data.py --mode clim
+backend\.venv\Scripts\python.exe backend\scripts\build_data_index.py
 node tools\data-check.mjs
 ```
 
-完整结构说明、字段含义、来源与许可见 [`../docs/data-schema.md`](../docs/data-schema.md)。
+服务器上（同一份路径约定）：
+
+```bash
+cd /opt/ocean && /opt/ocean/venv/bin/python backend/scripts/build_data_index.py
+curl -fsS -X POST http://127.0.0.1/api/data/index/rebuild
+```
+
+字段含义、编号规则与已知坑见 [`../docs/data-schema.md`](../docs/data-schema.md)；部署与数据同步见 [`../deploy/RUNBOOK.md`](../deploy/RUNBOOK.md)。

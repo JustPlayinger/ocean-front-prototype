@@ -24,24 +24,23 @@
 ## 2. 生成流程
 
 ```powershell
+# 在仓根目录（ocean-front-prototype/）执行；Python 环境见 backend/UPSTREAM.md
 # ① 拉数据 + 单日图层（真实锋面 → 对象中心线 / 冷暖侧 RLE；真实海温 → 分档游程）
-cd Ocean\backend
-.\.venv\Scripts\python.exe scripts\fetch_zenodo_front_samples.py 2024-08-05 2024-08-06   # 锋面（Zenodo Range 抽取）
-.\.venv\Scripts\python.exe scripts\fetch_sst_samples.py 2024-08-05 2024-08-06           # 海温（NOAA ERDDAP 子集，免账号）
-.\.venv\Scripts\python.exe scripts\export_prototype_data.py                             # 扫 raw 全量导出（含海温）
+backend\.venv\Scripts\python.exe backend\scripts\fetch_zenodo_front_samples.py 2024-08-05 2024-08-06   # 锋面（Zenodo Range 抽取）
+backend\.venv\Scripts\python.exe backend\scripts\fetch_sst_samples.py 2024-08-05 2024-08-06           # 海温（NOAA ERDDAP 子集，免账号）
+backend\.venv\Scripts\python.exe backend\scripts\export_prototype_data.py                             # 扫 raw 全量导出（含海温）
 
 # ③ 往年同期统计（显式给取样日期；不给就扫 raw 全量，会把整月也算进“同期”）
-.\.venv\Scripts\python.exe scripts\export_prototype_data.py --mode clim --clim-dates 2015-08-05 2015-08-06 ...
+backend\.venv\Scripts\python.exe backend\scripts\export_prototype_data.py --mode clim --clim-dates 2015-08-05 2015-08-06 ...
 
 # ④ 底图（Natural Earth 公有领域 → 裁剪 + 抽稀）
-cd ..\..\ocean-front-prototype
 node tools\build-basemap.mjs
 ```
 
-- 首次需要环境：`python -m venv .venv` + `.\.venv\Scripts\python.exe -m pip install -e .`（依赖见 `Ocean/backend/pyproject.toml`）
+- 首次需要环境：`python -m venv backend\.venv` + `backend\.venv\Scripts\python.exe -m pip install -e backend`（依赖见 `backend\pyproject.toml`）
 - 缺少的历史日期按需补下载（支持 HTTP Range，单日约 1.3 MB）：
-  `.\.venv\Scripts\python.exe scripts\fetch_zenodo_front_samples.py 2019-08-05 2019-08-06`
-- 出参全部落在本仓 `data/`，可离线双击 `prototype-fishing.html` 直接跑（`<script>` 引入，不走 fetch，无 CORS 问题）
+  `backend\.venv\Scripts\python.exe backend\scripts\fetch_zenodo_front_samples.py 2019-08-05 2019-08-06`
+- 出参全部落在 `frontend/prototype/data/`，可离线双击 `frontend\prototype\prototype-fishing.html` 直接跑（`<script>` 引入，不走 fetch，无 CORS 问题）
 
 **参数**：`--bbox 120,27,128,34`（东海窗口）、`--anchor 124.5,30.2`（往年同期锚点＝顶栏定位点）、`--ranges 10,20,30`（找鱼范围）、`--clim-radii 10,20,30,50,100`（同期统计半径，含参照用大半径）、`--tolerance-km 6`（中心线抽稀）、`--min-length-km 20`（对象最短长度）、`--sst-raw-dir`（海温原始目录）、`--no-sst`（只出锋面）。
 
@@ -177,9 +176,9 @@ probability  = 有锋面的天数 / 有效天数
 ## 6. 校验
 
 ```bash
-node tools/data-check.mjs     # 数据文件结构与自洽（每个数据天 14 项 + 海温/清单断言；VERBOSE=1 打全部）
-node tools/e2e-check.mjs      # 页面端到端（63 项，含「没有编造数值」断言）
-node tools/layout-check.mjs   # 布局（20 项，1680/1280 两档）
+node tools/data-check.mjs     # 数据文件结构与自洽（890 项；VERBOSE=1 打全部）
+node tools/e2e-check.mjs      # 页面端到端（100 项，含「没有编造数值」断言）
+node tools/layout-check.mjs   # 布局（23 项，1680/1280 两档）
 ```
 
 `data-check` 会校验：网格与窗口一致、对象编号唯一且有序、中心线在窗口内、RLE 结构合法并且**还原出的像元数等于 `quality` 里的统计**、`has_sst/has_intensity` 为 false、生成文件里没有 `NaN/Infinity`；海温另有：与 `meta` 声明一致、`bin_c=0.5`、游程还原数 = `valid_cells`、档位落在 0~40 °C、与数据源单点值对得上（2024-08-05 @124.525°E/30.025°N = 30.69 °C）；并校验 `days.js` 清单与目录一致。

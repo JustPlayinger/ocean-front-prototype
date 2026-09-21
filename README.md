@@ -1,13 +1,14 @@
 # 渔场向导 · 海洋锋面分析系统（交互原型）
 
 面向**渔场作业决策**的海洋锋面分析系统 · 纯前端交互原型。
-数据：**真实锋面数据**（Zenodo 20356239 · CC BY 4.0，0.05° 逐日）+ **真实海温**（NOAA GHRSST 0.05° 逐日，与锋面不同源）+ **公有领域底图**（Natural Earth 1:10m），由脚本预生成到 `data/`，双击即可离线打开。
+数据：**真实锋面数据**（Zenodo 20356239 · CC BY 4.0，0.05° 逐日）+ **真实海温**（NOAA GHRSST 0.05° 逐日，与锋面不同源）+ **公有领域底图**（Natural Earth 1:10m），由脚本预生成到 `frontend/prototype/data/`，双击即可离线打开。
 锋面强度 / 真实预报 / 渔场**没有真实数据**，海况为明确标注的示例值；页面对这些一律标「待接入」或「示例」，**不插值、不把示例冒充实测、不编业务预报**（需求 FR-7）。
 
 ## 快速运行
 
-浏览器直接打开 `prototype-fishing.html` 即可（改完建议 `Ctrl+F5` 强刷）。
-重新生成数据见 [`docs/data-schema.md`](docs/data-schema.md) 与 [`data/README.md`](data/README.md)。
+浏览器直接打开 `frontend/prototype/prototype-fishing.html` 即可（改完建议 `Ctrl+F5` 强刷）；页面内的数据路径全是相对路径，移动整个 `frontend/prototype/` 目录也不影响。
+重新生成数据见 [`docs/data-schema.md`](docs/data-schema.md) 与 [`frontend/prototype/data/README.md`](frontend/prototype/data/README.md)。
+**服务器部署**（公网访问 + 服务器端渲染）见 [`deploy/RUNBOOK.md`](deploy/RUNBOOK.md)。
 
 ## 数据（真实接入部分）
 
@@ -63,36 +64,54 @@ L2 分层细节（页签）
 
 1. **单一选中语义 + 必有回执**：地图要素与卡片条目共用 `state.select`，点击后地图上出现回执卡，`✕`/Esc 都能取消
 2. **几何同源**：距离/方位由经纬度实时计算；地图投影保证东西/南北向 1 km 等长，半径圈是正圆；锋面中心线、卡片距离、指针查询用的是同一份数据
-3. **时间语义**：只剩「出海日」一个真源；日期输入、步进、播放和时间轴都写同一个 `state.date`，可选范围＝`data/day/` 里实际导出的日期
+3. **时间语义**：只剩「出海日」一个真源；日期输入、步进、播放和时间轴都写同一个 `state.date`，可选范围＝`frontend/prototype/data/day/` 里实际导出的日期
 4. **不编造**：锋面与海温都是真实数据（海温标明与锋面数据不同源）；强度 / 海况 / 真实预报 / 渔场一律标注；预测页只给规则预测参考，不冒充业务预报
 5. **可访问性**：页签 `role=tab`、支持 ←/→ 方向键切换；Esc 取消钉住/选中
 
 ## 目录结构
 
 ```
-ocean-front-prototype/
-├── prototype-fishing.html               # 结构 + 样式（L0/L1/L2 三层布局）
-├── prototype-fishing.js                 # 状态机 + 渲染与交互（数据只从 OFData 拿）
-├── prototype-data.js                    # 数据适配层：唯一入口 window.OFData
-├── data/                                # 脚本生成的真实数据（勿手改）
-│   ├── meta.js · days.js（清单）· day/*.js · sst/*.js · clim/same-period.js · base/basemap.js
+ocean-front-prototype/                    # 产品仓（origin: JustPlayinger/ocean-front-prototype）
+├── frontend/prototype/                   # 唯一主界面「渔场向导」（纯静态、无构建、无依赖）
+│   ├── prototype-fishing.html            # 结构 + 样式（L0/L1/L2 三层布局）
+│   ├── prototype-fishing.js              # 状态机 + 渲染与交互（数据只从 OFData 拿）
+│   ├── prototype-data.js                 # 数据适配层：唯一入口 window.OFData
+│   └── data/                             # 脚本生成的真实数据（勿手改，随页面一起发布）
+│       ├── meta.js · days.js · day/*.js · sst/*.js · clim/same-period.js · base/basemap.js
+│       └── README.md
+├── backend/                              # 后端：服务器端渲染 PNG + GeoJSON + 点查询 + 历史统计
+│   ├── app/                              # FastAPI 数据服务
+│   ├── scripts/                          # 数据拉取与导出（export_prototype_data.py 等）
+│   ├── tests/                            # pytest
+│   └── UPSTREAM.md                       # 上游来源、快照 commit、同步纪律
+├── data/                                 # 运行时数据（不入 git，本地与服务器同路径）
+│   ├── raw/{front,sst}/                  # 原始 NetCDF（front 89 天 + sst 62 天，约 118 MB）
+│   ├── processed/ · cache/ · manifest/   # SQLite 索引、raster 缓存、清单
 │   └── README.md
-├── README.md
 ├── tools/
-│   ├── build-basemap.mjs                # 拉 Natural Earth 公有领域底图 → 裁剪抽稀
-│   ├── data-check.mjs                   # 数据文件结构与自洽断言（890 项）
-│   ├── e2e-check.mjs                    # 交互端到端断言（100 项，Edge 无头 + CDP）
-│   └── layout-check.mjs                 # 布局几何断言（23 项）
-└── docs/
-    ├── handover.md                      # 交接文档（已实现 / 欠缺 / 交接事项）
-    ├── data-schema.md                   # 数据契约（来源/结构/生成/已知问题）
-    ├── requirements-fishing-ground.md   # 需求规格 v0.10
-    └── ux-spec.md                       # 信息架构与交互规范 v1.8（含市场调研依据）
+│   ├── build-basemap.mjs                 # 拉 Natural Earth 公有领域底图 → 裁剪抽稀
+│   ├── data-check.mjs                    # 数据文件结构与自洽断言（890 项）
+│   ├── e2e-check.mjs                     # 交互端到端断言（100 项，无头浏览器 + CDP）
+│   └── layout-check.mjs                  # 布局几何断言（23 项）
+├── deploy/                               # 部署件（Windows → 阿里云 Ubuntu）
+│   ├── deploy.ps1 · remote-setup.sh      # 本地编排 / 服务器端幂等安装
+│   ├── nginx/ocean.conf                  # 站点：/ → 前端，/api/ → 127.0.0.1:8000
+│   ├── systemd/ocean-api.service         # uvicorn 常驻
+│   └── RUNBOOK.md                        # 实施手册（含排错对照表与编码约定）
+├── docs/
+│   ├── handover.md                       # 交接文档（已实现 / 欠缺 / 交接事项）
+│   ├── data-schema.md                    # 数据契约（来源/结构/生成/已知问题）
+│   ├── requirements-fishing-ground.md    # 需求规格 v0.10
+│   ├── ux-spec.md                        # 信息架构与交互规范 v1.8
+│   └── 演示文稿.md
+└── README.md
 ```
 
-> 交接先看 **`docs/handover.md`**：运行与验收命令、数据结构、评分口径、欠缺功能清单、已知坑、演示话术都在这份里。
+> 交接先看 **`docs/handover.md`**（运行与验收命令、数据结构、评分口径、欠缺清单、已知坑、演示话术）；部署先看 **`deploy/RUNBOOK.md`**。
 
-> 生成这些数据的上游脚本在另一个仓库：`Ocean/backend/scripts/export_prototype_data.py`（依赖见该仓 `pyproject.toml`）。
+> 两处 `data/` 的分工：`frontend/prototype/data/` 是**随页面发布的离线兜底导出物**（入库）；
+> `data/raw` 是**原始 NetCDF 与运行产物**（不入库，只在本地与服务器之间同步，服务器上是 `/srv/ocean/data`）。
+> 生成这些导出物的脚本已随本仓 vendor 进来：`backend/scripts/export_prototype_data.py`（来源与同步方式见 `backend/UPSTREAM.md`）。
 
 ## 技术说明
 
@@ -110,13 +129,17 @@ ocean-front-prototype/
 ## 自检方式
 
 ```bash
-node --check prototype-fishing.js        # 语法检查
-node --check prototype-data.js
-node tools/data-check.mjs                # 数据文件结构与自洽（每个数据天 14 项 + 海温 / 清单断言）
+node --check frontend/prototype/prototype-fishing.js   # 语法检查
+node --check frontend/prototype/prototype-data.js
+node tools/data-check.mjs                # 数据文件结构与自洽（890 项：每个数据天 14 项 + 海温 / 清单断言）
 node tools/e2e-check.mjs                 # 交互端到端（100 项，含覆盖层可见性、海温与数据一致、截图到 %TEMP%）
 node tools/layout-check.mjs              # 布局几何（23 项，1680/1280 两档）
+
+# 后端（需要 venv；服务器上同理）
+python -m pytest backend/tests -q
 ```
 
-- 三个浏览器脚本通过 Edge 无头 + CDP 驱动，仅依赖 Node 18+（使用内置 `fetch` / `WebSocket`）；可用环境变量 `EDGE`、`PAGE` 覆盖浏览器路径与页面地址
+- 三个浏览器脚本通过无头浏览器 + CDP 驱动，仅依赖 Node 18+（使用内置 `fetch` / `WebSocket`）；可用环境变量 `EDGE`、`PAGE` 覆盖浏览器路径与页面地址
+- 默认按平台探测浏览器（Edge → Chromium → Chrome）。**Linux 上**：`export TEMP=/tmp EDGE=/usr/bin/chromium`，且**不要用 root 跑**（Chromium 沙箱会拒绝；脚本已自动追加 `--no-sandbox`，但仍建议用普通用户）
 - 覆盖：真实数据接入（DOI/许可/日期范围/图层数量与数据一致）、顶栏 3 组编号与时间入口唯一性、出发地地图点选、坐标输入格式兼容、播放/时间轴同步、页签层级、三档结论与逐项加分、四个页签内容、当前页默认两张卡、预测页一张卡、AI 页一张复核卡、预测 1/3/7 天窗口、历史 7/15 日连续窗口与月/年格子图、AI 证据链、指针查询（4 项精简、水温与数据一致、缺测不给数值、钉住/Esc/边界）、选中回执、示例推荐水域默认关闭、图层重绘、范围联动、日期钳制与空态、**覆盖层可见性（computed style + 命中测试）**、方向键可访问性、运行期异常、两档宽度的溢出与裁切
 - **不编造断言**：页面里不允许出现插值温度；预测页必须标注为规则预测参考，数据说明必须写清真实预报未接入

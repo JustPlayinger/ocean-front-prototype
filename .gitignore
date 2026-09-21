@@ -5,6 +5,27 @@ Thumbs.db
 .DS_Store
 *.tmp
 
-# 构建产物 / 依赖（本仓纯静态原型，目前不产生；预留）
+# 构建产物 / 依赖（本仓目前不产生；预留）
 node_modules/
 dist/
+
+# ===== 数据（不入库）=====
+# 原始 NetCDF 与后端产物：本地与服务器同路径，靠同步脚本搬运，不进制品库
+# 用 `/*` + `!.gitkeep` 的写法，既能保留空目录占位，又能忽略里面的数据文件
+/data/raw/*
+!/data/raw/.gitkeep
+/data/processed/*
+!/data/processed/.gitkeep
+/data/cache/*
+!/data/cache/.gitkeep
+# 例外：前端的离线兜底导出物是页面的一部分，必须入库
+!/frontend/prototype/data/
+
+# ===== 后端（Python）=====
+backend/.venv/
+backend/ocean_front_backend.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
