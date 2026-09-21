@@ -41,8 +41,11 @@ from pathlib import Path
 import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUT_DIR = REPO_ROOT / "data" / "raw" / "fishing"
-DEFAULT_FRONT_DIR = REPO_ROOT / "data" / "raw" / "front"
+# 服务器上数据在 /srv/ocean/data/raw（由 systemd 的 OCEAN_RAW_DATA_DIR 指定），本地则是 <仓根>/data/raw；
+# 这里与后端保持同一套约定：有环境变量就用它，否则退回仓内路径。
+RAW_ROOT = Path(os.environ["OCEAN_RAW_DATA_DIR"]) if os.environ.get("OCEAN_RAW_DATA_DIR") else REPO_ROOT / "data" / "raw"
+DEFAULT_OUT_DIR = RAW_ROOT / "fishing"
+DEFAULT_FRONT_DIR = RAW_ROOT / "front"
 # 与 meta.js / 后端一致的东海窗口
 DEFAULT_BBOX = (120.0, 27.0, 128.0, 34.0)
 
@@ -122,6 +125,7 @@ def build_request(
     dataset: str,
     resolution: str,
     temporal: str,
+    group_by: str | None = None,
 ) -> tuple[str, dict[str, str], dict[str, object]]:
     params = {
         "datasets[0]": DATASETS[dataset],
@@ -130,8 +134,24 @@ def build_request(
         "date-range": f"{start.isoformat()},{end.isoformat()}",
         "format": "CSV",
     }
+    if group_by:
+        # 不分组时返回的是「每船·每格·每天」明细（实测 1 天 19488 行），
+        # 多天区间会让响应大到服务端超时（实测 3 天区间 read timeout）。
+        # 我们只按格点汇总，用 group-by 让服务端先聚合，行数可降一个数量级。
+        params["group-by"] = group_by
     body = {"geojson": bbox_polygon(bbox)}
     return API_URL, params, body
+
+
+def explode_to_days(ranges: list[tuple[date, date]]) -> list[tuple[date, date]]:
+    """把区间拆成单日（单日请求实测 ~18s，最稳）。"""
+    out: list[tuple[date, date]] = []
+    for start, end in ranges:
+        cursor = start
+        while cursor < end:
+            out.append((cursor, cursor + timedelta(days=1)))
+            cursor += timedelta(days=1)
+    return out
 
 def fetch_range(
     *,
@@ -144,9 +164,11 @@ def fetch_range(
     token: str,
     timeout: float,
     retries: int,
+    group_by: str | None = None,
 ) -> list[dict[str, float | str]]:
     url, params, body = build_request(
-        bbox=bbox, start=start, end=end, dataset=dataset, resolution=resolution, temporal=temporal
+        bbox=bbox, start=start, end=end, dataset=dataset, resolution=resolution,
+        temporal=temporal, group_by=group_by,
     )
     headers = {
         "Authorization": f"Bearer {token}",
@@ -326,6 +348,22 @@ def main() -> int:
     parser.add_argument("--dataset", choices=sorted(DATASETS), default="effort", help="effort=捕捞努力量；presence=船舶存在时长")
     parser.add_argument("--resolution", choices=("LOW", "HIGH"), default="LOW", help="LOW=0.1°；HIGH=0.01°")
     parser.add_argument("--temporal", choices=("HOURLY", "DAILY", "MONTHLY", "YEARLY"), default="DAILY")
+    parser.add_argument(
+        "--group-by",
+        choices=("VESSEL_ID", "FLAG", "GEARTYPE", "FLAGANDGEARTYPE", "MMSI"),
+        default=None,
+        help="让服务端先分组（推荐 GEARTYPE：不分组时返回每船明细，多天区间会 read timeout）",
+    )
+    parser.add_argument(
+        "--split-days",
+        action="store_true",
+        help="把区间拆成单日请求（最稳，实测单日约 18s；配合大窗口时建议开启）",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="单日文件已存在则跳过（配合 --split-days 可断点续跑，GFW 接口偶发超时很有用）",
+    )
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--token", default=None, help="GFW API token（默认读环境变量 GFW_TOKEN）")
     parser.add_argument("--token-file", type=Path, default=None, help="从文件首行读 token")
@@ -358,6 +396,8 @@ def main() -> int:
         parser.error("请给出 --start/--end、--dates 或 --from-front-data 之一")
 
     ranges = split_long_ranges(ranges)
+    if args.split_days:
+        ranges = explode_to_days(ranges)
     if not ranges:
         print("没有落在 GFW 覆盖范围内的日期（2017-01-01 起）", file=sys.stderr)
         return 2
@@ -379,10 +419,17 @@ def main() -> int:
     print(f"窗口 bbox={args.bbox} · 需要 {len(ranges)} 次请求")
 
     summaries: list[dict[str, object]] = []
+    skipped: list[str] = []
     for index, (start, end) in enumerate(ranges, start=1):
+        if args.skip_existing and (end - start).days == 1:
+            existing = args.out_dir / f"effort-{start.strftime('%Y%m%d')}.json"
+            if existing.is_file():
+                skipped.append(start.isoformat())
+                print(f"[{index}/{len(ranges)}] {start} 已存在，跳过")
+                continue
         url, params, body = build_request(
             bbox=args.bbox, start=start, end=end, dataset=args.dataset,
-            resolution=args.resolution, temporal=args.temporal,
+            resolution=args.resolution, temporal=args.temporal, group_by=args.group_by,
         )
         print(f"[{index}/{len(ranges)}] {start} ~ {end}")
         if args.dry_run:
@@ -393,7 +440,7 @@ def main() -> int:
         rows = fetch_range(
             bbox=args.bbox, start=start, end=end, dataset=args.dataset,
             resolution=args.resolution, temporal=args.temporal,
-            token=token, timeout=args.timeout, retries=args.retries,
+            token=token, timeout=args.timeout, retries=args.retries, group_by=args.group_by,
         )
         grouped = group_by_date(rows)
         if not grouped:
@@ -417,8 +464,10 @@ def main() -> int:
         "dataset": DATASETS[args.dataset],
         "spatial_resolution": args.resolution,
         "temporal_resolution": args.temporal,
+        "group_by": args.group_by,
         "bbox": list(args.bbox),
         "days": summaries,
+        "skipped_days": skipped,
         "generated_at": date.today().isoformat(),
     }
     (args.out_dir / "manifest.json").write_text(
