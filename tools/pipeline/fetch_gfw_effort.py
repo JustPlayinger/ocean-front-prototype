@@ -306,6 +306,50 @@ def aggregate_cells(rows: list[dict[str, float | str]]) -> list[dict[str, object
     return cells
 
 
+def build_manifest(
+    *,
+    existing: dict[str, object] | None,
+    summaries: list[dict[str, object]],
+    skipped: list[str],
+    dataset: str,
+    resolution: str,
+    temporal: str,
+    group_by: str | None,
+    bbox: tuple[float, float, float, float],
+) -> dict[str, object]:
+    return {
+        "dataset": DATASETS[dataset],
+        "spatial_resolution": resolution,
+        "spatial_resolution_deg": RESOLUTION_DEG.get(resolution, 0.1),
+        "temporal_resolution": temporal,
+        "group_by": group_by,
+        "bbox": list(bbox),
+        "days": merge_manifest_days(existing, summaries),
+        "skipped_days": sorted(
+            set(skipped) | set(existing.get("skipped_days") or [] if isinstance(existing, dict) else [])
+        ),
+        "generated_at": date.today().isoformat(),
+    }
+
+
+def write_manifest(out_dir: Path, manifest: dict[str, object]) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "manifest.json"
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
+
+
+def read_existing_manifest(out_dir: Path) -> dict[str, object] | None:
+    path = out_dir / "manifest.json"
+    if not path.is_file():
+        return None
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
 def summarize_day_file(path: Path) -> dict[str, object] | None:
     """从已落盘的单日文件重新算出汇总（用于 --rebuild-manifest）。"""
     try:
@@ -438,40 +482,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    manifest_path = args.out_dir / "manifest.json"
+    existing: dict[str, object] | None = read_existing_manifest(args.out_dir)
     if args.rebuild_manifest:
         summaries = rebuild_summaries(args.out_dir)
-        manifest_path = args.out_dir / "manifest.json"
-        existing: dict[str, object] | None = None
-        if manifest_path.is_file():
-            try:
-                loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
-                existing = loaded if isinstance(loaded, dict) else None
-            except (OSError, json.JSONDecodeError):
-                existing = None
-        merged_days = merge_manifest_days(existing, summaries)
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "dataset": DATASETS[args.dataset],
-                    "spatial_resolution": args.resolution,
-                    "spatial_resolution_deg": RESOLUTION_DEG.get(args.resolution, 0.1),
-                    "temporal_resolution": args.temporal,
-                    "group_by": args.group_by,
-                    "bbox": list(args.bbox),
-                    "days": merged_days,
-                    "skipped_days": sorted(
-                        set(existing.get("skipped_days") or [] if isinstance(existing, dict) else [])
-                    ),
-                    "generated_at": date.today().isoformat(),
-                },
-                ensure_ascii=False,
-                indent=1,
-            ),
-            encoding="utf-8",
+        manifest = build_manifest(
+            existing=existing, summaries=summaries, skipped=[],
+            dataset=args.dataset, resolution=args.resolution, temporal=args.temporal,
+            group_by=args.group_by, bbox=args.bbox,
         )
-        total_hours = round(sum(float(item.get("total_hours") or 0.0) for item in merged_days), 3)
-        print(f"重建索引完成：{len(merged_days)} 天 · 合计 {total_hours} 小时 · {manifest_path}")
+        path = write_manifest(args.out_dir, manifest)
+        total_hours = round(sum(float(item.get("total_hours") or 0.0) for item in manifest["days"]), 3)
+        print(f"重建索引完成：{len(manifest['days'])} 天 · 合计 {total_hours} 小时 · {path}")
         return 0
 
     # ---- 组装日期区间 ----
@@ -554,6 +576,15 @@ def main() -> int:
                 dataset=args.dataset, resolution=args.resolution, bbox=args.bbox,
             )
             summaries.append(summary)
+            # 每落盘一天就刷新索引：中途被杀 / 分批补历史时，索引不会落后于文件
+            write_manifest(
+                args.out_dir,
+                build_manifest(
+                    existing=existing, summaries=summaries, skipped=skipped,
+                    dataset=args.dataset, resolution=args.resolution, temporal=args.temporal,
+                    group_by=args.group_by, bbox=args.bbox,
+                ),
+            )
             print(
                 f"  {iso}: {summary['cell_count']} 个格点 · {summary['total_hours']} 小时 · "
                 f"{summary['vessel_count']} 艘船"
@@ -563,32 +594,13 @@ def main() -> int:
         print("\n--dry-run 结束：未调用 API、未写文件。")
         return 0
 
-    manifest_path = args.out_dir / "manifest.json"
-    existing: dict[str, object] | None = None
-    if manifest_path.is_file():
-        try:
-            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
-            existing = loaded if isinstance(loaded, dict) else None
-        except (OSError, json.JSONDecodeError):
-            existing = None
-    if args.rebuild_manifest:
-        summaries = rebuild_summaries(args.out_dir)
-        print(f"按现有文件重建索引：{len(summaries)} 天")
-    merged_days = merge_manifest_days(existing, summaries)
-    manifest = {
-        "dataset": DATASETS[args.dataset],
-        "spatial_resolution": args.resolution,
-        "spatial_resolution_deg": RESOLUTION_DEG.get(args.resolution, 0.1),
-        "temporal_resolution": args.temporal,
-        "group_by": args.group_by,
-        "bbox": list(args.bbox),
-        "days": merged_days,
-        "skipped_days": sorted(
-            set(skipped) | set(existing.get("skipped_days") or [] if isinstance(existing, dict) else [])
-        ),
-        "generated_at": date.today().isoformat(),
-    }
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    manifest = build_manifest(
+        existing=existing, summaries=summaries, skipped=skipped,
+        dataset=args.dataset, resolution=args.resolution, temporal=args.temporal,
+        group_by=args.group_by, bbox=args.bbox,
+    )
+    write_manifest(args.out_dir, manifest)
+    merged_days = manifest["days"]
     total_hours = round(sum(float(item.get("total_hours") or 0.0) for item in merged_days), 3)
     print(
         f"\n完成：本次写盘 {len(summaries)} 天 · 索引共 {len(merged_days)} 天 · "
