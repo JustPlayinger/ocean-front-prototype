@@ -44,14 +44,32 @@
 # 只打印将发出的请求（不需要 token，先确认无误）
 backend\.venv\Scripts\python.exe tools\pipeline\fetch_gfw_effort.py --from-front-data --dry-run
 
-# 真取数：覆盖锋面数据的全部可覆盖日期（自动跳过 2015–2016，合并成 8 次请求 ≈ 83 天）
+# 真取数：覆盖锋面数据的全部可覆盖日期（自动跳过 2015–2016）
 $env:GFW_TOKEN = '<你的 token>'
-backend\.venv\Scripts\python.exe tools\pipeline\fetch_gfw_effort.py --from-front-data
+# 推荐跑法：单日请求 + 断点续跑（GFW 大区间会超时，单日实测约 18s）
+backend\.venv\Scripts\python.exe tools\pipeline\fetch_gfw_effort.py --from-front-data --split-days --skip-existing --timeout 240 --retries 5
 
-# 只要某几天 / 换更高分辨率
+# 只要某几天 / 换更高分辨率 / 让服务端先按作业方式聚合（大区间更快）
 backend\.venv\Scripts\python.exe tools\pipeline\fetch_gfw_effort.py --dates 2024-08-05 2024-08-06
 backend\.venv\Scripts\python.exe tools\pipeline\fetch_gfw_effort.py --start 2024-07-01 --end 2024-09-01 --resolution HIGH
+backend\.venv\Scripts\python.exe tools\pipeline\fetch_gfw_effort.py --dates 2018-08-05 2018-08-06 2018-08-07 --group-by GEARTYPE
+
+# 索引（manifest.json）与文件对不上时重建，不重新取数、不需要 token
+backend\.venv\Scripts\python.exe tools\pipeline\fetch_gfw_effort.py --rebuild-manifest
 ```
+
+> 服务器上还要加 `OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw`（脚本与后端共用这个约定）；
+> 完整跑法与实测坑见 `deploy/RUNBOOK.md` 的「GFW token」节。
+
+**字段口径**：GFW 的 CSV 是「每船·每格·每天」明细（实测单日 19488 行），落盘前已按
+`(lon, lat)` 汇总（83 天 1.2 MB/天 → 约 340 KB/天）。每格：`hours`（总捕捞小时）、
+`vessel_count`（当天在这一格出现过的船数）、`top_gears`（按小时排序的前 3 类作业方式，小写）。
+`spatial_resolution_deg`（0.1）供前端把 PNG 摆到正确经纬度；`total_hours` 是当日全窗口合计。
+
+**接口**（常驻服务直接读这份数据）：`/api/fishing/availability`（逐日汇总 + 出处）、
+`/api/fishing/{date}`（单日格点）、`/api/fishing/{date}/point?longitude=&latitude=`（某一格），
+`/api/fishing/{date}/raster`（半透明热力 PNG，约 2–7 KB，带 `X-Raster-Bounds`）。
+所有响应都带 `source`：署名 Global Fishing Watch、CC BY-SA 4.0、**非商业用途**。
 
 输出结构（每天一个文件，按小时数降序）：
 

@@ -547,8 +547,8 @@ def main() -> int:
     skipped: list[str] = []
     for index, (start, end) in enumerate(ranges, start=1):
         if args.skip_existing and (end - start).days == 1:
-            existing = args.out_dir / f"effort-{start.strftime('%Y%m%d')}.json"
-            if existing.is_file():
+            day_file = args.out_dir / f"effort-{start.strftime('%Y%m%d')}.json"
+            if day_file.is_file():
                 skipped.append(start.isoformat())
                 print(f"[{index}/{len(ranges)}] {start} 已存在，跳过")
                 continue

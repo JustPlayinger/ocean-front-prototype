@@ -155,14 +155,43 @@ GFW API 需要 token，**只用于数据准备阶段**（不在常驻服务里�
 
 ```bash
 sudo install -d -m 700 /etc/ocean
-echo 'GFW_TOKEN=粘贴你的token' | sudo tee /etc/ocean/gfw.env >/dev/null
+printf 'GFW_TOKEN=%s\n' '粘贴你的token' | sudo tee /etc/ocean/gfw.env >/dev/null
 sudo chmod 600 /etc/ocean/gfw.env
-# 用的时候（一次性生效）
-set -a; . /etc/ocean/gfw.env; set +a
-cd /opt/ocean && /opt/ocean/venv/bin/python tools/pipeline/fetch_gfw_effort.py --from-front-data
 ```
 
-> 取数脚本已随代码部署到 `/opt/ocean/tools/pipeline/fetch_gfw_effort.py`；token 不要写进仓库、不要提交。
+取数（**已实测可用的跑法**，2026-09 在 116.62.54.140 上跑通 83 天）：
+
+```bash
+# 前台试跑，先确认 token 与路径都对
+cd /opt/ocean
+export OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw
+set -a; . /etc/ocean/gfw.env; set +a
+/opt/ocean/venv/bin/python tools/pipeline/fetch_gfw_effort.py --from-front-data --split-days --dry-run
+
+# 正式跑：后台 + 日志 + 断点续跑（推荐写成脚本 /tmp/start-gfw-fetch.sh 再 setsid nohup bash 它）
+setsid nohup env OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw \
+  /opt/ocean/venv/bin/python tools/pipeline/fetch_gfw_effort.py \
+  --from-front-data --split-days --skip-existing --timeout 240 --retries 5 \
+  >> /var/log/ocean-gfw.log 2>&1 < /dev/null &
+
+# 跑完（或中途看进度）：索引与文件对不上时重建 manifest，不用重新取数
+OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw /opt/ocean/venv/bin/python \
+  tools/pipeline/fetch_gfw_effort.py --rebuild-manifest
+```
+
+> 取数脚本随代码部署在 `/opt/ocean/tools/pipeline/fetch_gfw_effort.py`；token 不要写进仓库、不要提交。
+> 数据落在 `/srv/ocean/data/raw/fishing/`（`effort-YYYYMMDD.json` + `manifest.json`），接口见 `/api/fishing/*`。
+
+**实测踩过的坑（照做可避免）：**
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `Invalid leading whitespace, reserved character(s), or return character(s) in header value` | 在 Windows 上生成 `/etc/ocean/gfw.env` 是 CRLF，Linux 下 `set -a; . file` 把 `\r` 吃进变量，请求头成了 `Bearer xxx\r` | 用 `printf` 写文件（或 `sed -i 's/\r$//'`）；脚本侧也已加 `clean_token()` 兜底 |
+| 3 天区间的请求 `Read timed out (read timeout=180)` | 不分组时返回的是**每船·每格·每天明细**（实测 1 天 19488 行），区间一大服务端就超时 | 用 `--split-days` 拆成单日（实测单日约 18s），或 `--group-by GEARTYPE` 让服务端先聚合（实测同一区间 29s 返回） |
+| `429 速率受限` | 连续请求触发限流 | 脚本会退避重试（20/40/60s…）；把 `--retries` 调到 5 并接受慢一点 |
+| 接口里某些日期汇总为 0 | 老版脚本只在整轮跑完才写 `manifest.json`，中途失败/分批抓取就没有索引 | 现已逐日落盘并与旧 manifest 合并；必要时 `--rebuild-manifest` |
+| 直接 `nohup /tmp/x.sh &` 报 `Permission denied` | 上传的脚本没有可执行位 | `chmod +x`，或显式 `bash /tmp/x.sh` |
+| 分批抓取后老日期从索引里消失 | 循环里复用了 `existing` 变量名，把"待跳过的文件路径"赋给了它，合并时旧日期被丢弃 | 已修（改名 `day_file`）；回归方式：跑完看 `availability` 是否有 0 汇总的天 |
 
 ## 编码约定（改动后必须遵守，`.gitattributes` 已锁死前三项）
 
