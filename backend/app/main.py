@@ -12,6 +12,7 @@ from .ai_agent import (
     knowledge_response,
 )
 from .ai_agent import health_response as ai_health_response
+from . import fishing_effort
 from .config import settings
 from .data_access import (
     load_front_subset,
@@ -33,7 +34,7 @@ from .history import (
     get_history_index,
 )
 from .main_analysis import compute_analysis_response
-from .raster_render import render_combined_png, render_front_png, render_sst_png
+from .raster_render import render_combined_png, render_fishing_png, render_front_png, render_sst_png
 from .reporting import compute_report_response
 from .schemas import (
     AiAnalysisRequest,
@@ -48,6 +49,12 @@ from .schemas import (
     DataIndexResponse,
     DataManifestResponse,
     DataPreparationPlanResponse,
+    FishingAvailabilityResponse,
+    FishingCell,
+    FishingDayResponse,
+    FishingDaySummary,
+    FishingPointResponse,
+    FishingSource,
     FrontObjectResponse,
     FrontTrackingResponse,
     HealthResponse,
@@ -204,6 +211,135 @@ def catalog() -> CatalogResponse:
             for item in discovered
         ],
         message=None if ready else "请将真实逐日 NetCDF 样例放入 data/raw 目录。",
+    )
+
+
+@app.get(f"{settings.api_prefix}/fishing/availability", response_model=FishingAvailabilityResponse)
+def fishing_availability() -> FishingAvailabilityResponse:
+    """渔场层可用日期汇总（GFW AIS 表观捕捞努力量，0.1°）。"""
+    pairs = fishing_effort.available_days()
+    manifest = fishing_effort.read_manifest() or {}
+    summaries: list[FishingDaySummary] = []
+    for day, summary in pairs:
+        info = summary or {}
+        summaries.append(
+            FishingDaySummary(
+                date=day,
+                cell_count=int(info.get("cell_count") or 0),
+                total_hours=float(info.get("total_hours") or 0.0),
+                vessel_count=int(info.get("vessel_count") or 0),
+                file=str(info.get("file") or f"{fishing_effort.DAY_FILE_PREFIX}{day.strftime('%Y%m%d')}.json"),
+            )
+        )
+    resolution = manifest.get("spatial_resolution_deg")
+    bbox = manifest.get("bbox")
+    return FishingAvailabilityResponse(
+        ready=bool(summaries),
+        day_count=len(summaries),
+        first_date=summaries[0].date if summaries else None,
+        last_date=summaries[-1].date if summaries else None,
+        days=summaries,
+        spatial_resolution_deg=float(resolution) if isinstance(resolution, (int, float)) else 0.1,
+        bbox=[float(v) for v in bbox] if isinstance(bbox, list) and len(bbox) == 4 else [120.0, 27.0, 128.0, 34.0],
+        source=FishingSource(**fishing_effort.SOURCE),
+        message=None
+        if summaries
+        else "还没有渔场数据：在服务器上跑 tools/pipeline/fetch_gfw_effort.py（GFW 覆盖自 2017-01-01 起）",
+    )
+
+
+@app.get(f"{settings.api_prefix}/fishing/{{observation_date}}", response_model=FishingDayResponse)
+def fishing_day(observation_date: date_type) -> FishingDayResponse:
+    """单日渔场格点（0.1°）。hours 是 AIS 表观捕捞努力量，不是渔获量。"""
+    try:
+        day = fishing_effort.load_day(observation_date)
+    except fishing_effort.FishingDataUnavailable as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    cells = [
+        FishingCell(
+            lon=float(cell["lon"]),
+            lat=float(cell["lat"]),
+            hours=float(cell.get("hours") or 0.0),
+            vessel_count=int(cell.get("vessel_count") or 0),
+            top_gears=[str(gear) for gear in (cell.get("top_gears") or [])],
+        )
+        for cell in fishing_effort.cells_of(day)
+        if "lon" in cell and "lat" in cell
+    ]
+    bounds = fishing_effort.bounds_of(day)
+    return FishingDayResponse(
+        date=observation_date,
+        cell_count=int(day.get("cell_count") or len(cells)),
+        total_hours=float(day.get("total_hours") or 0.0),
+        vessel_count=int(day.get("vessel_count") or 0),
+        flag_count=int(day["flag_count"]) if isinstance(day.get("flag_count"), int) else None,
+        spatial_resolution_deg=fishing_effort.cell_size_deg(day),
+        bbox=[float(value) for value in (day.get("bbox") or [120.0, 27.0, 128.0, 34.0])],
+        cells=cells,
+        raster_url=f"{settings.api_prefix}/fishing/{observation_date.isoformat()}/raster",
+        raster_bounds=bounds,
+        source=FishingSource(**fishing_effort.SOURCE),
+    )
+
+
+@app.get(f"{settings.api_prefix}/fishing/{{observation_date}}/point", response_model=FishingPointResponse)
+def fishing_point(
+    observation_date: date_type,
+    longitude: float = Query(..., ge=-180, le=180),
+    latitude: float = Query(..., ge=-90, le=90),
+) -> FishingPointResponse:
+    """某一格的当日作业情况（就近匹配 0.1° 格点，命中不了就明说没有记录）。"""
+    try:
+        day = fishing_effort.load_day(observation_date)
+    except fishing_effort.FishingDataUnavailable as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    hit = fishing_effort.point_lookup(day, longitude, latitude)
+    return FishingPointResponse(
+        date=observation_date,
+        longitude=longitude,
+        latitude=latitude,
+        matched=hit is not None,
+        cell_lon=hit["cell_lon"] if hit else None,
+        cell_lat=hit["cell_lat"] if hit else None,
+        hours=hit["hours"] if hit else None,
+        vessel_count=hit["vessel_count"] if hit else None,
+        top_gears=hit["top_gears"] if hit else [],
+        source=FishingSource(**fishing_effort.SOURCE),
+        message=None
+        if hit
+        else "这一格当天没有 AIS 作业记录（0.1° 格点；只有被 AIS 覆盖的渔船才计入，未覆盖渔船不出现）",
+    )
+
+
+@app.get(f"{settings.api_prefix}/fishing/{{observation_date}}/raster")
+def fishing_raster(
+    observation_date: date_type,
+    max_hours: float | None = Query(None, gt=0, le=10000),
+) -> Response:
+    """渔场热力 PNG（半透明格，无作业记录的格子完全透明；坐标范围走 X-Raster-Bounds）。"""
+    try:
+        day = fishing_effort.load_day(observation_date)
+    except fishing_effort.FishingDataUnavailable as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    hours, _vessels, bounds = fishing_effort.cell_grid(day)
+    suffix = f"-{max_hours:g}" if max_hours else ""
+    cache_path = settings.cache_dir / "rasters" / f"fishing-{observation_date.strftime('%Y%m%d')}{suffix}.png"
+    cache_hit = cache_path.is_file()
+    if cache_hit:
+        content = cache_path.read_bytes()
+    else:
+        content = render_fishing_png(hours, max_hours)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(content)
+    return Response(
+        content=content,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "X-Raster-Bounds": ",".join(str(value) for value in bounds),
+            "X-Raster-Cache": "hit" if cache_hit else "miss",
+            "X-Raster-Kind": "fishing",
+        },
     )
 
 

@@ -94,6 +94,55 @@ def _sst_rgba(values_celsius: np.ndarray) -> np.ndarray:
     return rgba
 
 
+_FISHING_STOPS = (
+    (0.5, (255, 247, 188), 70),
+    (5.0, (254, 227, 145), 110),
+    (20.0, (254, 196, 79), 150),
+    (60.0, (244, 109, 67), 195),
+    (150.0, (178, 24, 43), 230),
+)
+
+
+def render_fishing_png(hours: np.ndarray, max_hours: float | None = None) -> bytes:
+    """把 GFW 捕捞努力量（小时）画成半透明热力格：没有作业记录的格子完全透明。
+
+    `max_hours` 只影响色标上限（默认 150 小时，约等于一天半的持续作业），
+    不改变任何数值——数值本身在 JSON 接口里原样给出。
+    """
+    values = np.asarray(hours, dtype=float)
+    upper = float(max_hours) if max_hours and max_hours > 0 else _FISHING_STOPS[-1][0]
+    lower = _FISHING_STOPS[0][0]
+    rgba = np.zeros((*values.shape, 4), dtype=np.uint8)
+    active = np.isfinite(values) & (values >= lower)
+    if not active.any():
+        return encode_rgba_png(_north_up(rgba))
+
+    clipped = np.clip(values, lower, upper)
+    red = np.zeros_like(clipped)
+    green = np.zeros_like(clipped)
+    blue = np.zeros_like(clipped)
+    alpha = np.zeros_like(clipped)
+    stops = list(_FISHING_STOPS)
+    if upper > stops[-1][0]:
+        stops.append((upper, stops[-1][1], stops[-1][2]))
+    for left, right in pairwise(stops):
+        left_value, left_color, left_alpha = left
+        right_value, right_color, right_alpha = right
+        segment = active & (clipped >= left_value) & (clipped <= right_value)
+        span = right_value - left_value
+        ratio = np.zeros_like(clipped) if span <= 0 else (clipped - left_value) / span
+        red[segment] = left_color[0] + (right_color[0] - left_color[0]) * ratio[segment]
+        green[segment] = left_color[1] + (right_color[1] - left_color[1]) * ratio[segment]
+        blue[segment] = left_color[2] + (right_color[2] - left_color[2]) * ratio[segment]
+        alpha[segment] = left_alpha + (right_alpha - left_alpha) * ratio[segment]
+
+    rgba[..., 0] = np.where(active, red, 0).astype(np.uint8)
+    rgba[..., 1] = np.where(active, green, 0).astype(np.uint8)
+    rgba[..., 2] = np.where(active, blue, 0).astype(np.uint8)
+    rgba[..., 3] = np.where(active, alpha, 0).astype(np.uint8)
+    return encode_rgba_png(_north_up(rgba))
+
+
 def _alpha_composite(base: np.ndarray, overlay: np.ndarray) -> np.ndarray:
     base_float = base.astype(float) / 255
     overlay_float = overlay.astype(float) / 255

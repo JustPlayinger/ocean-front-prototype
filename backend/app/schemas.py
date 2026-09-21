@@ -543,3 +543,70 @@ class HistoryResponse(BaseModel):
     source_files: list[str]
     same_period_records: list[HistoryTimelinePoint] = []
     monthly_records: list[HistoryTimelinePoint] = []
+class FishingSource(BaseModel):
+    name: str
+    api: str
+    dataset: str
+    citation: str
+    url: str
+    license: str
+    terms: str
+    unit: str
+    meaning: str
+
+
+class FishingDaySummary(BaseModel):
+    date: DateType
+    cell_count: int
+    total_hours: float
+    vessel_count: int
+    file: str
+
+
+class FishingAvailabilityResponse(BaseModel):
+    ready: bool
+    day_count: int
+    first_date: DateType | None = None
+    last_date: DateType | None = None
+    days: list[FishingDaySummary] = Field(default_factory=list)
+    spatial_resolution_deg: float
+    bbox: list[float]
+    source: FishingSource
+    message: str | None = None
+
+
+class FishingCell(BaseModel):
+    lon: float
+    lat: float
+    hours: float
+    vessel_count: int
+    top_gears: list[str] = Field(default_factory=list)
+
+
+class FishingDayResponse(BaseModel):
+    date: DateType
+    cell_count: int
+    total_hours: float
+    vessel_count: int
+    flag_count: int | None = None
+    spatial_resolution_deg: float
+    bbox: list[float]
+    cells: list[FishingCell]
+    raster_url: str
+    raster_bounds: list[float]
+    source: FishingSource
+
+
+class FishingPointResponse(BaseModel):
+    date: DateType
+    longitude: float
+    latitude: float
+    matched: bool
+    cell_lon: float | None = None
+    cell_lat: float | None = None
+    hours: float | None = None
+    vessel_count: int | None = None
+    top_gears: list[str] = Field(default_factory=list)
+    source: FishingSource
+    message: str | None = None
+
