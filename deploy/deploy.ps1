@@ -72,10 +72,12 @@ function Invoke-RemoteSetup([string]$SetupArgs) {
   # 因此改成 setsid 后台执行 + 轮询日志，断了也不影响服务器上的进度（脚本本身幂等）。
   $log = "/var/log/ocean-setup.log"
   Invoke-Ssh "setsid nohup bash /tmp/ocean-remote-setup.sh $SetupArgs > $log 2>&1 < /dev/null & echo setup-started"
-  $deadline = (Get-Date).AddMinutes(30)
+  $deadline = (Get-Date).AddMinutes(20)
   while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 15
-    $state = (Invoke-SshCapture "pgrep -f ocean-remote-setup.sh >/dev/null && echo RUNNING || echo DONE") -join " "
+    # ⚠️ 不要用 `pgrep -f ocean-remote-setup.sh` 判断存活：轮询命令自己的命令行里就含这个字符串，
+    # pgrep -f 会匹配到自己 → 永远 RUNNING（实测踩到）。改成看日志里的收尾标志。
+    $state = (Invoke-SshCapture "grep -q curlexe $log && echo DONE || echo RUNNING") -join " "
     $tail = (Invoke-SshCapture "tail -n 3 $log") -join " | "
     Write-Host ("  [{0}] {1}" -f $state.Trim(), $tail)
     if ($state -match "DONE") { break }
@@ -128,16 +130,29 @@ if (-not $SkipData) {
   $RawDir = Join-Path $RepoRoot "data\raw"
   if (-not (Test-Path $RawDir)) { Write-Host "本地没有 $RawDir，跳过数据上传" -ForegroundColor Yellow }
   else {
+    # ⚠️ Windows 自带的 bsdtar **打不开非 ASCII 路径**（本仓在中文目录下），
+    #    直接把 data\raw 交给 tar -C 会报 could not chdir。
+    #    所以先用 robocopy（原生支持 Unicode）暂存到 ASCII 目录，再在那边打包。
+    $DataStage = Join-Path "C:\tmp" "ocean-data-stage"
+    if (Test-Path $DataStage) { Remove-Item $DataStage -Recurse -Force }
+    robocopy $RawDir $DataStage /E /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "robocopy 数据暂存失败（退出码 $LASTEXITCODE）" }
+    $stageCount = (Get-ChildItem $DataStage -Recurse -File -Filter *.nc | Measure-Object).Count
+    Write-Host "暂存 .nc 文件数：$stageCount"
+
     if (Test-Path $DataPackage) { Remove-Item $DataPackage -Force }
-    & tar -czf $DataPackage -C $RawDir "."
+    & tar -czf $DataPackage -C $DataStage "."
     Assert-LastExit "tar 打包数据"
     $mb = [math]::Round((Get-Item $DataPackage).Length / 1MB, 2)
     Write-Host "数据包：$DataPackage（$mb MB）" -ForegroundColor Green
     & scp @ScpArgs $DataPackage "$User@${ServerIp}:/tmp/$DataPkgName"
     Assert-LastExit "scp 数据包"
-    Invoke-Ssh "mkdir -p /srv/ocean/data/raw && tar -xzf /tmp/$DataPkgName -C /srv/ocean/data/raw && rm -f /tmp/$DataPkgName && find /srv/ocean/data/raw -name '*.nc' | wc -l"
+    Invoke-Ssh "mkdir -p /srv/ocean/data/raw && tar -xzf /tmp/$DataPkgName -C /srv/ocean/data/raw && rm -f /tmp/$DataPkgName && chown -R ocean:ocean /srv/ocean/data && find /srv/ocean/data/raw -name '*.nc' | wc -l"
     Write-Step "5/6 重跑权限收口与服务重启（remote-setup.sh 幂等）"
     Invoke-RemoteSetup "$ServerIp"
+    Write-Step "5.5/6 重建 SQLite 索引（供按日期定位源文件）"
+    Invoke-Ssh "curl -sS -m 300 -X POST http://127.0.0.1:8000/api/data/index/rebuild | head -c 300"
+    Write-Host ""
   }
 }
 else {

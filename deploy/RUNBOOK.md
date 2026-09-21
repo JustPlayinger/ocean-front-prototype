@@ -141,6 +141,14 @@ ssh root@116.62.54.140 "curl -fsS -X POST http://127.0.0.1/api/data/index/rebuil
 | 本机验证接口报 502 | `Invoke-WebRequest` 走了系统代理 | 一律用 `curl.exe` |
 | `tools/e2e-check.mjs` 在服务器上起不来 | 默认探测的是 Edge，且 Chromium **不能以 root 跑** | `export TEMP=/tmp EDGE=/usr/bin/chromium`，并用非 root 用户执行（脚本已自动加 `--no-sandbox`） |
 
+### 本机（Windows）侧三个坑（2026-09-21 实测）
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `tar: could not chdir to 'F:\...\海洋锋面\...'` | Windows 自带的 bsdtar **打不开非 ASCII 路径**。应用打包没暴露是因为暂存目录恰好是 ASCII（`C:\tmp\ocean-stage`），只有数据打包时踩到 | 先用 robocopy（原生 Unicode）把数据暂存到 `C:\tmp\ocean-data-stage`，再在那里 `tar -C`；`deploy.ps1` 已内置 |
+| 远程命令里的 `-H "Host: x"` 到服务器变成 `-H Host:` + IP 被当成主机名（curl 报 `Bad hostname`、nginx 返 400） | PowerShell 5.1 向原生程序（ssh.exe）传参时会**吞掉内层双引号** | 远程命令尽量不用引号：直连 `http://127.0.0.1:8000/...`，传 query 用 `curl --get -d k=v`；必须用 Host 头时写 `-H Host:1.2.3.4`（无空格） |
+| 轮询部署进度永远是 `RUNNING` | `pgrep -f ocean-remote-setup.sh` **会匹配到轮询命令自己的命令行** | 改成看日志收尾标志：`grep -q curlexe /var/log/ocean-setup.log`；`deploy.ps1` 已修正 |
+
 ## 编码约定（改动后必须遵守，`.gitattributes` 已锁死前三项）
 
 | 文件 | 换行 | 编码 | 由谁保证 |
