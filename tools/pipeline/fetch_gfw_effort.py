@@ -206,6 +206,9 @@ def parse_response(payload: bytes, dataset: str) -> list[dict[str, float | str]]
     lon_key = pick("cell_ll_lon", "lon")
     hours_key = pick("hours", "fishing_hours", "effort")
     date_key = pick("date", "time range", "time_range", "day")
+    gear_key = pick("gear type", "geartype", "gear")
+    flag_key = pick("flag")
+    vessel_key = pick("vessel id", "vessel_id", "mmsi")
     rows: list[dict[str, float | str]] = []
     for row in reader:
         try:
@@ -217,6 +220,9 @@ def parse_response(payload: bytes, dataset: str) -> list[dict[str, float | str]]
         except (TypeError, ValueError):
             continue
         record["date"] = str(row.get(date_key, "")).strip()[:10] if date_key else ""
+        record["gear"] = str(row.get(gear_key, "")).strip() if gear_key else ""
+        record["flag"] = str(row.get(flag_key, "")).strip() if flag_key else ""
+        record["vessel_id"] = str(row.get(vessel_key, "")).strip() if vessel_key else ""
         record["dataset"] = dataset
         rows.append(record)
     return rows
@@ -231,22 +237,55 @@ def group_by_date(rows: list[dict[str, float | str]]) -> dict[str, list[dict[str
     return grouped
 
 
+def aggregate_cells(rows: list[dict[str, float | str]]) -> list[dict[str, object]]:
+    """按 (lon, lat) 汇总。GFW 的 CSV 是「每船·每格·每天」明细（实测 1 天 19488 行），
+    直接落盘会比格点数大两个数量级；这里每格保留：总捕捞小时数、参与船舶数、前 3 类作业方式（按小时）。"""
+    buckets: dict[tuple[float, float], dict[str, object]] = {}
+    vessels: dict[tuple[float, float], set[str]] = {}
+    for row in rows:
+        lon, lat, hours = row.get("lon"), row.get("lat"), row.get("hours")
+        if lon is None or lat is None or hours is None:
+            continue
+        key = (float(lon), float(lat))
+        bucket = buckets.setdefault(key, {"hours": 0.0, "gears": {}})
+        bucket["hours"] = float(bucket["hours"]) + float(hours)
+        gears: dict[str, float] = bucket["gears"]  # type: ignore[assignment]
+        gear = str(row.get("gear") or "").strip() or "未知"
+        gears[gear] = gears.get(gear, 0.0) + float(hours)
+        vessel = str(row.get("vessel_id") or "").strip()
+        if vessel:
+            vessels.setdefault(key, set()).add(vessel)
+
+    cells: list[dict[str, object]] = []
+    for (lon, lat), bucket in buckets.items():
+        gears: dict[str, float] = bucket["gears"]  # type: ignore[assignment]
+        top = sorted(gears.items(), key=lambda item: -item[1])[:3]
+        cells.append(
+            {
+                "lon": round(lon, 4),
+                "lat": round(lat, 4),
+                "hours": round(float(bucket["hours"]), 4),
+                "vessel_count": len(vessels.get((lon, lat), ())),
+                "top_gears": [name for name, _ in top],
+            }
+        )
+    cells.sort(key=lambda cell: (-float(cell["hours"]), float(cell["lat"]), float(cell["lon"])))
+    return cells
+
+
 def write_day(
     *,
     out_dir: Path,
     iso: str,
-    cells: list[dict[str, float | str]],
+    rows: list[dict[str, float | str]],
     dataset: str,
     resolution: str,
     bbox: tuple[float, float, float, float],
 ) -> dict[str, object]:
-    kept = [
-        {"lon": cell["lon"], "lat": cell["lat"], "hours": cell["hours"]}
-        for cell in cells
-        if cell.get("hours") is not None
-    ]
-    kept.sort(key=lambda cell: (-float(cell["hours"]), float(cell["lat"]), float(cell["lon"])))
-    total = round(sum(float(cell["hours"]) for cell in kept), 3)
+    cells = aggregate_cells(rows)
+    total = round(sum(float(cell["hours"]) for cell in cells), 3)
+    vessel_ids = {str(row.get("vessel_id")).strip() for row in rows if str(row.get("vessel_id") or "").strip()}
+    flags = sorted({str(row.get("flag")).strip() for row in rows if str(row.get("flag") or "").strip()})
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "date": iso,
@@ -260,13 +299,21 @@ def write_day(
         },
         "spatial_resolution": resolution,
         "bbox": list(bbox),
-        "cell_count": len(kept),
+        "cell_count": len(cells),
         "total_hours": total,
-        "cells": kept,
+        "vessel_count": len(vessel_ids),
+        "flag_count": len(flags),
+        "cells": cells,
     }
     target = out_dir / f"effort-{iso.replace('-', '')}.json"
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-    return {"date": iso, "cell_count": len(kept), "total_hours": total, "file": target.name}
+    return {
+        "date": iso,
+        "cell_count": len(cells),
+        "total_hours": total,
+        "vessel_count": len(vessel_ids),
+        "file": target.name,
+    }
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="抓取 GFW AIS 表观捕捞努力量（渔场数据）到 data/raw/fishing/")
@@ -353,11 +400,14 @@ def main() -> int:
             print("  该区间没有返回任何格点（可能这几天海域内无 AIS 捕捞活动）")
         for iso in sorted(grouped):
             summary = write_day(
-                out_dir=args.out_dir, iso=iso, cells=grouped[iso],
+                out_dir=args.out_dir, iso=iso, rows=grouped[iso],
                 dataset=args.dataset, resolution=args.resolution, bbox=args.bbox,
             )
             summaries.append(summary)
-            print(f"  {iso}: {summary['cell_count']} 个格点 · {summary['total_hours']} 小时")
+            print(
+                f"  {iso}: {summary['cell_count']} 个格点 · {summary['total_hours']} 小时 · "
+                f"{summary['vessel_count']} 艘船"
+            )
 
     if args.dry_run:
         print("\n--dry-run 结束：未调用 API、未写文件。")
