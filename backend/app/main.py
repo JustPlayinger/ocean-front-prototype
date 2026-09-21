@@ -229,6 +229,48 @@ def analysis(
         raise HTTPException(status_code=422, detail=f"数据读取失败: {exc}") from exc
 
 
+def _align_combined_grids(
+    sst_var,
+    front_var,
+    fallback_bounds: list[float],
+) -> tuple[np.ndarray, np.ndarray, list[float]]:
+    """把 SST 与锋面裁到共同经纬交集，使 combined 能逐像元合成。
+
+    - front 是全局 0.05° 网格；SST 只覆盖数据集裁剪过的窗口（本仓为 120.025–128.025 / 27.025–34.025）。
+      大半径查询时两者形状不同 → `render_combined_png` 里布尔索引会 IndexError（曾表现为 500）。
+    - 两者同分辨率且同相位（起始都落在 .025 网格上），所以按经纬取交集后逐像元一一对应。
+    - 返回 (sst_celsius, front, bounds)：bounds 是**实际覆盖范围**，可能小于请求窗口，
+      调用方据此回写 X-Raster-Bounds，避免前端按请求窗口贴图导致错位。
+    """
+    lon_lo = max(float(np.min(sst_var.longitude.values)), float(np.min(front_var.lon.values)))
+    lon_hi = min(float(np.max(sst_var.longitude.values)), float(np.max(front_var.lon.values)))
+    lat_lo = max(float(np.min(sst_var.latitude.values)), float(np.min(front_var.lat.values)))
+    lat_hi = min(float(np.max(sst_var.latitude.values)), float(np.max(front_var.lat.values)))
+    if lon_lo >= lon_hi or lat_lo >= lat_hi:
+        raise HTTPException(
+            status_code=422,
+            detail="该窗口内 SST 与锋面数据没有重叠区域，无法合成 combined 图；请分别请求 kind=sst 与 kind=front",
+        )
+
+    sst_cut = np.asarray(
+        sst_var.sel(longitude=slice(lon_lo, lon_hi), latitude=slice(lat_lo, lat_hi)).values,
+        dtype="float64",
+    ) - 273.15
+    front_cut = np.asarray(
+        front_var.sel(lon=slice(lon_lo, lon_hi), lat=slice(lat_lo, lat_hi)).values
+    )
+    rows = min(sst_cut.shape[0], front_cut.shape[0])
+    cols = min(sst_cut.shape[1], front_cut.shape[1])
+    if rows <= 0 or cols <= 0:
+        raise HTTPException(status_code=422, detail=f"合成窗口过小（{rows}×{cols}），无法生成 combined 图")
+    if rows == sst_cut.shape[0] and cols == sst_cut.shape[1]:
+        bounds = [lon_lo, lat_lo, lon_hi, lat_hi]
+    else:
+        # 网格相位不一致的兜底：至少保证形状一致，并按请求窗口标注
+        bounds = list(fallback_bounds)
+    return sst_cut[:rows, :cols], front_cut[:rows, :cols], bounds
+
+
 @app.get(f"{settings.api_prefix}/analysis/{{observation_date}}/raster")
 def analysis_raster(
     observation_date: date_type,
@@ -279,10 +321,17 @@ def analysis_raster(
     elif kind == "front":
         content = render_front_png(front)
     else:
+        # combined 需要两张图逐像元对应：front 是全局 0.05° 网格，而 SST 只覆盖数据集裁剪过的窗口，
+        # 大半径查询时两者形状不同（实测 radius=4 → front 160×160 而 SST 141×160，直接 IndexError → 500）。
+        # 两者同分辨率、同相位（起始都落在 .025），所以按经纬取交集即可精确对齐。
+        sst_celsius, front, bounds = _align_combined_grids(
+            sst_var, front_var, _query_bounds(longitude, latitude, radius_deg)
+        )
         content = render_combined_png(sst_celsius, front)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(content)
-    bounds = _query_bounds(longitude, latitude, radius_deg)
+    if kind != "combined":
+        bounds = _query_bounds(longitude, latitude, radius_deg)
     return Response(
         content=content,
         media_type="image/png",

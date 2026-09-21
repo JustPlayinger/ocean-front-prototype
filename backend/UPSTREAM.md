@@ -21,6 +21,7 @@
 | `pyproject.toml` | 新增依赖 `scipy>=1.13,<2`，并**刻意不引入 netcdf4** | ① SST 文件是 NetCDF-3 classic（文件头 `CDF\x01`），`h5netcdf` 只能读 HDF5，必须补一个能读 classic 的引擎；② `netcdf4` 的 C 库在 Windows 上打不开非 ASCII 路径（本仓位于中文目录），一旦安装会被 xarray 优先选中，导致 SST 与锋面**双双读不了**；`scipy` + `h5netcdf` 组合在两个平台上都可用 |
 | `app/data_access.py` | `KELVIN_OFFSET` 常量；`load_sst_subset` 时间改为「取最近时刻，且相差 ≤ 1 天」；返回值**统一归一化成开尔文** | ① ERDDAP 子集的 `time` 是 12:00（卫星过境时刻），用 00:00 精确 `sel` 直接 KeyError，上游表现为「SST 文件不包含该日期」；② 该产品 `units=degree_C`，而调用方（main / main_analysis / history / front_objects / ai_agent）统一按 `- 273.15` 换算 —— 改 11 处调用点不如在数据边界归一化一次 |
 | `app/history.py` | ① 新增 `_has_newer_netcdf`：sqlite 索引比数据旧时不拿它当指纹；② 新增 `_index_records_exist`：缓存索引与 sqlite 清单里的路径先核存在性再信任 | 数据被改名/删除而索引未重建时，旧清单会把**不存在的路径**带进请求链路（实测直接 500）。指纹只看大小与 mtime，抓不到改名 |
+| `app/main.py` | 新增 `_align_combined_grids`，`kind=combined` 前先按经纬取两图交集再合成，并把 `X-Raster-Bounds` 回写成实际覆盖范围 | front 是全局 0.05° 网格，SST 只覆盖数据集裁剪窗口；大半径查询时形状不同（实测 `radius_deg=4` → front 160×160 vs SST 141×160），`render_combined_png` 里布尔索引直接 `IndexError` → 500 |
 | `scripts/export_prototype_data.py` | 路径常量：`DEFAULT_RAW_DIR` / `DEFAULT_OUT_DIR` / `DEFAULT_SST_RAW_DIR`，以及生成物头部注释与 `meta.generator` | 适配新仓结构（`<仓根>/data/raw`、`<仓根>/frontend/prototype/data`），原值是按「两个平级仓库」写的 |
 
 `app/**` 其余部分与上游逐字节一致，可用 `git diff` 核对。
