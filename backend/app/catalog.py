@@ -45,6 +45,8 @@ class _CacheEntry:
 
 
 _lock = threading.Lock()
+# 扫描串行化：20 个请求同时 miss 时，只让一个真正去 rglob，其余等它扫完直接复用结果
+_scan_lock = threading.Lock()
 _entries: dict[str, _CacheEntry] = {}
 _hits = 0
 _misses = 0
@@ -66,28 +68,44 @@ def directory_signature(root: Path) -> DirectorySignature:
     return tuple(signature)
 
 
+def _lookup(key: str, signature: DirectorySignature, ttl_seconds: float) -> list[DatasetFile] | None:
+    """命中就返回共享的文件清单并记一次 hit，否则返回 None。"""
+    global _hits
+
+    now = time.monotonic()
+    with _lock:
+        entry = _entries.get(key)
+        if entry is not None and entry.signature == signature and now - entry.stored_at < ttl_seconds:
+            _hits += 1
+            return entry.files
+    return None
+
+
 def cached_netcdf_files(
     root: Path,
     *,
     ttl_seconds: float = CATALOG_CACHE_TTL_SECONDS,
 ) -> tuple[list[DatasetFile], bool]:
     """返回 (文件清单, 是否命中缓存)。清单是共享的只读结果，调用方不要就地改写。"""
-    global _hits, _misses
+    global _misses
 
     key = str(root)
     signature = directory_signature(root)
-    now = time.monotonic()
-    with _lock:
-        entry = _entries.get(key)
-        if entry is not None and entry.signature == signature and now - entry.stored_at < ttl_seconds:
-            _hits += 1
-            return entry.files, True
+    cached = _lookup(key, signature, ttl_seconds)
+    if cached is not None:
+        return cached, True
 
-    files = discover_netcdf_files(root)
-    with _lock:
-        _entries[key] = _CacheEntry(signature=signature, files=files, stored_at=now)
-        _misses += 1
-    return files, False
+    with _scan_lock:
+        cached = _lookup(key, signature, ttl_seconds)  # 双检：可能刚被别的请求扫好了
+        if cached is not None:
+            return cached, True
+        files = discover_netcdf_files(root)
+        with _lock:
+            _entries[key] = _CacheEntry(
+                signature=signature, files=files, stored_at=time.monotonic()
+            )
+            _misses += 1
+        return files, False
 
 
 def invalidate_catalog_cache(root: Path | None = None) -> None:
