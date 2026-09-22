@@ -73,34 +73,37 @@ def main() -> int:
     parser.add_argument("--years", type=int, nargs="*", default=DEFAULT_YEARS)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--min-free-gb", type=float, default=6.0)
+    parser.add_argument("--passes", type=int, default=2, help="整轮跑几遍：第二遍专门补失败日（跳过已存在的几乎零成本）")
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
     args = parser.parse_args()
 
-    log_line(args.log, f"SST 队列：{len(args.years)} 年 {args.years[0]} → {args.years[-1]} · 并发 {args.workers}")
-    for year in args.years:
-        free = shutil.disk_usage(SST_ROOT if SST_ROOT.exists() else RAW_ROOT).free / (1024 ** 3)
-        if free < args.min_free_gb:
-            log_line(args.log, f"磁盘可用 {free:.1f} GB 低于 {args.min_free_gb} GB，停止队列")
-            return 1
+    log_line(args.log, f"SST 队列：{len(args.years)} 年 {args.years[0]} → {args.years[-1]} · 并发 {args.workers} · 共 {args.passes} 轮")
+    for pass_index in range(1, max(1, args.passes) + 1):
+        log_line(args.log, f"### 第 {pass_index}/{args.passes} 轮")
+        for year in args.years:
+            free = shutil.disk_usage(SST_ROOT if SST_ROOT.exists() else RAW_ROOT).free / (1024 ** 3)
+            if free < args.min_free_gb:
+                log_line(args.log, f"磁盘可用 {free:.1f} GB 低于 {args.min_free_gb} GB，停止队列")
+                return 1
 
-        days = dates_of(year)
-        per_worker = [days[i::args.workers] for i in range(args.workers)]
-        log_line(args.log, f"== {year}：{len(days)} 天 / {args.workers} 路 ==")
-        handles = [open(f"/tmp/sst-{year}-w{i}.log", "ab", buffering=0) for i in range(args.workers)]
-        processes = [
-            subprocess.Popen(
-                [str(PYTHON), str(FETCHER), "--output-root", str(SST_ROOT), "--continue-on-error", *subset],
-                stdout=handle, stderr=subprocess.STDOUT,
-            )
-            for subset, handle in zip(per_worker, handles)
-        ]
-        for index, process in enumerate(processes):
-            log_line(args.log, f"   {year} worker {index} exit={process.wait()}")
-        for handle in handles:
-            handle.close()
-        done = len(list(SST_ROOT.glob(f"{year}/*.nc")))
-        log_line(args.log, f"   {year} 结束：已落盘 {done} 天")
-        rebuild_index(args.log)
+            days = dates_of(year)
+            per_worker = [days[i::args.workers] for i in range(args.workers)]
+            log_line(args.log, f"== {year}：{len(days)} 天 / {args.workers} 路 ==")
+            handles = [open(f"/tmp/sst-{year}-w{i}.log", "ab", buffering=0) for i in range(args.workers)]
+            processes = [
+                subprocess.Popen(
+                    [str(PYTHON), str(FETCHER), "--output-root", str(SST_ROOT), "--continue-on-error", *subset],
+                    stdout=handle, stderr=subprocess.STDOUT,
+                )
+                for subset, handle in zip(per_worker, handles)
+            ]
+            for index, process in enumerate(processes):
+                log_line(args.log, f"   {year} worker {index} exit={process.wait()}")
+            for handle in handles:
+                handle.close()
+            done = len(list(SST_ROOT.glob(f"{year}/*.nc")))
+            log_line(args.log, f"   {year} 结束：已落盘 {done} 天")
+            rebuild_index(args.log)
 
     log_line(args.log, "队列跑完")
     return 0

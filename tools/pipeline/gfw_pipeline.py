@@ -75,6 +75,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=240.0)
     parser.add_argument("--retries", type=int, default=5)
     parser.add_argument("--min-free-gb", type=float, default=6.0)
+    parser.add_argument("--passes", type=int, default=2, help="整轮跑几遍：第二遍专门补失败/限流漏掉的日期（跳过已存在的几乎零成本）")
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
     args = parser.parse_args()
 
@@ -82,46 +83,48 @@ def main() -> int:
         log_line(args.log, "找不到 GFW token（环境变量 GFW_TOKEN 或 /etc/ocean/gfw.env），退出")
         return 2
 
-    log_line(args.log, f"渔场队列：{len(args.years)} 年 {args.years[0]} → {args.years[-1]} · 并发 {args.workers}")
-    for year in args.years:
-        root = FISHING_ROOT if FISHING_ROOT.exists() else RAW_ROOT
-        free = shutil.disk_usage(root).free / (1024 ** 3)
-        if free < args.min_free_gb:
-            log_line(args.log, f"磁盘可用 {free:.1f} GB 低于 {args.min_free_gb} GB，停止队列")
-            return 1
+    log_line(args.log, f"渔场队列：{len(args.years)} 年 {args.years[0]} → {args.years[-1]} · 并发 {args.workers} · 共 {args.passes} 轮")
+    for pass_index in range(1, max(1, args.passes) + 1):
+        log_line(args.log, f"### 第 {pass_index}/{args.passes} 轮")
+        for year in args.years:
+            root = FISHING_ROOT if FISHING_ROOT.exists() else RAW_ROOT
+            free = shutil.disk_usage(root).free / (1024 ** 3)
+            if free < args.min_free_gb:
+                log_line(args.log, f"磁盘可用 {free:.1f} GB 低于 {args.min_free_gb} GB，停止队列")
+                return 1
 
-        days = dates_of(year)
-        if not days:
-            continue
-        chunks = [days[i:i + args.chunk_days] for i in range(0, len(days), args.chunk_days)]
-        log_line(args.log, f"== {year}：{len(days)} 天 / {len(chunks)} 批（{args.workers} 路）==")
-        pending = list(enumerate(chunks, start=1))
-        running: list[tuple[int, subprocess.Popen]] = []
-        handles = []
+            days = dates_of(year)
+            if not days:
+                continue
+            chunks = [days[i:i + args.chunk_days] for i in range(0, len(days), args.chunk_days)]
+            log_line(args.log, f"== {year}：{len(days)} 天 / {len(chunks)} 批（{args.workers} 路）==")
+            pending = list(enumerate(chunks, start=1))
+            running: list[tuple[int, subprocess.Popen]] = []
+            handles = []
 
-        def launch(item: tuple[int, list[str]]) -> None:
-            index, chunk = item
-            handle = open(f"/tmp/gfw-{year}-{index}.log", "ab", buffering=0)
-            handles.append(handle)
-            running.append((index, subprocess.Popen(
-                [str(PYTHON), str(FETCHER), "--out-dir", str(FISHING_ROOT),
-                 "--dates", *chunk, "--split-days", "--skip-existing",
-                 "--timeout", str(args.timeout), "--retries", str(args.retries)],
-                stdout=handle, stderr=subprocess.STDOUT, cwd=str(REPO),
-            )))
+            def launch(item: tuple[int, list[str]], year: int = year, handles=handles, running=running) -> None:
+                index, chunk = item
+                handle = open(f"/tmp/gfw-{year}-{index}.log", "ab", buffering=0)
+                handles.append(handle)
+                running.append((index, subprocess.Popen(
+                    [str(PYTHON), str(FETCHER), "--out-dir", str(FISHING_ROOT),
+                     "--dates", *chunk, "--split-days", "--skip-existing",
+                     "--timeout", str(args.timeout), "--retries", str(args.retries)],
+                    stdout=handle, stderr=subprocess.STDOUT, cwd=str(REPO),
+                )))
 
-        while pending or running:
-            while pending and len(running) < args.workers:
-                launch(pending.pop(0))
-            index, process = running.pop(0)
-            code = process.wait()
-            log_line(args.log, f"   {year} 批 {index}/{len(chunks)} exit={code}")
+            while pending or running:
+                while pending and len(running) < args.workers:
+                    launch(pending.pop(0))
+                index, process = running.pop(0)
+                code = process.wait()
+                log_line(args.log, f"   {year} 批 {index}/{len(chunks)} exit={code}")
 
-        for handle in handles:
-            handle.close()
-        done = len(list(FISHING_ROOT.glob(f"effort-{year}*.json")))
-        log_line(args.log, f"   {year} 结束：已落盘 {done} 天")
-        rebuild_index(args.log)
+            for handle in handles:
+                handle.close()
+            done = len(list(FISHING_ROOT.glob(f"effort-{year}*.json")))
+            log_line(args.log, f"   {year} 结束：已落盘 {done} 天")
+            rebuild_index(args.log)
 
     log_line(args.log, "队列跑完")
     return 0
