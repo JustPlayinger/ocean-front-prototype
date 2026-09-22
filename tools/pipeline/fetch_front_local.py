@@ -73,6 +73,22 @@ def free_gb(path: Path) -> float:
     return shutil.disk_usage(path).free / (1024 ** 3)
 
 
+def server_free_gb(server: str, key_path: str) -> float | None:
+    """服务器 /srv 可用空间（GB）。查不到就返回 None，由调用方决定继续还是保守停下。"""
+    try:
+        result = subprocess.run(
+            ["ssh", "-n", "-i", key_path, "-o", "StrictHostKeyChecking=accept-new", server,
+             "df -k /srv | tail -1 | awk '{print $4}'"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    text = (result.stdout or "").strip().splitlines()
+    if not text or not text[-1].strip().isdigit():
+        return None
+    return int(text[-1].strip()) / (1024 ** 2)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--years", type=int, nargs="*", default=None, help="只跑这些年份（默认按优先级全量）")
@@ -82,6 +98,10 @@ def main() -> int:
     parser.add_argument("--min-free-gb", type=float, default=8.0, help="本地磁盘低于此值就停")
     parser.add_argument("--limit-days", type=int, default=0, help="只抓前 N 天（冒烟测试用，0=不限）")
     parser.add_argument("--no-sync", action="store_true", help="只抓不传服务器")
+    parser.add_argument("--server", default="root@116.62.54.140", help="同步目标（与 sync-front-to-server.ps1 一致）")
+    parser.add_argument("--key", default=str(Path.home() / ".ssh" / "id_ed25519_ocean"))
+    parser.add_argument("--server-min-free-gb", type=float, default=5.0,
+                        help="服务器 /srv 可用空间低于此值就停止上传（别把服务盘塞满）")
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
     args = parser.parse_args()
 
@@ -94,6 +114,11 @@ def main() -> int:
         if free_gb(REPO) < args.min_free_gb:
             log(f"本地磁盘可用不足 {args.min_free_gb} GB，停止队列（已下的文件都在，重启本脚本会续跑）")
             return 1
+        if not args.no_sync:
+            remote_free = server_free_gb(args.server, args.key)
+            if remote_free is not None and remote_free < args.server_min_free_gb:
+                log(f"服务器 /srv 可用 {remote_free:.1f} GB 低于 {args.server_min_free_gb} GB，停止上传以免影响服务")
+                return 1
 
         days = dates_of(year)
         if args.limit_days:
