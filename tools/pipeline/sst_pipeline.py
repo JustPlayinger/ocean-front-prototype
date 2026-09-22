@@ -72,6 +72,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--years", type=int, nargs="*", default=DEFAULT_YEARS)
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--retries", type=int, default=8, help="每个日期的重试次数（ERDDAP 在并发压力下会瞬时返回 404，实测重试即成功）")
+    parser.add_argument("--retry-wait", type=float, default=5.0, help="重试基础间隔（秒，按次数递增）")
     parser.add_argument("--min-free-gb", type=float, default=6.0)
     parser.add_argument("--passes", type=int, default=2, help="整轮跑几遍：第二遍专门补失败日（跳过已存在的几乎零成本）")
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
@@ -93,7 +95,8 @@ def main() -> int:
             handles = [open(f"/tmp/sst-{year}-w{i}.log", "ab", buffering=0) for i in range(args.workers)]
             processes = [
                 subprocess.Popen(
-                    [str(PYTHON), str(FETCHER), "--output-root", str(SST_ROOT), "--continue-on-error", *subset],
+                    [str(PYTHON), str(FETCHER), "--output-root", str(SST_ROOT), "--continue-on-error",
+                     "--retries", str(args.retries), "--retry-wait", str(args.retry_wait), *subset],
                     stdout=handle, stderr=subprocess.STDOUT,
                 )
                 for subset, handle in zip(per_worker, handles)
