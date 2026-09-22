@@ -234,6 +234,36 @@ ERDDAP 请求量翻倍 → 限流式瞬时 404 → 双方都卡在重试里。
 因为 fetcher 本来就是"写 `.part` → `os.replace`"的原子写；现在 `.part` 名字还带上了 PID，
 两个进程即使真撞上也不会互相覆盖半成品。
 
+**上游 ERDDAP 会整站"数据集列表重载"（2026-09-22 实测）**
+
+现象：SST 队列突然全体卡住，`/tmp/sst-2021-w*.log` 刷
+`HTTP 404: Not Found: Currently unknown datasetID=noaacwBLENDEDCsstDaily`，
+而且**所有** datasetID 都 404，连随手编的 `zzzNotARealDataset` 也 404。
+
+判据（`ocean-ops erddap` 一把梭）：
+
+| 观察 | 含义 |
+|---|---|
+| `version` 有输出，`index.html` 200 | ERDDAP 服务在线，不是断网 |
+| 所有 datasetID 都 404、搜索返回空、`info/index.json` 302、`status.html` 卡满超时 | **上游正在全量重载数据集**（上游问题，等即可） |
+| 只有某个 ID 404、搜索里也搜不到 | 该数据集改名/下线，需要换 `--dataset` |
+| 取一天 200 + 约 120 KB | 上游健康，队列会自己续上 |
+
+确认证据（2021-06-15 实测，`ocean-ops erddap` 抓的原文）：
+
+```text
+② 取一天（与 fetcher 完全相同的选择器）：
+   HTTP=404 2.563s 101B  curl_exit=0
+   正文：Error { code=404; message="Not Found: Currently unknown datasetID=noaacwBLENDEDCsstDaily" }
+③ 搜索 BLENDEDCsst： [HTTP 302 exit 0]      ← 搜索接口被重定向，没有结果
+④ zzzNotARealDataset 404 ；noaacwCRWdaily 404   ← 连编造的 ID 和另一个真实产品也 404
+⑤ info/index.json 302 ；status.html 200 in 25.000s
+```
+
+处置：**什么都不用做**。fetcher 每个日期本来就有 `--retries 8`（指数退避），
+上游一恢复，正在重试的那一天就会成功；当年跑完紧跟的第二遍复查（`--passes 2`）
+还会把这段时间失败的日子整体再补一遍。想确认恢复没有，跑 `ocean-ops erddap`。
+
 **GFW 的「取数失败：None」**：`fetch_range()` 原先只在"网络/解析异常"分支记 `last_error`，
 若 5 次重试全是 429，`last_error` 仍是 `None` → 报错没头没尾。已修（429 分支同样记录原因）。
 真遇到 429 密集不用手忙脚乱：当年的第二遍复查（`--passes 2`）会自动补漏，或把 `--workers` 降到 2 减半请求速率。

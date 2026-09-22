@@ -81,11 +81,20 @@ cmd_logs() {
   journalctl -u ocean-api -n 20 --no-pager 2>/dev/null || echo "（没有 journalctl 输出）"
 }
 
+cmd_erddap() {
+  echo "===== ERDDAP 上游可用性 ====="
+  echo "判读：version 有输出=服务在线；若**所有** datasetID 都 404、搜索返回空，"
+  echo "      说明 ERDDAP 正在全量重载数据集（上游问题），此时队列的重试与第二遍复查会自动补漏。"
+  echo
+  bash "$(dirname "$0")/probe-erddap.sh"
+}
+
 case "${1:-all}" in
   health) cmd_health ;;
   data) cmd_data ;;
   perf) cmd_perf ;;
   logs) cmd_logs ;;
+  erddap) cmd_erddap ;;
   all) cmd_health; echo; cmd_data; echo; cmd_logs ;;
-  *) echo "用法: bash server-ops.sh {health|data|perf|logs|all}"; exit 2 ;;
+  *) echo "用法: bash server-ops.sh {health|data|perf|logs|erddap|all}"; exit 2 ;;
 esac
