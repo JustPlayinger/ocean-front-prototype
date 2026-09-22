@@ -12,8 +12,12 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 ARCHIVE_URL = (
-    "https://zenodo.org/api/records/20356239/files/front_location.zip/content"
+    "https://zenodo.org/records/20356239/files/front_location.zip?download=1"
 )
+# 实测（2026-09）：同一份归档，`/api/records/<id>/files/<name>/content` 只有 17–29 KB/s
+# 且 range 请求频繁超时（remotezip 读中央目录直接 IncompleteRead 失败）；
+# 换成 `?download=1` 这条链接实测 198 KB/s、2 MB range 10 秒拿完。
+# 两条链接内容相同，只是 Zenodo 的分发路径不同，所以默认走后者，并留 --archive-url 可覆盖。
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -65,14 +69,15 @@ def fetch(
     timeout: tuple[float, float] = (10, 60),
     retries: int = 4,
     retry_wait: float = 2.0,
+    archive_url: str = ARCHIVE_URL,
 ) -> None:
     session = retrying_session()
     failures: list[str] = []
     for open_attempt in range(1, retries + 1):
         try:
-            print(f"opening remote archive: {ARCHIVE_URL}", flush=True)
+            print(f"opening remote archive: {archive_url}", flush=True)
             with RemoteZip(
-                ARCHIVE_URL,
+                archive_url,
                 session=session,
                 timeout=timeout,
                 initial_buffer_size=1024 * 1024,
@@ -225,6 +230,7 @@ def main() -> None:
         help="per-date retry attempts (Zenodo sometimes drops the range connection)",
     )
     parser.add_argument("--retry-wait", type=float, default=2.0, help="seconds between retries")
+    parser.add_argument("--archive-url", default=ARCHIVE_URL, help="归档直链（默认走 ?download=1，实测快 7 倍）")
     args = parser.parse_args()
     fetch(
         args.dates,
@@ -234,6 +240,7 @@ def main() -> None:
         timeout=(args.connect_timeout, args.read_timeout),
         retries=args.retries,
         retry_wait=args.retry_wait,
+        archive_url=args.archive_url,
     )
 
 

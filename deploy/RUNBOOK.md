@@ -204,7 +204,33 @@ curl -X POST http://127.0.0.1:8000/api/data/index/rebuild
 * **单次调用别传太多日期**：一次给 731 个日期当命令行参数，外部命令会直接启动失败（exit 为空、无输出），分批即可，脚本本身会跳过已存在的文件（可中断续跑）。
 * **.ps1 上传脚本要带 BOM**：无 BOM 的 UTF-8 中文注释会被 PowerShell 5.1 当 GBK 读，报「表达式或语句中包含意外的标记」；写文件时用 `Set-Content -Encoding utf8`（PS 5.1 会写 BOM）。
 
-## SST 色标自适应（2026-09 修）
+## 数据补齐队列（2026-09-22 起，自主排队跑完）
+
+目标：把 Zenodo 归档里所有能用的锋面 / 海温 / 渔场数据补齐到服务器。三条队列并行，都可中断续跑：
+
+| 队列 | 在哪跑 | 范围 | 并发 | 脚本 | 日志 |
+|---|---|---|---|---|---|
+| 锋面 | **本地 Windows**（服务器到 Zenodo 只有 17 KB/s，本地 198 KB/s） | 2022 → 1982 逐年 | 4 | `tools/pipeline/fetch_front_local.py`（每批自动 `sync-front-to-server.ps1`） | `C:\temp\front-pipeline.log` |
+| 海温 | 服务器 | 2022 → 2002 逐年（产品 2002 起） | 4 | `tools/pipeline/sst_pipeline.py` | `/var/log/ocean-sst-pipeline.log` |
+| 渔场 | 服务器 | 2024 → 2017 逐年（GFW 2017 起） | 3 | `tools/pipeline/gfw_pipeline.py` | `/var/log/ocean-gfw-pipeline.log` |
+
+- 启动（服务器两条，幂等）：`bash /tmp/start-server-pipelines.sh`
+- 启动（本地锋面）：`backend\.venv\Scripts\python.exe tools\pipeline\fetch_front_local.py --workers 4 --batch-size 40`
+- 进度查看：服务器 `find /srv/ocean/data/raw/{front,sst} -name '*.nc' | wc -l`、`ls /srv/ocean/data/raw/fishing/effort-*.json | wc -l`；本地看上面的日志与 `data/raw/front/<年>` 文件数
+- 索引：三条队列都在**每年跑完时**自动 `POST /api/data/index/rebuild`（不是每批都重建，避免反复重扫目录）
+
+**关键实测：Zenodo 的链接选哪个差别 7 倍**
+
+| 链接 | 速率 |
+|---|---|
+| `https://zenodo.org/api/records/20356239/files/front_location.zip/content` | 17–29 KB/s，range 频繁超时（`remotezip` 读中央目录直接失败） |
+| `https://zenodo.org/records/20356239/files/front_location.zip?download=1` | **198 KB/s**，2 MB range 10 秒拿完 |
+
+`fetch_zenodo_front_samples.py` 已默认走后者（`--archive-url` 可覆盖）。另外实测**服务器到 Zenodo 只有 17 KB/s**（换链接也一样），所以锋面只能本地取再上传；本地单连接约 116–198 KB/s，4 路并发下 14,610 天约 11 小时。
+
+**没下的东西**：`front_intensity_YYYY.zip`（43 个分年包，共约 90 GB）——40 GB 磁盘只剩 33 GB，装不下；要用得先扩容或按年挑。
+
+
 
 图层色标原先固定 22–33 ℃（按夏季调的），新增全年数据后 **2024-01-15（13.2–18.2 ℃）与 2024-12-01（18.8–21.4 ℃）渲染出来只有 1 种颜色、整幅一个平色**。
 现在 `raster_render.sst_scale()` 按当前窗口 2%/98% 分位算上下限、并保证至少 4 ℃ 跨度；
