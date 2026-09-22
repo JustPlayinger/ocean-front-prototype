@@ -84,9 +84,10 @@ def main() -> int:
         return 2
 
     log_line(args.log, f"渔场队列：{len(args.years)} 年 {args.years[0]} → {args.years[-1]} · 并发 {args.workers} · 共 {args.passes} 轮")
-    for pass_index in range(1, max(1, args.passes) + 1):
-        log_line(args.log, f"### 第 {pass_index}/{args.passes} 轮")
-        for year in args.years:
+    # 年份列表按 passes 重复：每年紧跟一轮复查，把该年超时/429 漏掉的日期当场补掉
+    schedule = [year for year in args.years for _ in range(max(1, args.passes))]
+    for _single in range(1):
+        for year in schedule:
             root = FISHING_ROOT if FISHING_ROOT.exists() else RAW_ROOT
             free = shutil.disk_usage(root).free / (1024 ** 3)
             if free < args.min_free_gb:

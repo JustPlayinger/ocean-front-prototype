@@ -102,13 +102,18 @@ def main() -> int:
     parser.add_argument("--key", default=str(Path.home() / ".ssh" / "id_ed25519_ocean"))
     parser.add_argument("--server-min-free-gb", type=float, default=5.0,
                         help="服务器 /srv 可用空间低于此值就停止上传（别把服务盘塞满）")
+    parser.add_argument("--passes", type=int, default=2,
+                        help="整条年份队列跑几遍：第二遍专门补失败/断流的日期（已存在的会跳过，几乎零成本）")
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
     args = parser.parse_args()
 
     log = Log(args.log)
-    years = args.years or years_from_groups()
-    log(f"队列：{len(years)} 年 {years[0]} → {years[-1]} · 并发 {args.workers} · 每批 {args.batch_size} 天"
-        f" · 同步={'关闭' if args.no_sync else '开启'}")
+    base_years = args.years or years_from_groups()
+    # 每年排 passes 遍：第二遍紧跟在同一年后面，把该年失败/断流的日期补齐（已存在的会跳过，几乎零成本）
+    passes = max(1, args.passes)
+    years = [year for year in base_years for _ in range(passes)]
+    log(f"队列：{len(base_years)} 年 × {passes} 轮 · {base_years[0]} → {base_years[-1]} · 并发 {args.workers}"
+        f" · 每批 {args.batch_size} 天 · 同步={'关闭' if args.no_sync else '开启'}")
 
     for year in years:
         if free_gb(REPO) < args.min_free_gb:

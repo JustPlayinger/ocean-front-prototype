@@ -78,9 +78,10 @@ def main() -> int:
     args = parser.parse_args()
 
     log_line(args.log, f"SST 队列：{len(args.years)} 年 {args.years[0]} → {args.years[-1]} · 并发 {args.workers} · 共 {args.passes} 轮")
-    for pass_index in range(1, max(1, args.passes) + 1):
-        log_line(args.log, f"### 第 {pass_index}/{args.passes} 轮")
-        for year in args.years:
+    # 年份列表按 passes 重复：每年紧跟一轮复查，把该年失败/限流的日期当场补掉，而不是等整条队列跑完
+    schedule = [year for year in args.years for _ in range(max(1, args.passes))]
+    for _single in range(1):
+        for year in schedule:
             free = shutil.disk_usage(SST_ROOT if SST_ROOT.exists() else RAW_ROOT).free / (1024 ** 3)
             if free < args.min_free_gb:
                 log_line(args.log, f"磁盘可用 {free:.1f} GB 低于 {args.min_free_gb} GB，停止队列")
