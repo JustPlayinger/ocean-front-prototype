@@ -20,10 +20,13 @@ cmd_health() {
   free -h | head -2
   df -h / | tail -1
   echo
-  echo "===== 取数 / 服务进程（按内存倒序）====="
-  ps -eo pid,pcpu,pmem,rss,etime,cmd --sort=-rss 2>/dev/null \
-    | grep -E 'uvicorn|pipeline\.py' | grep -v grep \
-    || echo "（当前没有 uvicorn / pipeline 进程）"
+  echo "===== 取数 / 服务进程（PID PPID CPU% MEM% RSS 运行时长）====="
+  echo "提示：fetch_sst_samples 的 PPID 若是 1，说明它成了孤儿（会和新一代抢同一批日期，见 RUNBOOK）"
+  ps -eo pid,ppid,pcpu,pmem,rss,etime,cmd --sort=-rss 2>/dev/null \
+    | grep -E 'uvicorn|pipeline\.py|fetch_' | grep -v grep \
+    || echo "（当前没有 uvicorn / pipeline / fetch 进程）"
+  echo
+  echo "子进程计数：$(ps -eo pid,cmd | grep -E 'fetch_sst_samples|fetch_gfw_effort' | grep -v grep | wc -l)"
 }
 
 cmd_data() {

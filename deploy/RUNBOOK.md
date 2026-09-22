@@ -219,6 +219,25 @@ curl -X POST http://127.0.0.1:8000/api/data/index/rebuild
 - 进度查看：服务器 `find /srv/ocean/data/raw/{front,sst} -name '*.nc' | wc -l`、`ls /srv/ocean/data/raw/fishing/effort-*.json | wc -l`；本地看上面的日志与 `data/raw/front/<年>` 文件数
 - 索引：三条队列都在**每年跑完时**自动 `POST /api/data/index/rebuild`（不是每批都重建，避免反复重扫目录）
 
+**踩坑：孤儿子进程会让队列"假死"（2026-09-22 实测并修掉）**
+
+现象：SST 队列 40 分钟没有新文件落盘，`/tmp/sst-2021-w*.log` 一直在刷
+`HTTP 404: Currently unknown datasetID=noaacwBLENDEDCsstDaily`。
+
+原因：pipeline 被 kill/重启后，它 fork 出来的 `fetch_sst_samples.py` 子进程不会跟着死，
+会变成 **PPID=1 的孤儿**继续跑，而重启后的新一代 worker 抓的是**同一批日期** →
+ERDDAP 请求量翻倍 → 限流式瞬时 404 → 双方都卡在重试里。
+`ps -eo pid,ppid,cmd | grep fetch_sst` 一眼可辨：**PPID=1 的就是孤儿**（实测当时 6 个子进程，应该是 4）。
+
+处理：`bash /opt/ocean/tools/ops/kill-orphans.sh`（只杀 PPID=1 的），或直接看 `ocean-ops health` 的进程表。
+事后全量校验了 1704 个 SST 文件（magic 全是 `CDF\x01`、0 个打不开、0 个异常小文件）——
+因为 fetcher 本来就是"写 `.part` → `os.replace`"的原子写；现在 `.part` 名字还带上了 PID，
+两个进程即使真撞上也不会互相覆盖半成品。
+
+**GFW 的「取数失败：None」**：`fetch_range()` 原先只在"网络/解析异常"分支记 `last_error`，
+若 5 次重试全是 429，`last_error` 仍是 `None` → 报错没头没尾。已修（429 分支同样记录原因）。
+真遇到 429 密集不用手忙脚乱：当年的第二遍复查（`--passes 2`）会自动补漏，或把 `--workers` 降到 2 减半请求速率。
+
 **关键实测：Zenodo 的链接选哪个差别 7 倍**
 
 | 链接 | 速率 |

@@ -128,7 +128,9 @@ def fetch_sst(
                     raise RuntimeError(
                         "response is not NetCDF: " + payload[:160].decode("utf-8", "replace")
                     )
-                partial = destination.with_name(destination.name + ".part")
+                # .part 名字带 PID：万一同一目录被两个进程同时抓同一天（例如旧进程成了孤儿），
+                # 也不会互相覆盖对方写到一半的临时文件
+                partial = destination.with_name(f"{destination.name}.{os.getpid()}.part")
                 partial.write_bytes(payload)
                 partial.replace(destination)
                 print(

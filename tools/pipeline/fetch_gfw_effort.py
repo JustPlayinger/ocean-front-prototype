@@ -197,6 +197,9 @@ def fetch_range(
                 )
             if response.status_code == 429:
                 wait = 20 * attempt
+                # 必须记下来：否则 5 次全是 429 时 last_error 仍是 None，
+                # 最终报错会变成没头没尾的「取数失败：None」
+                last_error = RuntimeError(f"HTTP 429 速率受限（{attempt}/{retries} 次尝试均被限流）")
                 print(f"  429 速率受限，{wait}s 后重试（{attempt}/{retries}）", file=sys.stderr)
                 time.sleep(wait)
                 continue
