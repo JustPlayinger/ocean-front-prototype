@@ -1,56 +1,63 @@
 #!/usr/bin/env bash
-# ERDDAP 上游可用性探查（每个请求都带超时，不会挂死；结果先写文件再一次性输出，避免管道缓冲看起来"没输出"）。
+# ERDDAP 上游可用性探查。用法：ocean-ops erddap [YYYY-MM-DD]
+#
+# 每条探测**先打印进度再发请求**，且单步超时都很短（最坏合计约 80 秒），
+# 所以终端里能一直看到动静，不会像卡死。任何时候 Ctrl+C 都安全（纯只读）。
 #
 # 判读：
-#   ① version 有输出            → ERDDAP 服务在线
-#   ② 所有 datasetID 都 404      → 数据集列表没加载（上游在全量重载），**不是我们的问题**
-#   ③ 只有某个 ID 404            → 那个数据集被改名/下线，需要换 datasetID
-#   ④ 正常取一天返回 200 + 120 KB → 上游健康，队列会自己续上
+#   ① version 有输出              → ERDDAP 服务在线（不是断网）
+#   ② 取一天 200 + 约 120 KB      → 上游健康，队列会自己续上
+#   ② 取一天 404 / 正文 unknown   → 数据集列表没加载（上游整站重载），不是我们的问题
+#   ④ 只有某个 ID 404 而别的正常  → 那个数据集改名/下线，需要换 --dataset
 #
-# 实测（2026-09-22 17:1x）：② —— 1704 天取完后上游开始整站重载，连随手编的 ID 也 404，
-# 搜索返回空、info/index.json 302、status.html 卡到 25 s 超时。
-# 注意：URL 里的 [ ] 是 ERDDAP 的下标语法，curl 默认会当成通配符（报 exit=3 URL malformed），
-#      所以每条 curl 都必须带 -g（--globoff）。
-CURL=(curl -g -s)
-
+# 坑：URL 里的 [ ] 是 ERDDAP 下标语法，curl 默认当通配符 → 必须有 -g（--globoff），
+#     否则 curl 直接 exit=3 URL malformed，请求根本没发出去。
 set -u
 
 BASE=${ERDDAP_BASE:-https://coastwatch.noaa.gov/erddap}
 DATASET=${ERDDAP_DATASET:-noaacwBLENDEDCsstDaily}
 DAY=${1:-2021-06-15}
-SEL="analysed_sst[(${DAY}T00:00:00Z):1:(${DAY}T23:59:59Z)][(27):1:(34)][(120):1:(128)],mask[(${DAY}T00:00:00Z):1:(${DAY}T23:59:59Z)][(27):1:(34)][(120):1:(128)]"
-OUT=$(mktemp)
+BODY=/tmp/.ocean-probe-body
+# -s 静默、-S 仍然显示错误、-g 关掉 URL 通配
+CURL=(curl -g -s -S)
 
-{
-  echo "① 服务版本："
-  printf '   %s\n' "$("${CURL[@]}" -m 20 "$BASE/version" || echo '（取不到）')"
+echo "探测 $BASE（数据集 $DATASET，样日 $DAY）"
+echo
 
-  echo
-  echo "② 取一天（$DAY，与 fetcher 完全相同的选择器）："
-  code=$("${CURL[@]}" -m 60 -o "$OUT.body" -w '%{http_code} %{time_total}s %{size_download}B' \
-    "$BASE/griddap/$DATASET.nc?$SEL")
-  status=$?
-  echo "   HTTP=$code  curl_exit=$status   （200 且约 120 KB = 上游健康）"
-  echo "   正文前 200 字节：$(head -c 200 "$OUT.body" 2>/dev/null)"
+echo "① 服务版本（最多等 15s）"
+version=$("${CURL[@]}" -m 15 "$BASE/version" 2>&1) || version=""
+echo "   ${version:-（取不到，可能整站不可用）}"
 
-  echo
-  echo "③ 搜索 BLENDEDCsst（有结果=数据集在列表里）："
-  search=$("${CURL[@]}" -m 25 -w '\n[HTTP %{http_code} exit %{exitcode}]\n' "$BASE/search/index.csv?searchFor=BLENDEDCsst&itemsPerPage=5")
-  printf '%s\n' "$(printf '%s' "$search" | head -3 | cut -c1-140)"
+echo
+echo "② 取一天 $DAY（最多等 25s；与 fetcher 完全相同的选择器）"
+result=$("${CURL[@]}" -m 25 -o "$BODY" -w '%{http_code} %{time_total}s %{size_download}B' \
+  "$BASE/griddap/$DATASET.nc?analysed_sst[(${DAY}T00:00:00Z):1:(${DAY}T23:59:59Z)][(27):1:(34)][(120):1:(128)],mask[(${DAY}T00:00:00Z):1:(${DAY}T23:59:59Z)][(27):1:(34)][(120):1:(128)]" 2>&1)
+echo "   HTTP=$result   （200 + 约 120 KB = 上游健康）"
+echo "   正文前 160 字节：$(head -c 160 "$BODY" 2>/dev/null | tr '\n' ' ')"
 
-  echo
-  echo "④ 判别用：随手编的 ID 与另一个真实产品"
-  for id in zzzNotARealDataset noaacwCRWdaily; do
-    printf '   %-24s %s\n' "$id" "$("${CURL[@]}" -m 20 -o /dev/null -w '%{http_code}' "$BASE/griddap/$id.das")"
-  done
+echo
+echo "③ 搜索 BLENDEDCsst（最多等 12s；有结果=数据集在列表里）"
+search=$("${CURL[@]}" -m 12 -w ' [HTTP %{http_code}]' "$BASE/search/index.csv?searchFor=BLENDEDCsst&itemsPerPage=4" 2>&1) || search=""
+printf '   %s\n' "$(printf '%s' "$search" | head -2 | cut -c1-150)"
 
-  echo
-  echo "⑤ 服务信息："
-  printf '   info/index.json  %s\n' "$("${CURL[@]}" -m 25 -o /dev/null -w '%{http_code}' "$BASE/info/index.json")"
-  printf '   status.html      %s\n' "$("${CURL[@]}" -m 25 -o /dev/null -w '%{http_code} in %{time_total}s' "$BASE/status.html")"
-} > "$OUT" 2>&1
+echo
+echo "④ 对照：编造的 ID 与另一个真实产品（各最多等 8s）"
+for id in zzzNotARealDataset noaacwCRWdaily; do
+  printf '   %-22s %s\n' "$id" "$("${CURL[@]}" -m 8 -o /dev/null -w '%{http_code}' "$BASE/griddap/$id.das" 2>&1)"
+done
 
-cat "$OUT"
-rm -f "$OUT" "$OUT.body"
+echo
+echo "⑤ 服务页（各最多等 10s）"
+printf '   info/index.json  %s\n' "$("${CURL[@]}" -m 10 -o /dev/null -w '%{http_code}' "$BASE/info/index.json" 2>&1)"
+printf '   status.html      %s\n' "$("${CURL[@]}" -m 10 -o /dev/null -w '%{http_code} in %{time_total}s' "$BASE/status.html" 2>&1)"
+
+echo
+echo "结论速读（核心只看 ① 和 ②）："
+echo "  ①有版本 且 ②200+120KB                → 上游健康，队列正在下/已恢复"
+echo "  ①有版本 但 ②404 unknown datasetID     → 数据集列表未加载（上游整站重载中），"
+echo "      此时 ④ 里我们的真实 ID 会和编造 ID 表现完全一样（都 404）→ 等着，队列重试 + 第二遍复查会自动补"
+echo "  ②200 但 ③/⑤ 是 302、④ 编造 ID 404     → 这些都是正常现象（搜索页会重定向；编造 ID 本就该 404）"
+rm -f "$BODY"
+
 
 
