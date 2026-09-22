@@ -24,6 +24,10 @@ class CatalogResponse(BaseModel):
     file_count: int
     available_dates: list[DateType]
     files: list[CatalogFile]
+    # files 默认不返回（几千个文件会把响应撑到几百 KB），为 false 时 files 恒为空数组
+    files_included: bool = False
+    # 本次结果是否来自目录指纹缓存（抓取脚本持续写入时会不断 miss，属正常）
+    cached: bool = False
     message: str | None = None
 
 

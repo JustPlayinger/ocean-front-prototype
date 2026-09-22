@@ -16,7 +16,7 @@
    ├── /            → /opt/ocean/frontend/prototype/     离线原型「渔场向导」
    └── /api/        → http://127.0.0.1:8000              FastAPI：服务器端渲染 PNG + GeoJSON + 点查询 + 历史统计
                                         ▲
-                                        └── systemd: ocean-api.service（用户 ocean，1 worker）
+                                        └── systemd: ocean-api.service（用户 ocean，2 worker）
 代码 /opt/ocean                venv /opt/ocean/venv
 数据 /srv/ocean/data/{raw,processed,cache,manifest}
 MySQL 8 · db_prac              仅监听 127.0.0.1，远程走 SSH 隧道
@@ -234,6 +234,57 @@ curl -X POST http://127.0.0.1:8000/api/data/index/rebuild
 `RuntimeError: HTTP 404`，但事后用**完全相同的双变量请求**单独拉同一天返回 200（99,168 / 122,540 字节）。
 所以这不是数据缺失，而是限流式瞬时错误 → 对策是**多试几次**（`sst_pipeline.py` 默认 `--retries 8 --retry-wait 5`）
 加上"每年紧跟一轮复查"的排法；2020 的缺口当天就回填了（226 → 251 → …）。
+
+## 在 VS Code 里看服务器（日常观察入口，2026-09-22 起）
+
+本机工作区根目录带了 `.vscode\tasks.json`（`F:\project\海洋锋面\.vscode\tasks.json`，本地文件、未纳入 git —— 仓库 `.gitignore` 忽略了 `.vscode/`），`Ctrl+Shift+P → Tasks: Run Task` 里可直接选：
+
+| 任务 | 作用 |
+|---|---|
+| `服务器：SSH 会话（交互式）` | 开一个连到服务器的终端（`ssh ocean`），日常操作都在这做 |
+| `服务器：体检` | load / 内存 / 磁盘 / uvicorn 进程 |
+| `服务器：数据增长` | 三类文件数 + 磁盘占用（连按两次就能看增量） |
+| `服务器：接口自测` | catalog / point / raster 计时，带 `X-Catalog-Cache`、`X-Raster-Cache` 响应头 |
+| `服务器：日志` | 三条队列 + `ocean-api` 最近日志 |
+
+`ocean` 这个主机别名写在 `C:\Users\<你>\.ssh\config`：
+
+```sshconfig
+Host ocean
+    HostName 116.62.54.140
+    User root
+    IdentityFile ~/.ssh/id_ed25519_ocean
+    ServerAliveInterval 30
+```
+
+想开**一整个 VS Code 窗口**连服务器（左侧文件树就是 `/opt/ocean`、`/srv/ocean`，还带集成终端）：
+装扩展 `ms-vscode-remote.remote-ssh`，然后 `Ctrl+Shift+P → Remote-SSH: Connect to Host… → ocean`；
+也可以在终端里直接 `code --remote ssh-remote+ocean /opt/ocean`。
+
+> 服务器上现成有 `htop` / `watch` / `jq`；`iotop`、`nload`、`ncdu` 没装（要看网络得先 `apt install nload`）。
+
+## 服务器性能基线（2026-09-22 实测：4.0 GB / 4557 个文件，三条队列同时在跑）
+
+| 项目 | 实测 |
+|---|---|
+| 主机 | load **0.17**（2 vCPU）、内存 1.2/3.5 GiB、磁盘 7.6/40 G、CPU 空闲 85–98%、`si/so=0` 零换页 |
+| `/api/catalog`（优化前） | 0.38 s / **414 KB**，20 并发最慢 **9.4 s**（单 worker 串行 + 每次重扫 + 4557 个文件名全列） |
+| `/api/point/{date}` | 0.87 s（要读 front + sst 两个 .nc 并解算） |
+| `/api/fishing/availability` | **0.014 s** / 81 KB |
+| `/api/analysis/{date}` | 0.56 s / 657 KB（**不缓存** → 前端图层优先用 raster + point，别整段拉 GeoJSON） |
+| raster `kind=sst` | 0.44 s 冷；命中后 `X-Raster-Cache: hit`，`X-Raster-Scale` 由 `.scale` 旁车返回 |
+| `POST /api/data/index/rebuild` | 4575 个 .nc → **10.5 s**（队列按年重建完全够用） |
+| uvicorn | 单 worker 常驻 205 MB → 已改 **2 worker** |
+
+结论：**瓶颈在公网出口，不在服务器**——三条队列满速取数时服务器 CPU 基本闲置。所以能本地取的（Zenodo 锋面）就本地取、再上传。
+
+### `/api/catalog` 的改动（2026-09-22，就是这么优化的）
+
+1. **默认不返回逐文件清单**：`files` 默认空数组，响应从 414 KB 掉到几 KB；老调用方要清单就加 `?files=true`。
+   响应新增 `files_included`（本次是否带清单）与 `cached`（是否命中缓存），并且**总是**返回 `X-Catalog-Cache: hit|miss` 头。
+2. **目录指纹缓存**：指纹只遍历目录、不逐个 stat 文件（几千个文件也只毫秒级），任一目录 mtime 变化即失效；
+   另加 15 s TTL 兜住"文件被原地覆盖"。`?refresh=true` 强制重扫，`POST /api/data/index/rebuild` 后自动清缓存。
+3. **uvicorn 1 → 2 worker**：单 worker 下 20 并发会排队到 9 s；实测每 worker 常驻 205 MB，2 个仍远低于 4 GiB。
 
 ## SST 色标自适应（2026-09 修）
 

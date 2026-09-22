@@ -32,6 +32,61 @@ def test_empty_catalog_is_explicit(tmp_path: Path, monkeypatch) -> None:
     assert payload["message"]
 
 
+def test_catalog_hides_file_list_by_default_and_caches(tmp_path: Path, monkeypatch) -> None:
+    from app import catalog as catalog_module
+
+    raw_root = tmp_path / "raw"
+    monkeypatch.setattr(settings, "raw_data_dir", raw_root)
+    catalog_module.invalidate_catalog_cache()
+    _write_front_file(
+        raw_root / "front" / "2024" / "front_location20240805.nc",
+        np.array([[0, 0], [0, 0]], dtype=np.int8),
+        "2024-08-05",
+    )
+
+    first = client.get("/api/catalog")
+    assert first.status_code == 200
+    assert first.headers["X-Catalog-Cache"] == "miss"
+    payload = first.json()
+    assert payload["file_count"] == 1
+    assert payload["available_dates"] == ["2024-08-05"]
+    # 默认不返回逐文件清单：几千个文件时这个数组会把响应撑到几百 KB
+    assert payload["files"] == []
+    assert payload["files_included"] is False
+    assert payload["cached"] is False
+
+    # 第二次同样内容：目录指纹没变，直接命中缓存
+    second = client.get("/api/catalog")
+    assert second.headers["X-Catalog-Cache"] == "hit"
+    assert second.json()["cached"] is True
+    assert second.json()["file_count"] == 1
+
+    # 需要清单的老调用方显式要：?files=true
+    explicit = client.get("/api/catalog?files=true")
+    assert explicit.json()["files_included"] is True
+    assert [item["name"] for item in explicit.json()["files"]] == [
+        "front/2024/front_location20240805.nc"
+    ]
+    assert explicit.json()["files"][0]["size_bytes"] > 0
+
+    # 新文件落地（目录 mtime 变化）后必须立刻看到，不能吃旧缓存
+    _write_front_file(
+        raw_root / "front" / "2024" / "front_location20240806.nc",
+        np.array([[0, 0], [0, 0]], dtype=np.int8),
+        "2024-08-06",
+    )
+    third = client.get("/api/catalog")
+    assert third.headers["X-Catalog-Cache"] == "miss"
+    assert third.json()["file_count"] == 2
+    assert third.json()["available_dates"] == ["2024-08-05", "2024-08-06"]
+
+    # refresh=true 跳过缓存强制重扫
+    refreshed = client.get("/api/catalog?refresh=true")
+    assert refreshed.headers["X-Catalog-Cache"] == "miss"
+    assert refreshed.json()["file_count"] == 2
+    assert catalog_module.catalog_cache_stats()["misses"] >= 4
+
+
 def _write_front_file(path: Path, values: np.ndarray, observation_date: str) -> None:
     dataset = xr.Dataset(
         data_vars={

@@ -161,10 +161,15 @@ def data_index() -> DataIndexResponse:
 
 @app.post(f"{settings.api_prefix}/data/index/rebuild", response_model=DataIndexResponse)
 def rebuild_data_index() -> DataIndexResponse:
-    return build_sqlite_data_index(
+    from .catalog import invalidate_catalog_cache
+
+    index = build_sqlite_data_index(
         raw_data_dir=settings.raw_data_dir,
         processed_dir=settings.raw_data_dir.parent / "processed",
     )
+    # 索引重建意味着"数据刚变过"，顺手把 catalog 缓存清掉，下一次访问直接拿新日期清单
+    invalidate_catalog_cache(settings.raw_data_dir)
+    return index
 
 
 @app.get(f"{settings.api_prefix}/data/index/{{observation_date}}", response_model=DataIndexDateResponse)
@@ -196,12 +201,23 @@ def data_preparation_plan(
 
 
 @app.get(f"{settings.api_prefix}/catalog", response_model=CatalogResponse)
-def catalog() -> CatalogResponse:
-    from .catalog import discover_netcdf_files
+def catalog(
+    response: Response,
+    include_files: bool = Query(
+        False,
+        alias="files",
+        description="是否返回逐文件清单；数据到几千个文件时默认关闭（available_dates 不受影响）",
+    ),
+    refresh: bool = Query(False, description="忽略缓存，强制重新扫描数据目录"),
+) -> CatalogResponse:
+    from .catalog import cached_netcdf_files, invalidate_catalog_cache
 
-    discovered = discover_netcdf_files(settings.raw_data_dir)
+    if refresh:
+        invalidate_catalog_cache(settings.raw_data_dir)
+    discovered, cached = cached_netcdf_files(settings.raw_data_dir)
     dates = sorted({item.observation_date for item in discovered if item.observation_date})
     ready = bool(discovered)
+    response.headers["X-Catalog-Cache"] = "hit" if cached else "miss"
     return CatalogResponse(
         dataset=settings.dataset_id,
         version=settings.dataset_version,
@@ -215,7 +231,11 @@ def catalog() -> CatalogResponse:
                 size_bytes=item.path.stat().st_size,
             )
             for item in discovered
-        ],
+        ]
+        if include_files
+        else [],
+        files_included=include_files,
+        cached=cached,
         message=None if ready else "请将真实逐日 NetCDF 样例放入 data/raw 目录。",
     )
 
