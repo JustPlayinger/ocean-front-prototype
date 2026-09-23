@@ -273,9 +273,23 @@
     return task;
   }
 
+  /** 该窗口（按 step 要求的分辨率）是否已经被现有片覆盖 —— 覆盖了就不必再打服务器。
+   *  例：启动时默认视野窗口 110,20,135,40 完全落在主片 105,3,150,45（同为 0.05°）里。 */
+  function coveredByPatch(iso, bbox, step) {
+    const need = 0.05 * (Number(step) || 1) + 1e-9;
+    return (PATCHES[iso] || []).some(function (item) {
+      if (item.resolutionDeg > need) return false;
+      const b = item.bbox || (item.grid ? [item.grid.lon0, item.grid.lat0,
+        item.grid.lon0 + item.grid.dlon * item.grid.nx, item.grid.lat0 + item.grid.dlat * item.grid.ny] : null);
+      return !!b && b[0] <= bbox[0] + 1e-6 && b[1] <= bbox[1] + 1e-6 &&
+        b[2] >= bbox[2] - 1e-6 && b[3] >= bbox[3] - 1e-6;
+    });
+  }
+
   /** 取某天当前视野的窗口片 */
   function ensureViewport(iso) {
     if (!SERVER.enabled || !VIEW_WINDOW.bbox) return Promise.resolve(false);
+    if (coveredByPatch(iso, VIEW_WINDOW.bbox, VIEW_WINDOW.step)) return Promise.resolve(true);
     return fetchPatch(iso, VIEW_WINDOW.key,
       SERVER.base + "/frontend/day/" + iso +
       "?bbox=" + VIEW_WINDOW.bbox.join(",") + "&step=" + VIEW_WINDOW.step);
