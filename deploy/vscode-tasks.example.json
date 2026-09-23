@@ -1,0 +1,99 @@
+{
+  // Ctrl+Shift+P → Tasks: Run Task → 选下面任意一条
+  // 依赖：~/.ssh/config 里的 Host ocean 别名（见 deploy/RUNBOOK.md「在 VS Code 里看服务器」）
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "服务器：SSH 会话（交互式）",
+      "detail": "在 VS Code 终端里开一个连到 116.62.54.140 的 SSH 会话，之后就在这里敲命令",
+      "type": "shell",
+      "command": "ssh ocean",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "focus": true,
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "服务器：用 VS Code 窗口连（Remote-SSH）",
+      "detail": "另开一个 VS Code 窗口，左侧文件树直接是服务器上的 /opt/ocean（需装 ms-vscode-remote.remote-ssh）",
+      "type": "shell",
+      "command": "code --remote ssh-remote+ocean /opt/ocean",
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "服务器：体检（load / 内存 / 磁盘 / 进程）",
+      "type": "shell",
+      "command": "ssh ocean 'bash /opt/ocean/tools/ops/server-ops.sh health'",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "服务器：数据增长（三类文件数 + 磁盘）",
+      "detail": "连按两次就能看出这段时间长了多少数据",
+      "type": "shell",
+      "command": "ssh ocean 'bash /opt/ocean/tools/ops/server-ops.sh data'",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "服务器：接口自测（含缓存命中与 20 并发）",
+      "type": "shell",
+      "command": "ssh ocean 'bash /opt/ocean/tools/ops/server-ops.sh perf'",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "服务器：日志（三条队列 + API）",
+      "type": "shell",
+      "command": "ssh ocean 'bash /opt/ocean/tools/ops/server-ops.sh logs'",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "服务器：一次看全（health + data + logs）",
+      "type": "shell",
+      "command": "ssh ocean 'bash /opt/ocean/tools/ops/server-ops.sh all'",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "服务器：SSH 会话（直连，不依赖 ~/.ssh/config）",
+      "type": "shell",
+      "command": "ssh -i \"${env:USERPROFILE}/.ssh/id_ed25519_ocean\" -o StrictHostKeyChecking=accept-new root@116.62.54.140",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "focus": true,
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}
