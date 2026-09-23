@@ -115,12 +115,13 @@
     border-radius: 9px; padding: 8px 10px; font-size: 12px; color: var(--text-dim);
   }
   .map-legend h4 { color: var(--text); margin-bottom: 6px; font-size: 12px; }
-  /* 图层抽屉：默认收起在右侧，点右上角「☰」呼出；保留 .map-legend 类以便复用行样式 */
+  /* 图层抽屉：默认收起在左侧，鼠标靠近左边缘自动呼出；保留 .map-legend 类以便复用行样式 */
+  .layer-toggle { position: absolute; left: 14px; top: 14px; z-index: 8; }
   .layer-drawer {
-    left: auto; right: 14px; top: 62px; bottom: auto; width: 236px;
+    left: 14px; right: auto; top: 62px; bottom: auto; width: 236px;
     max-height: calc(100% - 96px); overflow: auto;
     background: rgba(12,26,41,.95);
-    transform: translateX(calc(100% + 22px)); opacity: 0; pointer-events: none;
+    transform: translateX(calc(-100% - 22px)); opacity: 0; pointer-events: none;
     transition: transform .2s ease, opacity .2s ease;
   }
   .layer-drawer.open { transform: none; opacity: 1; pointer-events: auto; }
@@ -417,9 +418,9 @@
         <button class="ctrl" title="放大地图" id="zoomIn">＋</button>
         <button class="ctrl" title="缩小地图" id="zoomOut">－</button>
         <button class="ctrl" title="回到定位点" id="recenter">◎</button>
-        <button class="ctrl" title="图层开关" id="layerToggle" aria-controls="layerDrawer" aria-expanded="false">☰</button>
       </div>
-      <!-- 图层抽屉：默认收起，点右上角「图层」呼出 -->
+      <button class="ctrl layer-toggle" id="layerToggle" title="图层开关（鼠标移到左边缘也会自动展开）" aria-controls="layerDrawer" aria-expanded="false">☰</button>
+      <!-- 图层抽屉：默认收起在左侧，鼠标靠近左边缘自动呼出，✕ 或移开自动收起 -->
       <aside class="map-legend layer-drawer" id="layerDrawer" aria-hidden="true">
         <div class="layer-head">
           <h4>图层</h4>

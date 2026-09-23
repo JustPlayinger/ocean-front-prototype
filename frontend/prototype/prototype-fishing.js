@@ -33,7 +33,8 @@ const DEMO_TODAY = "2024-08-05";      // 项目演示用的「今天」（与需
 const TODAY = AVAILABLE_DATES.indexOf(DEMO_TODAY) >= 0 ? DEMO_TODAY : OFData.firstDate();
 let DATE_MIN = OFData.firstDate();
 let DATE_MAX = OFData.lastDate();
-const DEFAULT_ZOOM = 0.8;              // 默认视野：略微拉远，海岸线/陆地能进画面
+const DEFAULT_ZOOM = 0.8;              // 离线兜底视野（东海窗口 120–128°E，略微拉远让海岸线进画面）
+const SERVER_ZOOM = 0.35;              // 服务器模式视野：数据窗口扩到 105–150°E，显示约 16° 经度
 
 // ==================== 状态（唯一真源） ====================
 const state = {
@@ -47,7 +48,7 @@ const state = {
   climMode: "day",                         // 历史页：day / period / month / year
   predWindow: 3,                            // 预测页：1 / 3 / 7 天窗口
   pickOrigin: false,                        // 地图点选出发地模式
-  zoom: DEFAULT_ZOOM,                      // 默认略微拉远，让海岸线/陆地进画面
+  zoom: DEFAULT_ZOOM,                      // 默认视野：显示约 16° 经度（数据窗口 105–150°E）
   view: { cx: 500, cy: 320 },              // 视窗中心（SVG 坐标）：滚轮缩放/拖拽平移用
 };
 
@@ -1512,16 +1513,19 @@ function clampDate(iso) {
   if (iso > DATE_MAX) return DATE_MAX;
   return iso;
 }
-// 服务器增强模式：本地没有这一天时先按需拉取再渲染。
+// 服务器增强模式：服务器上的数据窗口比离线兜底大（105–150°E vs 东海），
+// 所以本地有数据时也拉一份服务器版本覆盖；先用本地渲染保证首屏快，拉到后再重渲染。
 // 离线（file://）下 serverAvailable() 恒为 false，等价于原来的「直接 refresh」，行为不变。
 function loadThenRefresh(iso) {
-  if (OFData.hasDay(iso) || !OFData.serverAvailable(iso)) {
-    refresh();
+  const local = OFData.hasDay(iso);
+  if (local) refresh();                          // 先用本地数据渲染（快）
+  if (!OFData.serverAvailable(iso)) {
+    if (!local) refresh();                       // 本地也没有 → 走空态
     return;
   }
-  refresh();                              // 先渲染空态；dateInfo 会说明「正在从服务器取这一天」
-  OFData.ensureDay(iso).then(function (ok) {
-    if (state.date !== iso) return;       // 期间用户又换了日期，丢弃这次结果
+  if (!local) refresh();                         // 本地没有：空态会说明「正在从服务器取这一天」
+  OFData.ensureDay(iso, local).then(function (ok) {
+    if (state.date !== iso) return;              // 期间用户又换了日期，丢弃这次结果
     if (!ok && !OFData.hasDay(iso)) showToast(mdText(iso) + " 没取到，请换个日期");
     refresh();
   });
@@ -1587,14 +1591,20 @@ function refresh() {
   syncOriginPicker();
 }
 
-// 服务器增强模式启用后刷新日期范围（AVAILABLE_DATES / DATE_MIN / DATE_MAX 用 let 的原因）
+// 服务器增强模式启用后刷新日期范围与视野（AVAILABLE_DATES / DATE_MIN / DATE_MAX 用 let 的原因）
 function applyServerRange() {
   AVAILABLE_DATES = OFData.availableDates();
   DATE_MIN = OFData.firstDate();
   DATE_MAX = OFData.lastDate();
+  // 服务器模式的数据窗口比离线兜底大得多（105–150°E / 3–45°N），默认视野相应拉远
+  state.zoom = SERVER_ZOOM;
+  applyZoom(false);
 }
 
-// 图层抽屉：默认收起，点右上角「☰」呼出，✕ 或 Esc 收起
+// 图层抽屉：默认收起在左侧；鼠标靠近左边缘自动呼出，移开延时自动收起；点 ☰ 可固定展开
+let drawerTimer = null;
+let drawerPinned = false;
+
 function setDrawer(open) {
   const drawer = $("layerDrawer");
   const btn = $("layerToggle");
@@ -1827,7 +1837,9 @@ function bind() {
   const mapCenter = () => { const r = $("map").getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; };
   $("zoomIn").addEventListener("click", () => { const c = mapCenter(); zoomAt(c[0], c[1], 1.25); });
   $("zoomOut").addEventListener("click", () => { const c = mapCenter(); zoomAt(c[0], c[1], 1 / 1.25); });
-  $("recenter").addEventListener("click", () => centerOn(state.lon, state.lat, DEFAULT_ZOOM));
+  // 复位到「当前模式的默认视野」：服务器模式数据窗口更大，用 0.8 会把视野缩回东海
+  $("recenter").addEventListener("click",
+    () => centerOn(state.lon, state.lat, OFData.serverEnabled() ? SERVER_ZOOM : DEFAULT_ZOOM));
 
   // 图层开关（图例）
   document.querySelectorAll(".legend-row[data-layer]").forEach((row) => {
@@ -1866,9 +1878,39 @@ function bind() {
   });
   $("toBasis").addEventListener("click", () => switchTab("basis"));
 
-  // 图层抽屉呼出 / 收起
-  $("layerToggle").addEventListener("click", () => setDrawer(!state.drawerOpen));
-  $("layerClose").addEventListener("click", () => setDrawer(false));
+  // 图层抽屉：靠近左边缘自动呼出；固定展开后不随鼠标自动收起
+  const mapEl = $("map");
+  const drawerEl = $("layerDrawer");
+  const EDGE = 28;                                  // 距左边缘多少 px 触发展开
+  mapEl.addEventListener("mousemove", (event) => {
+    const r = mapEl.getBoundingClientRect();
+    if (event.clientX - r.left <= EDGE) {
+      clearTimeout(drawerTimer);
+      setDrawer(true);
+      return;
+    }
+    if (!state.drawerOpen || drawerPinned) return;
+    const dr = drawerEl.getBoundingClientRect();
+    const insideDrawer = event.clientX <= dr.right && event.clientY >= dr.top && event.clientY <= dr.bottom;
+    if (!insideDrawer) {
+      clearTimeout(drawerTimer);
+      drawerTimer = setTimeout(() => { if (!drawerPinned) setDrawer(false); }, 600);
+    }
+  });
+  drawerEl.addEventListener("mouseenter", () => clearTimeout(drawerTimer));
+  drawerEl.addEventListener("mouseleave", () => {
+    if (drawerPinned) return;
+    clearTimeout(drawerTimer);
+    drawerTimer = setTimeout(() => { if (!drawerPinned) setDrawer(false); }, 600);
+  });
+  $("layerToggle").addEventListener("click", () => {
+    drawerPinned = !state.drawerOpen;               // 由「点开」进入固定态，再点则收起
+    setDrawer(!state.drawerOpen);
+  });
+  $("layerClose").addEventListener("click", () => {
+    drawerPinned = false;
+    setDrawer(false);
+  });
 }
 
 // ==================== 启动 ====================
@@ -1883,4 +1925,5 @@ OFData.initServerMode().then(function (enabled) {
   if (!enabled) return;
   applyServerRange();
   refresh();
+  loadThenRefresh(state.date);   // 首屏也拉一份服务器版本：服务器数据窗口比离线兜底大
 });

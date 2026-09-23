@@ -134,9 +134,10 @@
   /** 服务器上是否存在该日期（不代表已加载）。 */
   function serverAvailable(iso) { return !!(SERVER.enabled && SERVER.dateSet[iso]); }
 
-  /** 按需把服务器单日数据注入 DAYS/SST；并发同一天只发一次，失败记住不重试。 */
-  function ensureDay(iso) {
-    if (Object.prototype.hasOwnProperty.call(DAYS, iso)) return Promise.resolve(true);
+  /** 按需把服务器单日数据注入 DAYS/SST；并发同一天只发一次，失败记住不重试。
+   *  force=true 时忽略本地已有数据（服务器窗口比离线兜底大，需要覆盖）。 */
+  function ensureDay(iso, force) {
+    if (!force && Object.prototype.hasOwnProperty.call(DAYS, iso)) return Promise.resolve(true);
     if (!serverAvailable(iso) || SERVER.failed[iso]) return Promise.resolve(false);
     if (SERVER.inflight[iso]) return SERVER.inflight[iso];
     const url = SERVER.base + "/frontend/day/" + iso;

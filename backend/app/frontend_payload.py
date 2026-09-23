@@ -27,7 +27,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 import export_prototype_data as exporter  # noqa: E402
 
-BBOX = exporter.DEFAULT_BBOX
+# 服务器模式的数据窗口：比离线兜底（东海 120-128E/27-34N）更大，让前端能看到整片海域。
+# 实测单日 export 开销：东海 23 KB / 0.16s；本窗口 391 KB / 0.67s；全球 15.7 MB / 25s（不可行，故不取全球）。
+BBOX = (105.0, 3.0, 150.0, 45.0)
 TOLERANCE_KM = 6.0
 MIN_LENGTH_KM = 20.0
 
