@@ -23,8 +23,9 @@ fi
 if pgrep -f "sst_pipeline.py --years" >/dev/null; then
   echo "海温补缺队列已在跑，跳过"
 else
+  # --log 要显式指定：否则它会往主队列的 /var/log/ocean-sst-pipeline.log 里混写
   setsid nohup /opt/ocean/venv/bin/python tools/pipeline/sst_pipeline.py \
-    --years 2018 2016 2015 --workers 2 --passes 2 \
+    --years 2018 2016 2015 --workers 2 --passes 2 --log /var/log/ocean-sst-gapfill.log \
     >> /var/log/ocean-sst-gapfill.log 2>&1 < /dev/null &
   echo "已启动海温补缺队列（--years 2018 2016 2015 --workers 2）"
 fi
