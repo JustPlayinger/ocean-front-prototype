@@ -473,6 +473,14 @@
             </details>
             <div class="empty" id="nowEmpty" hidden></div>
           </div>
+          <div class="card">
+            <h3>历史 AIS 响应 <span class="tag plain" id="aisResponseTag">待接入</span></h3>
+            <div class="list" id="aisResponseList"></div>
+            <details class="why" id="aisResponseWhy">
+              <summary>响应明细与口径</summary>
+              <div class="why-body" id="aisResponseWhyBody"></div>
+            </details>
+          </div>
         </section>
 
         <!-- 预测 -->
@@ -567,6 +575,7 @@
 <script src="data/meta.js"></script>
 <script src="data/base/basemap.js"></script>
 <script src="data/clim/same-period.js"></script>
+<script src="data/front_response/events.js"></script>
 <!-- 数据清单：日期/海温有哪些天由导出脚本写进 data/days.js，
      这里按清单同步注入（document.write 保证后面脚本执行前加载完，file:// 下也能用）。
      加日期只需要重跑导出脚本，不用手改本文件。 -->

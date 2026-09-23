@@ -1,4 +1,4 @@
-﻿(function () {
+(function () {
   "use strict";
 
   window.OF_FRONT_RESPONSE = {

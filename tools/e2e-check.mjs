@@ -1,35 +1,19 @@
 import { spawn } from "node:child_process";
-import { existsSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // 用法：node tools/e2e-check.mjs   （可用环境变量 EDGE / PAGE 覆盖）
-// EDGE：留空时按平台依次探测 Edge / Chromium / Chrome；Linux 上建议显式 EDGE=/usr/bin/chromium
-const EDGE_CANDIDATES = [
-  process.env.EDGE,
-  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-  "/usr/bin/microsoft-edge",
-  "/usr/bin/microsoft-edge-stable",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-  "/usr/bin/google-chrome",
-].filter(Boolean);
-const EDGE = EDGE_CANDIDATES.find((p) => existsSync(p)) || EDGE_CANDIDATES[0];
+const EDGE = process.env.EDGE || "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 const PAGE = process.env.PAGE || pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "frontend", "prototype", "prototype-fishing.html")).href;
 const PORT = 9337;
-const TMP = process.env.TEMP || tmpdir();
-const PROFILE = join(TMP, "_edge_profile_e2e");
-const OUT = TMP;
-// Linux（尤其容器/root）下 Chromium 需要放开沙箱；Windows / macOS 不加这两个参数
-const SANDBOX_ARGS = process.platform === "linux" ? ["--no-sandbox", "--disable-dev-shm-usage"] : [];
+const PROFILE = join(process.env.TEMP || "C:\\temp", "_edge_profile_e2e");
+const OUT = process.env.TEMP || "C:\\temp";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const addIsoDays = (iso, n) => new Date(Date.parse(iso + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
 try { rmSync(PROFILE, { recursive: true, force: true }); } catch (e) {}
 
 const child = spawn(EDGE, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-  ...SANDBOX_ARGS,
   "--remote-allow-origins=*", `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`,
   "--window-size=1680,900", PAGE], { stdio: "ignore" });
 
@@ -125,6 +109,22 @@ const PROBE = `var b=document.getElementById("mapProbe"), m=document.getElementB
     inBounds: rb.left>=rm.left-1 && rb.top>=rm.top-1 && rb.right<=rm.right+1 && rb.bottom<=rm.bottom+1 };`;
 const results = [];
 const check = (label, cond, detail) => { results.push(`${cond ? "PASS" : "FAIL"}  ${label}${detail ? "  → " + detail : ""}`); };
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const unsupportedClaimTerms = [
+  "产量预测",
+  "收益预测",
+  "渔获预测",
+  "保证有鱼",
+  "guaranteed catch",
+  "guaranteed yield",
+  "yield prediction",
+  "production forecast",
+  "catch prediction",
+  "catch forecast",
+  "revenue prediction",
+  "revenue forecast",
+];
+const unsupportedClaimPattern = unsupportedClaimTerms.map(escapeRegExp).join("|");
 
 // ===== 1) 真实数据接进来了 =====
 const boot = await evalJS(`var m = OFData.meta, days = OFData.availableDates();
@@ -234,6 +234,90 @@ check("页签 = 当前 / 历史 / 预测 / AI 分析",
   tabs.labels.join("/") === "当前/历史/预测/AI 分析" && tabs.secondary.length === 0, JSON.stringify(tabs));
 check("默认落在「当前」页", tabs.active === "now" && tabs.paneNow === true, tabs.active);
 
+// ===== 3.1) 历史 AIS 响应：Front Response Table 契约入口 =====
+const ais20 = await evalJS(`var r = OFData.frontResponse(document.getElementById("timeDate").value, state.range);
+  return {
+    available: OFData.frontResponseAvailable(),
+    meta: OFData.frontResponseMeta(),
+    response: r,
+    tag: document.getElementById("aisResponseTag").textContent,
+    list: document.getElementById("aisResponseList").textContent,
+    why: document.getElementById("aisResponseWhyBody").textContent
+  };`);
+check("AIS 响应表通过 OFData 暴露，并明确当前是 synthetic fixture",
+  ais20.available === true && ais20.meta.status === "synthetic_fixture" && ais20.meta.isSynthetic === true &&
+  ais20.response.available === true && ais20.response.frontIdScope === "local_day",
+  JSON.stringify({ status: ais20.meta.status, synthetic: ais20.meta.isSynthetic, scope: ais20.response.frontIdScope }));
+check("当前页历史 AIS 响应卡片能展示响应增强夹具，并说明不是真实 AIS/GFW 证据",
+  /夹具 · 响应增强/.test(ais20.tag) && /57\.8 h/.test(ais20.list) && /\+36%/.test(ais20.list) &&
+  /synthetic fixture/.test(ais20.list) && /pre7=42\.5 h/.test(ais20.why) &&
+  /control=36\.4 h/.test(ais20.why) && /2024-07-29 ~ 2024-08-04/.test(ais20.why) &&
+  /不是长期锋面轨迹 ID/.test(ais20.why),
+  ais20.tag + " · " + ais20.list.slice(0, 80));
+const aisPlaceholder = await evalJS(`window.__frontResponseFns = {
+    available: OFData.frontResponseAvailable,
+    response: OFData.frontResponse,
+    meta: OFData.frontResponseMeta
+  };
+  OFData.frontResponseAvailable = function(){ return false; };
+  OFData.frontResponse = function(){ return null; };
+  OFData.frontResponseMeta = function(){ return {
+    status: "not_available",
+    metric: "apparent_fishing_effort",
+    unit: "fishing_hours",
+    isSynthetic: false,
+    note: "placeholder"
+  }; };
+  setDate("2024-08-05");
+  document.querySelector('#rangeSeg button[data-range="20"]').click();
+  renderAisResponse(snapshot());
+  return {
+    tag: document.getElementById("aisResponseTag").textContent,
+    list: document.getElementById("aisResponseList").textContent,
+    why: document.getElementById("aisResponseWhyBody").textContent
+  };`);
+check("placeholder 状态下 AIS 响应卡片待接入，不输出假 fishing hours / lift / control 数值",
+  /待接入/.test(aisPlaceholder.tag) && /待接入|暂不参与/.test(aisPlaceholder.list) &&
+  !/\d+(?:\.\d+)? h|\+\d+%|control \d/.test(aisPlaceholder.list + aisPlaceholder.why),
+  aisPlaceholder.tag + " · " + aisPlaceholder.list.slice(0, 80));
+await evalJS(`OFData.frontResponseAvailable = window.__frontResponseFns.available;
+  OFData.frontResponse = window.__frontResponseFns.response;
+  OFData.frontResponseMeta = window.__frontResponseFns.meta;
+  delete window.__frontResponseFns;
+  refresh();
+  return 1;`);
+const ais10 = await evalJS(`document.querySelector('#rangeSeg button[data-range="10"]').click();
+  var r = OFData.frontResponse(document.getElementById("timeDate").value, state.range);
+  return { range: state.range, response: r, tag: document.getElementById("aisResponseTag").textContent,
+    list: document.getElementById("aisResponseList").textContent };`);
+check("切到 10 km 后，同一契约能展示“无明显增强”状态",
+  ais10.range === 10 && ais10.response.available === true && ais10.response.enhanced === false &&
+  /夹具 · 未见明确增强/.test(ais10.tag) && /34 h/.test(ais10.list),
+  ais10.tag + " · range=" + ais10.range);
+const aisFollowContext = await evalJS(`document.querySelector('#rangeSeg button[data-range="30"]').click();
+  setDate("2024-08-06");
+  var r = OFData.frontResponse(document.getElementById("timeDate").value, state.range);
+  return { date: state.date, range: state.range, response: r, tag: document.getElementById("aisResponseTag").textContent,
+    list: document.getElementById("aisResponseList").textContent, why: document.getElementById("aisResponseWhyBody").textContent };`);
+check("日期与作业范围变化时，AIS 响应证据跟随同一个全局上下文",
+  aisFollowContext.date === "2024-08-06" && aisFollowContext.range === 30 &&
+  aisFollowContext.response.available === true && aisFollowContext.response.post13Hours === 60.2 &&
+  /60\.2 h/.test(aisFollowContext.list) && /pre7=58 h/.test(aisFollowContext.why) &&
+  /2024-07-30 ~ 2024-08-05/.test(aisFollowContext.why),
+  aisFollowContext.date + " / " + aisFollowContext.range + " km · " + aisFollowContext.list.slice(0, 80));
+const aisMissing = await evalJS(`document.querySelector('#rangeSeg button[data-range="20"]').click();
+  setDate("2024-08-07");
+  var r = OFData.frontResponse(document.getElementById("timeDate").value, state.range);
+  return { date: state.date, range: state.range, response: r, tag: document.getElementById("aisResponseTag").textContent,
+    list: document.getElementById("aisResponseList").textContent };`);
+check("AIS/GFW 覆盖不足时显示不可用，不输出增强/无增强结论",
+  aisMissing.date === "2024-08-07" && aisMissing.range === 20 && aisMissing.response.available === false &&
+  aisMissing.response.status === "missing_coverage" && /不可用/.test(aisMissing.tag) &&
+  /missing_coverage/.test(aisMissing.list) && /不把缺失解释成 0 fishing hours/.test(aisMissing.list) &&
+  !/夹具 · 响应增强|夹具 · 未见明确增强|^响应增强|^未见明确增强/.test(aisMissing.tag + aisMissing.list),
+  aisMissing.tag + " · " + aisMissing.list.slice(0, 80));
+await evalJS(`setDate("2024-08-05"); document.querySelector('#rangeSeg button[data-range="20"]').click(); return state.range;`);
+
 // ===== 4) 结论块：已并入「当前」页（2026-09-14 起不再常驻） =====
 const hero = await evalJS(`return {
   inNow: !!document.querySelector("#pane-now #heroLine"),
@@ -277,8 +361,8 @@ check("现在页的范围标签跟着「作业范围」走，并标出数据覆�
   /20 km/.test(now.scope) && new RegExp(now.coverage.toFixed(1) + "%").test(now.scope), now.scope);
 check("海况安全提示标成「示例数据 · 仅供参考」，并提示以官方预报为准",
   /示例数据/.test(now.seaTag) && /仅供参考/.test(now.seaTag) && /官方海洋预报/.test(now.sea), now.seaTag);
-check("当前页默认只有两张信息卡，海况作为展开项，界面不堆卡",
-  now.cards === 2 && /全部锋面区/.test(now.detailsText), "cards=" + now.cards + " · " + now.detailsText);
+check("当前页默认三张信息卡（当前观测 / 历史 AIS 响应 / 展开细节），海况仍作为展开项",
+  now.cards === 3 && /全部锋面区/.test(now.detailsText), "cards=" + now.cards + " · " + now.detailsText);
 check("当前页默认作业线索不超过 3 条，完整清单保留在展开项",
   now.leadRows >= 1 && now.leadRows <= 3 && now.fronts === now.dataObjects,
   "lead=" + now.leadRows + " / all=" + now.fronts + " / data=" + now.dataObjects);
@@ -440,7 +524,9 @@ const ai = await evalJS(`return {
   planBox: !!document.getElementById("aiPlanBox") };`);
 check("AI 分析只做证据组织与任务编排",
   /证据驱动/.test(ai.tag) && /解析任务/.test(ai.plan) && /证据边界/.test(ai.plan) &&
-  /查看规则预测参考/.test(ai.next) && /当前证据/.test(ai.evidence) && /预测证据/.test(ai.evidence),
+  /AI 只组织证据/.test(ai.plan) && /查看规则预测参考/.test(ai.next) &&
+  /当前证据/.test(ai.evidence) && /预测证据/.test(ai.evidence) &&
+  /AIS 响应/.test(ai.evidence) && /post1-3=41\.1 h/.test(ai.evidence),
   ai.tag + " · " + ai.plan.slice(0, 36));
 check("AI 页合并为一张复核卡，任务编排放入展开项",
   ai.cards === 1 && ai.planBox === true, "cards=" + ai.cards);
@@ -453,8 +539,8 @@ const basis = await evalJS(`return {
   rulesText: document.getElementById("basisRules").textContent,
   limitsText: document.getElementById("basisLimits").textContent,
   noFuel: !/航时|油耗/.test(document.body.textContent) };`);
-check("数据说明：数据来源至少 14 行 / 算法 5 条（航时·油耗已删） / 局限不少于 7 条",
-  basis.data >= 14 && basis.rules === 5 && basis.limits >= 7,
+check("数据说明：数据来源至少 17 行 / 算法不少于 7 条（含 AIS 响应时可增加）/ 局限不少于 8 条",
+  basis.data >= 17 && basis.rules >= 7 && basis.limits >= 8,
   JSON.stringify({ data: basis.data, rules: basis.rules, limits: basis.limits }));
 check("全页（含隐藏面板）不再出现「航时 / 油耗」文案", basis.noFuel === true, "noFuel=" + basis.noFuel);
 check("数据来源写清产品、许可与底图出处",
@@ -462,6 +548,25 @@ check("数据来源写清产品、许可与底图出处",
   /Natural Earth/.test(basis.dataText), "DOI / 许可 / 底图都有了");
 check("算法说明给出口径（起评分 / 数据覆盖 / front_present）",
   /起评分/.test(basis.rulesText) && /数据覆盖/.test(basis.rulesText) && /front_present/.test(basis.rulesText), "ok");
+check("数据说明写清 AIS response 的 source、metric、unit、公开边界和不入评分",
+  /apparent_fishing_effort/.test(basis.dataText) && /fishing_hours/.test(basis.dataText) &&
+  /synthetic_fixture/.test(basis.dataText) && /not_applicable/.test(basis.dataText) &&
+  /raw\/fine-grained committed=false/.test(basis.dataText) && /不参与评分/.test(basis.rulesText),
+  "AIS source / metric / boundary ok");
+const unsupportedClaims = await evalJS(`var re = new RegExp(${JSON.stringify(unsupportedClaimPattern)}, "ig");
+  var areas = {
+    page: document.body.textContent,
+    ai: document.getElementById("pane-ai").textContent,
+    basis: document.getElementById("pane-basis").textContent
+  };
+  return Object.keys(areas).map(function(name){
+    var hits = areas[name].match(re) || [];
+    return { name: name, hits: hits };
+  });`);
+const unsupportedHits = unsupportedClaims.filter((item) => item.hits.length > 0);
+check("全站、AI 分析页和数据说明页拦截误导性产品措辞",
+  unsupportedHits.length === 0,
+  unsupportedHits.map((item) => item.name + "=" + item.hits.join("/")).join(" · ") || unsupportedClaimTerms.join(" / "));
 check("局限里逐条写明数据来源与没接入的东西（海温来源 / 规则预测参考 / 强度 / 海况 / 预报 / 渔场 / -128 语义）",
   /-128/.test(basis.limitsText) && /海表温度/.test(basis.limitsText) && /海况/.test(basis.limitsText) &&
   /预报/.test(basis.limitsText) && /规则预测参考/.test(basis.limitsText), basis.limitsText.slice(0, 40));

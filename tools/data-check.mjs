@@ -1,8 +1,8 @@
-/* 数据完整性校验：确认 frontend/prototype/data/ 下生成的文件结构正确、数值自洽、没有编造字段
+/* 数据完整性校验：确认 data/ 下生成的文件结构正确、数值自洽、没有编造字段
  *
  * 用法：node tools/data-check.mjs
  *
- * 这些断言的意义：原型里所有数字都必须能追溯到 frontend/prototype/data/ 文件，
+ * 这些断言的意义：原型里所有数字都必须能追溯到 data/ 文件，
  * 所以这里既查结构（字段/取值），也查自洽（RLE 还原出的像元数必须等于 quality 里的统计）。
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -10,17 +10,20 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-// 前端与其离线数据在产品仓里是一体的：frontend/prototype/ 下 html + js + data/ 同目录，
-// 页面用相对路径引 data/**，所以这里也必须指向同一处。
+// 适配本仓布局：原型页面与其离线数据都在 frontend/prototype/ 下（协作者仓是扁平布局，data/ 在根目录）
 const DATA = join(ROOT, "frontend", "prototype", "data");
+const SERVER_DATA = join(ROOT, "server_data");
+const VALID_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const results = [];
 const check = (label, cond, detail) => results.push(`${cond ? "PASS" : "FAIL"}  ${label}${detail ? "  → " + detail : ""}`);
 const readJs = (rel) => {
   const text = readFileSync(join(DATA, rel), "utf8");
   return { text, run: () => { const win = {}; new Function("window", text)(win); return win; } };
 };
+const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 const decoded = (runs) => runs.reduce((sum, r) => sum + r[2], 0);
 const inBox = ([lon, lat], b) => lon >= b[0] - 0.01 && lon <= b[2] + 0.01 && lat >= b[1] - 0.01 && lat <= b[3] + 0.01;
+const addIsoDays = (iso, days) => new Date(Date.parse(iso + "T00:00:00Z") + days * 86400000).toISOString().slice(0, 10);
 
 // ===== meta =====
 const metaFile = readJs("meta.js");
@@ -211,6 +214,401 @@ check("clim 逐日明细：front_present 与线像元数一致，无观测的不
 check("生成文件里没有 NaN / Infinity 之类的脏值",
   !/NaN|Infinity/.test(climFile.text) && !/NaN|Infinity/.test(metaFile.text) &&
   dayFiles.every((f) => !/NaN|Infinity/.test(readJs(join("day", f)).text)), "已扫描全部生成文件");
+
+// ===== AIS/GFW Front Response Table（P1 契约入口） =====
+const frontResponseFile = readJs(join("front_response", "events.js"));
+const FRONT_RESPONSE = frontResponseFile.run().OF_FRONT_RESPONSE;
+const RESPONSE_STATUSES = new Set(["not_available", "synthetic_fixture", "real"]);
+const EVENT_STATUSES = new Set(["available", "missing_coverage", "not_authorized", "not_in_sample"]);
+const AVAILABLE_NUMERIC_FIELDS = ["pre7_hours", "post1_3_hours", "non_front_control_hours", "lift_percent"];
+const EFFORT_FIELDS = ["pre7_hours", "post1_3_hours", "non_front_control_hours"];
+const nullable = (v) => v == null;
+const finiteNumber = (v) => typeof v === "number" && Number.isFinite(v);
+check("front_response/events.js 存在且能解析", !!FRONT_RESPONSE);
+check("front response 写明 schema / metric / unit",
+  FRONT_RESPONSE.schema_version === "front-response/v1" &&
+  FRONT_RESPONSE.metric === "apparent_fishing_effort" &&
+  FRONT_RESPONSE.unit === "fishing_hours",
+  JSON.stringify({ schema: FRONT_RESPONSE.schema_version, metric: FRONT_RESPONSE.metric, unit: FRONT_RESPONSE.unit }));
+check("front response 明确数据状态（not_available / synthetic_fixture / real）",
+  RESPONSE_STATUSES.has(FRONT_RESPONSE.status),
+  FRONT_RESPONSE.status);
+if (FRONT_RESPONSE.status === "not_available") {
+  check("front response placeholder 清楚表达未接入且不提供示例数值",
+    (!FRONT_RESPONSE.events || FRONT_RESPONSE.events.length === 0) &&
+    (!FRONT_RESPONSE.by_date || Object.keys(FRONT_RESPONSE.by_date).length === 0) &&
+    typeof FRONT_RESPONSE.note === "string" && FRONT_RESPONSE.note.length > 0,
+    "events=" + ((FRONT_RESPONSE.events || []).length) +
+    " by_date=" + (FRONT_RESPONSE.by_date ? Object.keys(FRONT_RESPONSE.by_date).length : 0));
+} else {
+  const events = FRONT_RESPONSE.events || [];
+  const ids = new Set();
+  let responseBad = null;
+  const sourceKind = FRONT_RESPONSE.source && FRONT_RESPONSE.source.kind;
+  if (!events.length) responseBad = "非 placeholder 状态必须提供 events";
+  if (FRONT_RESPONSE.status === "synthetic_fixture" &&
+      (FRONT_RESPONSE.is_synthetic !== true || sourceKind !== "synthetic_fixture")) {
+    responseBad = "synthetic_fixture 必须同时声明 is_synthetic=true 和 source.kind=synthetic_fixture";
+  }
+  if (!FRONT_RESPONSE.generated_by || FRONT_RESPONSE.generated_by.script !== "tools/build-front-response.mjs") {
+    responseBad = "必须记录 generated_by.script";
+  }
+  if (!FRONT_RESPONSE.time_window || FRONT_RESPONSE.time_window.sample_start !== "2024-07-01" ||
+      FRONT_RESPONSE.time_window.sample_end !== "2024-08-31") {
+    responseBad = "必须记录 P1 样例时间窗";
+  }
+  if (!FRONT_RESPONSE.time_window || FRONT_RESPONSE.time_window.pre_window_days !== 7 ||
+      !Array.isArray(FRONT_RESPONSE.time_window.post_window_days) ||
+      FRONT_RESPONSE.time_window.post_window_days.join(",") !== "1,3" ||
+      !Array.isArray(FRONT_RESPONSE.time_window.exploratory_window_days) ||
+      FRONT_RESPONSE.time_window.exploratory_window_days.join(",") !== "-7,7") {
+    responseBad = "必须记录前 7 天、后 1-3 天、前后 7 天探索窗口";
+  }
+  if (!FRONT_RESPONSE.spatial_window || !Array.isArray(FRONT_RESPONSE.spatial_window.bbox) ||
+      FRONT_RESPONSE.spatial_window.buffer_km.join(",") !== "10,20,30") {
+    responseBad = "必须记录空间窗口和 10/20/30 km 半径";
+  }
+  if (!FRONT_RESPONSE.spatial_window ||
+      !(FRONT_RESPONSE.spatial_window.control_min_distance_km >= 50) ||
+      !(FRONT_RESPONSE.spatial_window.control_area_ratio > 0) ||
+      !FRONT_RESPONSE.spatial_window.control_sampling) {
+    responseBad = "必须记录至少 50 km 外的同日非锋面对照区和面积/采样口径";
+  }
+  if (!FRONT_RESPONSE.method || !FRONT_RESPONSE.method.control_validation) {
+    responseBad = "必须记录非锋面对照区的验证边界";
+  }
+  if (!FRONT_RESPONSE.public_boundary ||
+      FRONT_RESPONSE.public_boundary.raw_or_fine_grained_data_committed !== false) {
+    responseBad = "必须记录公开边界，且 raw/fine-grained 数据不得标为已提交";
+  }
+  events.forEach((event) => {
+    const tag = event.response_id || "(missing response_id)";
+    if (!event.response_id || ids.has(event.response_id)) responseBad = tag + " response_id 缺失或重复";
+    ids.add(event.response_id);
+    if (!event.front_event_id || !event.date || !event.front_id || event.buffer_km == null) {
+      responseBad = tag + " 事件身份字段不完整";
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(event.date || "")) responseBad = tag + " 日期格式非法";
+    const dateInSample = dayFiles.includes(event.date + ".js");
+    if (!dateInSample) responseBad = tag + " 日期不在已导出锋面样本中";
+    if (dateInSample) {
+      const day = readJs(join("day", event.date + ".js")).run().OF_DATA_DAYS[event.date];
+      if (!day.objects.some((o) => o.front_id === event.front_id)) responseBad = tag + " front_id 不属于该日对象";
+    }
+    if (event.front_event_id !== event.date + ":" + event.front_id) {
+      responseBad = tag + " front_event_id 必须等于 date:front_id";
+    }
+    if (event.front_id_scope !== "local_day") responseBad = tag + " front_id_scope 必须声明为 local_day";
+    if (![10, 20, 30].includes(event.buffer_km)) responseBad = tag + " buffer_km 不在 10/20/30";
+    if (!EVENT_STATUSES.has(event.status)) {
+      responseBad = tag + " status 非法：" + event.status;
+    }
+    if (!event.pre_window || !event.post_window || !event.exploratory_window) {
+      responseBad = tag + " 必须携带 pre/post/exploratory 时间窗口";
+    } else {
+      const expectedPreStart = addIsoDays(event.date, -7);
+      const expectedPreEnd = addIsoDays(event.date, -1);
+      const expectedPostStart = addIsoDays(event.date, 1);
+      const expectedPostEnd = addIsoDays(event.date, 3);
+      const expectedExploratoryStart = addIsoDays(event.date, -7);
+      const expectedExploratoryEnd = addIsoDays(event.date, 7);
+      if (event.pre_window.start !== expectedPreStart || event.pre_window.end !== expectedPreEnd ||
+          event.pre_window.relative_days.join(",") !== "-7,-1") {
+        responseBad = tag + " pre_window 边界不符合事件日期";
+      }
+      if (event.post_window.start !== expectedPostStart || event.post_window.end !== expectedPostEnd ||
+          event.post_window.relative_days.join(",") !== "1,3") {
+        responseBad = tag + " post_window 边界不符合事件日期";
+      }
+      if (event.exploratory_window.start !== expectedExploratoryStart ||
+          event.exploratory_window.end !== expectedExploratoryEnd ||
+          event.exploratory_window.relative_days.join(",") !== "-7,7") {
+        responseBad = tag + " exploratory_window 边界不符合事件日期";
+      }
+    }
+    if (!event.control || !(event.control.min_distance_km >= 50) ||
+        !(event.control.area_ratio > 0) || !event.control.sampling) {
+      responseBad = tag + " 必须携带至少 50 km 外的非锋面对照定义";
+    }
+    if (event.status === "available") {
+      if (event.coverage_status !== "available") responseBad = tag + " available 状态必须 coverage_status=available";
+      AVAILABLE_NUMERIC_FIELDS.forEach((key) => {
+        if (typeof event[key] !== "number" || !Number.isFinite(event[key])) responseBad = tag + " " + key + " 不是有限数";
+      });
+      EFFORT_FIELDS.forEach((key) => {
+        if (finiteNumber(event[key]) && event[key] < 0) responseBad = tag + " " + key + " 不能为负数";
+      });
+      if (finiteNumber(event.lift_percent) && event.lift_percent < -100) responseBad = tag + " lift_percent 小于 -100%";
+      if (typeof event.enhanced_flag !== "boolean") responseBad = tag + " enhanced_flag 不是 boolean";
+      if (finiteNumber(event.pre7_hours) && finiteNumber(event.post1_3_hours) && finiteNumber(event.lift_percent)) {
+        const expectedLift = event.pre7_hours === 0
+          ? (event.post1_3_hours === 0 ? 0 : null)
+          : Math.round(((event.post1_3_hours - event.pre7_hours) / event.pre7_hours) * 100);
+        if (expectedLift === null) responseBad = tag + " pre7_hours 为 0 时不能计算有限 lift_percent";
+        if (expectedLift !== null && Math.abs(expectedLift - event.lift_percent) > 1) {
+          responseBad = tag + " lift_percent 与 pre/post 数值不一致";
+        }
+      }
+      if (finiteNumber(event.pre7_hours) && finiteNumber(event.post1_3_hours) &&
+          finiteNumber(event.non_front_control_hours) && typeof event.enhanced_flag === "boolean") {
+        const expectedEnhanced = event.post1_3_hours >= event.pre7_hours * 1.2 &&
+          event.post1_3_hours > event.non_front_control_hours;
+        if (event.enhanced_flag !== expectedEnhanced) {
+          responseBad = tag + " enhanced_flag 与 pre/post/control 规则不一致";
+        }
+      }
+    } else {
+      if (event.coverage_status && event.coverage_status !== event.status) {
+        responseBad = tag + " 不可用状态下 coverage_status 必须与 status 一致或省略";
+      }
+      if (!AVAILABLE_NUMERIC_FIELDS.every((key) => nullable(event[key]))) {
+        responseBad = tag + " 不可用状态不能携带 fishing hours / lift 数值";
+      }
+      if (event.enhanced_flag != null) responseBad = tag + " 不可用状态不能给 enhanced_flag";
+    }
+  });
+  const groupedBuffers = events.reduce((acc, event) => {
+    if (!acc[event.front_event_id]) acc[event.front_event_id] = new Set();
+    acc[event.front_event_id].add(event.buffer_km);
+    return acc;
+  }, {});
+  Object.entries(groupedBuffers).forEach(([frontEventId, buffers]) => {
+    if ([10, 20, 30].some((bufferKm) => !buffers.has(bufferKm))) {
+      responseBad = frontEventId + " 必须覆盖 10/20/30 km 三档 buffer";
+    }
+  });
+  check("front response events 字段完整，front_id 明确是单日临时 ID", responseBad === null,
+    responseBad || events.length + " 条全部通过");
+  const hasEnhanced = events.some((e) => e.status === "available" && e.enhanced_flag === true);
+  const hasPlain = events.some((e) => e.status === "available" && e.enhanced_flag === false);
+  const hasUnavailable = events.some((e) => e.status === "missing_coverage" || e.coverage_status === "missing_coverage");
+  check("front response fixture 覆盖响应增强与无明显增强两种 UI 状态",
+    FRONT_RESPONSE.status !== "synthetic_fixture" || (FRONT_RESPONSE.is_synthetic === true && hasEnhanced && hasPlain),
+    "synthetic=" + FRONT_RESPONSE.is_synthetic + " enhanced=" + hasEnhanced + " plain=" + hasPlain);
+  check("front response fixture 覆盖 missing coverage，不把缺测当作 0",
+    FRONT_RESPONSE.status !== "synthetic_fixture" || hasUnavailable,
+    "missing_coverage=" + hasUnavailable);
+  const indexed = events.every((event) => {
+    const day = FRONT_RESPONSE.by_date && FRONT_RESPONSE.by_date[event.date];
+    return day && day.by_range && day.by_range[String(event.buffer_km)] &&
+      day.by_range[String(event.buffer_km)].response_id === event.response_id;
+  });
+  check("front response by_date / by_range 索引能按日期与半径找到事件", indexed,
+    indexed ? "全部通过" : "索引缺失或指向错误");
+}
+
+// ===== 服务器数据源登记表与公开 artifact manifest 契约 =====
+const sourceRegistryPath = join(SERVER_DATA, "sources", "sources.example.json");
+const artifactManifestPath = join(SERVER_DATA, "public_artifacts", "artifact-manifest.example.json");
+const pullJobRecordPath = join(SERVER_DATA, "job_records", "pull-job-record.example.json");
+const latestCheckJobRecordPath = join(SERVER_DATA, "job_records", "latest-check-job-record.example.json");
+const processJobRecordPath = join(SERVER_DATA, "job_records", "process-job-record.example.json");
+check("服务器数据源登记表示例存在", existsSync(sourceRegistryPath), "server_data/sources/sources.example.json");
+check("服务器公开 artifact manifest 示例存在", existsSync(artifactManifestPath), "server_data/public_artifacts/artifact-manifest.example.json");
+check("服务器 pull job record 示例存在", existsSync(pullJobRecordPath), "server_data/job_records/pull-job-record.example.json");
+check("服务器 latest-check job record 示例存在", existsSync(latestCheckJobRecordPath), "server_data/job_records/latest-check-job-record.example.json");
+check("服务器 process job record 示例存在", existsSync(processJobRecordPath), "server_data/job_records/process-job-record.example.json");
+
+if (existsSync(sourceRegistryPath) && existsSync(artifactManifestPath)) {
+  const registry = readJson(sourceRegistryPath);
+  const manifest = readJson(artifactManifestPath);
+  const sourceTypes = new Set(["front", "front_intensity", "sst", "gfw_ais_effort", "partner_ais_derivative", "basemap"]);
+  const credentialModes = new Set(["none", "env_token", "server_secret"]);
+  const layerStatuses = new Set(["real", "synthetic_fixture", "not_available", "pending_authorization"]);
+  const requiredSourceFields = [
+    "source_id", "source_type", "display_name", "license", "credential_mode", "update_cadence",
+    "date_coverage", "spatial_coverage", "raw_retention", "public_display_boundary", "caveat"
+  ];
+  const sensitiveKeyPattern = /^(token|api_key|secret|password|credential|authorization)$/i;
+  const sourceList = Array.isArray(registry.sources) ? registry.sources : [];
+  const sourceIds = new Set(sourceList.map((source) => source.source_id));
+
+  let registryBad = null;
+  if (registry.schema_version !== "ocean-source-registry/v1") registryBad = "schema_version 不正确";
+  if (!Array.isArray(registry.sources) || sourceList.length < 4) registryBad = "sources 数量不足";
+  if (sourceIds.size !== sourceList.length) registryBad = "source_id 不应重复";
+  sourceList.forEach((source) => {
+    const missing = requiredSourceFields.filter((field) => source[field] == null || source[field] === "");
+    if (missing.length) registryBad = source.source_id + " 缺字段 " + missing.join(",");
+    if (!sourceTypes.has(source.source_type)) registryBad = source.source_id + " source_type 非法";
+    if (!credentialModes.has(source.credential_mode)) registryBad = source.source_id + " credential_mode 非法";
+    Object.keys(source).forEach((key) => {
+      if (sensitiveKeyPattern.test(key)) registryBad = source.source_id + " 不应包含敏感字段名 " + key;
+    });
+    if (/gfw|ais/i.test(source.source_id + " " + source.source_type)) {
+      if (source.metric !== "apparent_fishing_effort" || source.unit !== "fishing_hours") {
+        registryBad = source.source_id + " 必须声明 apparent_fishing_effort / fishing_hours";
+      }
+      if (!/not catch/i.test(source.caveat) || !/production/i.test(source.caveat) ||
+          !/revenue/i.test(source.caveat) || !/guaranteed/i.test(source.caveat)) {
+        registryBad = source.source_id + " caveat 必须排除产量/收益/保证性解释";
+      }
+      if (!/event-level|radius-level/i.test(source.public_display_boundary)) {
+        registryBad = source.source_id + " 公开边界必须限制到事件级/半径级聚合";
+      }
+    }
+  });
+  check("服务器数据源登记表字段、许可、凭据模式和 GFW/AIS 边界可校验",
+    registryBad === null, registryBad || sourceIds.size + " 个 source 全部通过");
+
+  let manifestBad = null;
+  if (manifest.schema_version !== "ocean-artifact-manifest/v1") manifestBad = "schema_version 不正确";
+  if (!manifest.generated_at || !manifest.latest_available_date) manifestBad = "缺 generated_at/latest_available_date";
+  if (!manifest.public_boundary ||
+      manifest.public_boundary.raw_committed !== false ||
+      manifest.public_boundary.fine_grained_committed !== false) {
+    manifestBad = "public_boundary 必须声明 raw/fine-grained 未提交";
+  }
+  const layers = manifest.layers || {};
+  ["front", "sst", "front_response", "front_intensity", "fishing_effort_grid"].forEach((name) => {
+    const layer = layers[name];
+    if (!layer) manifestBad = "缺少图层 " + name;
+    if (layer && !layerStatuses.has(layer.status)) manifestBad = name + " status 非法";
+    if (layer && layer.source_id && !sourceIds.has(layer.source_id)) manifestBad = name + " source_id 未登记";
+    if (layer && ["not_available", "pending_authorization"].includes(layer.status) && !layer.reason) {
+      manifestBad = name + " 不可用状态必须写 reason";
+    }
+    const publicPath = layer && (layer.artifact_pattern || layer.href || layer.path || "");
+    if (/raw|intermediate|authorized_aggregate|mmsi|vessel|track/i.test(publicPath)) {
+      manifestBad = name + " artifact 指向了非公开路径或可识别轨迹数据";
+    }
+  });
+  if (layers.front_response) {
+    if (layers.front_response.metric !== "apparent_fishing_effort" ||
+        layers.front_response.unit !== "fishing_hours") {
+      manifestBad = "front_response 必须声明 apparent_fishing_effort / fishing_hours";
+    }
+    if (layers.front_response.status === "synthetic_fixture" &&
+        !/not real AIS\/GFW evidence/i.test(layers.front_response.caveat || "")) {
+      manifestBad = "synthetic front_response 必须说明不是真实 AIS/GFW 证据";
+    }
+    if (!/not catch/i.test(layers.front_response.caveat || "") ||
+        !/production/i.test(layers.front_response.caveat || "") ||
+        !/revenue/i.test(layers.front_response.caveat || "")) {
+      manifestBad = "front_response caveat 必须排除产量/收益解释";
+    }
+  }
+  check("服务器公开 artifact manifest 不暴露 raw/轨迹数据，且图层状态可解释",
+    manifestBad === null, manifestBad || Object.keys(layers).join(","));
+
+  const validateServerJob = (jobPath, expectedType) => {
+    const pullJob = readJson(jobPath);
+    const jobStatuses = new Set(["success", "failed", "partial", "skipped"]);
+    let jobBad = null;
+    if (pullJob.schema_version !== "ocean-pull-job/v1") jobBad = "schema_version 不正确";
+    if (pullJob.job_type !== expectedType) jobBad = "job_type 必须是 " + expectedType;
+    if (!sourceIds.has(pullJob.source_id)) jobBad = "source_id 未登记";
+    if (!jobStatuses.has(pullJob.status)) jobBad = "status 非法";
+    if (!pullJob.started_at || !pullJob.finished_at) jobBad = "缺 started_at/finished_at";
+    if (expectedType === "pull") {
+      if (!pullJob.date_range || !VALID_DATE.test(pullJob.date_range.start || "") ||
+          !VALID_DATE.test(pullJob.date_range.end || "") || !(pullJob.date_range.days > 0)) {
+        jobBad = "date_range 不完整";
+      }
+    } else {
+      if (pullJob.date_range !== null) jobBad = "pull_check 不应携带 date_range";
+      if (!pullJob.latest_check ||
+          !VALID_DATE.test(pullJob.latest_check.known_latest_available_date || "") ||
+          pullJob.latest_check.auto_publish !== false) {
+        jobBad = "pull_check 必须记录 latest_check 且不得自动发布";
+      }
+    }
+    if (["failed", "partial", "skipped"].includes(pullJob.status) &&
+        (!pullJob.error || !pullJob.error.code || !pullJob.error.message)) {
+      jobBad = "非 success 状态必须写 error code/message";
+    }
+    if (!pullJob.publish || pullJob.publish.auto_publish !== false ||
+        pullJob.publish.public_artifacts_written !== false) {
+      jobBad = "pull job 不得自动发布 public artifact";
+    }
+    if (!Array.isArray(pullJob.output_artifacts) || pullJob.output_artifacts.length !== 0) {
+      jobBad = "dry-run pull job 不应产生 output_artifacts";
+    }
+    if (expectedType === "pull" && (!Array.isArray(pullJob.planned_downloads) ||
+        pullJob.planned_downloads.length !== pullJob.date_range.days)) {
+      jobBad = "planned_downloads 必须覆盖 date_range.days";
+    }
+    if (expectedType === "pull_check" && (!Array.isArray(pullJob.planned_downloads) ||
+        pullJob.planned_downloads.length !== 0)) {
+      jobBad = "pull_check 不应生成 planned_downloads";
+    }
+    (pullJob.planned_downloads || []).forEach((item) => {
+      if (!VALID_DATE.test(item.date || "")) jobBad = "planned_downloads 日期非法";
+      if (!/^server_data\/raw\//.test(item.target_path || "")) {
+        jobBad = "planned download 只能指向 server_data/raw/";
+      }
+      if (/public_artifacts|mmsi|vessel|track/i.test(item.target_path || "")) {
+        jobBad = "planned download 不得指向公开产物或可识别轨迹数据";
+      }
+      if (item.artifact_status !== "planned_raw_only") {
+        jobBad = "planned download 必须标成 planned_raw_only";
+      }
+    });
+    const jobText = readFileSync(jobPath, "utf8");
+    if (/bearer\s+|password\s*[:=]|api[_-]?key\s*[:=]|secret\s*[:=]/i.test(jobText)) {
+      jobBad = "job record 不得包含凭据值";
+    }
+    return { ok: jobBad === null, detail: jobBad || pullJob.job_id };
+  };
+  if (existsSync(pullJobRecordPath)) {
+    const outcome = validateServerJob(pullJobRecordPath, "pull");
+    check("服务器 pull job record 记录 source/date/status/error，且不会自动发布或伪造 artifact",
+      outcome.ok, outcome.detail);
+  }
+  if (existsSync(latestCheckJobRecordPath)) {
+    const outcome = validateServerJob(latestCheckJobRecordPath, "pull_check");
+    check("服务器 latest-check job record 记录最新日期检查，且不会自动发布 artifact",
+      outcome.ok, outcome.detail);
+  }
+  if (existsSync(processJobRecordPath)) {
+    const processJob = readJson(processJobRecordPath);
+    let processBad = null;
+    if (processJob.schema_version !== "ocean-process-job/v1") processBad = "schema_version 不正确";
+    if (processJob.job_type !== "process") processBad = "job_type 必须是 process";
+    if (processJob.layer !== "front_response") processBad = "第一版 process job 只能处理 front_response";
+    if (!["success", "failed", "partial", "skipped"].includes(processJob.status)) processBad = "status 非法";
+    if (!processJob.started_at || !processJob.finished_at) processBad = "缺 started_at/finished_at";
+    if (!Array.isArray(processJob.input_paths) || processJob.input_paths.length < 1) {
+      processBad = "process job 必须记录 input_paths";
+    }
+    (processJob.input_paths || []).forEach((path) => {
+      if (!/^server_data\/authorized_aggregate\/examples\/.+\.example\.json$/.test(path || "")) {
+        processBad = "process job 示例输入必须来自 authorized_aggregate/examples/*.example.json";
+      }
+      if (/raw|intermediate|mmsi|vessel|track/i.test(path)) {
+        processBad = "process job 示例不得指向 raw/intermediate/可识别轨迹输入";
+      }
+    });
+    if (!Array.isArray(processJob.output_artifacts) || processJob.output_artifacts.length < 1) {
+      processBad = "process job 必须记录 output_artifacts";
+    }
+    (processJob.output_artifacts || []).forEach((artifact) => {
+      if (!/^server_data\/public_artifacts\//.test(artifact.path || "")) {
+        processBad = "process job output 必须指向 server_data/public_artifacts/";
+      }
+      if (artifact.generated_by !== "tools/build-front-response.mjs") {
+        processBad = "Front Response Table 必须由确定性 build-front-response 脚本生成";
+      }
+      if (/raw|intermediate|authorized_aggregate|mmsi|vessel|track/i.test(artifact.path || "")) {
+        processBad = "process job output 不得暴露 raw/intermediate/可识别轨迹路径";
+      }
+    });
+    if (!processJob.publish || processJob.publish.public_artifacts_written !== false ||
+        processJob.publish.replace_existing !== false) {
+      processBad = "process job 示例必须是 dry-run，不得写公开产物或替换现有版本";
+    }
+    if (!processJob.validation_summary ||
+        !Array.isArray(processJob.validation_summary.checks)) {
+      processBad = "process job 必须记录 validation_summary.checks";
+    }
+    const processText = readFileSync(processJobRecordPath, "utf8");
+    if (/bearer\s+|password\s*[:=]|api[_-]?key\s*[:=]|secret\s*[:=]/i.test(processText)) {
+      processBad = "process job record 不得包含凭据值";
+    }
+    check("服务器 process job record 使用确定性脚本，并通过校验门保护 public artifact 发布",
+      processBad === null, processBad || processJob.job_id);
+  }
+}
 
 // ===== 汇总 =====
 // 数据天数多起来之后（60+ 天 × 每天 14 项）逐条打印会淹掉结果，

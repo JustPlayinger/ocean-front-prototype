@@ -4,6 +4,7 @@
  *   data/meta.js               数据产品、许可、可用日期、缺什么        ← export_prototype_data.py
  *   data/day/<日期>.js          真实锋面：对象中心线 / 锋面线 / 冷暖侧 RLE ← export_prototype_data.py
  *   data/clim/same-period.js   往年同期统计（唯一口径）               ← export_prototype_data.py --mode clim
+ *   data/front_response/events.js  锋面事件与 AIS 表观捕捞响应表       ← 后续 GFW/AIS 样例闭环生成
  *   data/base/basemap.js       陆地 / 海岸线 / 等深线（公有领域）      ← tools/build-basemap.mjs
  *
  * 原则：没有真实数据的地方一律返回 null / 空数组，由界面显式说明「待接入」；
@@ -17,6 +18,7 @@
   const CLIM = window.OF_DATA_CLIM || null;
   const BASE = window.OF_DATA_BASE || null;
   const SST = window.OF_DATA_SST || {};
+  const FRONT_RESPONSE = window.OF_FRONT_RESPONSE || null;
   const SORTED_DATES = Object.keys(DAYS).sort();
   const SST_DATES = Object.keys(SST).sort();
 
@@ -31,6 +33,48 @@
       codes: raw.codes,          // 数据里出现的锋面线编码，原样保留
       centroid: raw.centroid,
       bbox: raw.bbox,
+    };
+  }
+
+  function frontResponseStatusReady() {
+    return !!(FRONT_RESPONSE && ["real", "synthetic_fixture"].indexOf(FRONT_RESPONSE.status) >= 0);
+  }
+
+  function normalizeFrontResponse(raw, iso, rangeKm) {
+    if (!raw) return null;
+    const base = {
+      status: raw.status || "available",
+      responseId: raw.response_id || null,
+      frontEventId: raw.front_event_id || null,
+      date: raw.date || iso || null,
+      frontId: raw.front_id || null,
+      frontIdScope: raw.front_id_scope || "local_day",
+      bufferKm: raw.buffer_km == null ? rangeKm || null : raw.buffer_km,
+      preWindow: raw.pre_window || null,
+      postWindow: raw.post_window || null,
+      exploratoryWindow: raw.exploratory_window || null,
+      control: raw.control || null,
+      coverageStatus: raw.coverage_status || raw.status || "available",
+      reason: raw.reason || raw.status || "",
+      evidenceLabel: raw.evidence_label || (raw.enhanced_flag ? "响应增强" : "未见明确增强"),
+      isSynthetic: !!(FRONT_RESPONSE && FRONT_RESPONSE.is_synthetic),
+      note: raw.note || "",
+      raw: raw,
+    };
+    if (raw.status && raw.status !== "available") {
+      return {
+        ...base,
+        available: false,
+      };
+    }
+    return {
+      ...base,
+      available: true,
+      pre7Hours: raw.pre7_hours,
+      post13Hours: raw.post1_3_hours,
+      controlHours: raw.non_front_control_hours,
+      liftPercent: raw.lift_percent,
+      enhanced: raw.enhanced_flag === true,
     };
   }
 
@@ -153,6 +197,39 @@
     forecastAvailable: function () { return !!(META && META.status && META.status.forecast === "real"); },
     seaStateAvailable: function () { return !!(META && META.status && META.status.sea_state === "real"); },
     fishingAvailable: function () { return !!(META && META.status && META.status.fishing_grounds === "real"); },
+    frontResponseAvailable: function () {
+      return !!(frontResponseStatusReady() && (FRONT_RESPONSE.by_date || FRONT_RESPONSE.events));
+    },
+    frontResponse: function (iso, rangeKm) {
+      if (!frontResponseStatusReady()) return null;
+      const day = FRONT_RESPONSE.by_date && FRONT_RESPONSE.by_date[iso];
+      if (!day) {
+        return normalizeFrontResponse({ status: "not_in_sample", reason: "missing_date" }, iso, rangeKm);
+      }
+      if (rangeKm != null && day.by_range && day.by_range[String(rangeKm)]) {
+        return normalizeFrontResponse(day.by_range[String(rangeKm)], iso, rangeKm);
+      }
+      if (rangeKm != null) {
+        return normalizeFrontResponse({ status: "not_in_sample", reason: "missing_range" }, iso, rangeKm);
+      }
+      return normalizeFrontResponse(day, iso, rangeKm);
+    },
+    frontResponseMeta: function () {
+      return FRONT_RESPONSE ? {
+        schemaVersion: FRONT_RESPONSE.schema_version || null,
+        status: FRONT_RESPONSE.status || "not_available",
+        source: FRONT_RESPONSE.source || null,
+        metric: FRONT_RESPONSE.metric || "apparent_fishing_effort",
+        unit: FRONT_RESPONSE.unit || "fishing_hours",
+        timeWindow: FRONT_RESPONSE.time_window || null,
+        spatialWindow: FRONT_RESPONSE.spatial_window || null,
+        method: FRONT_RESPONSE.method || null,
+        publicBoundary: FRONT_RESPONSE.public_boundary || null,
+        isSynthetic: !!FRONT_RESPONSE.is_synthetic,
+        note: FRONT_RESPONSE.note || "",
+        generatedAt: FRONT_RESPONSE.generated_at || null,
+      } : null;
+    },
     climReady: function () { return !!(META && META.availability && META.availability.clim && META.availability.clim.ready && CLIM); },
 
     // ---- 「依据」页要用的出处信息 ----
