@@ -2,7 +2,7 @@
 
 > 适用对象：`prototype-fishing.html` 这个纯前端原型。
 > 生成方式：**两个脚本 + 零手工编辑**，页面只通过 `prototype-data.js`（`window.OFData`）读数据。
-> 相关文档：主项目契约见 `docs/data-contract.md`（同一批数据、后端接口口径）。
+> 相关文档：主项目（Ocean 仓）契约见该仓 `docs/data-contract.md`（同一批数据、后端接口口径）。
 
 ---
 
