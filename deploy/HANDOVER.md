@@ -38,30 +38,20 @@
 ## 2. [A] 拿到代码
 
 - 远端：`origin` = `https://github.com/JustPlayinger/ocean-front-prototype.git`
-  （另有 `demo`、`friend` 两个远端，历史遗留，**别推错**）。
-- ⚠️ **`restructure` 分支有 34 个提交还没推**（`main` 只在 demo 远端后面，本地 `main` 比它多 3 个）。
-  **先在旧电脑上推**：
+  （另有 `collab`、`demo`、`friend` 三个远端，见 `docs/collab-sync.md`，**别推错**）。
+- ✅ **`restructure` 已在 2026-09-23 推上 origin**（`git push -u origin restructure`，凭据助手 manager 已保存凭据，
+  无需交互）。直接拉即可：
 
-  ```powershell
-  cd f:\project\海洋锋面\ocean-front-prototype
-  git push -u origin restructure
+  ```bash
+  git clone -b restructure https://github.com/JustPlayinger/ocean-front-prototype.git
+  # 如果已经有旧克隆（只有 main）：
+  git fetch origin && git checkout -b restructure origin/restructure
   ```
 
-  推成功（需要 GitHub 凭据/令牌）再换电脑；**没推成功就别换**，否则今天所有修复（catalog 缓存、
-  2 worker、sync 修复、ops 脚本…）都拿不到。
-- **推不上去的兜底**：用 `git bundle` 把分支整个打包成单文件带走（不需要网络/远端）。
-  **旧电脑上已经生成好一份**：`F:\project\海洋锋面\ocean-restructure.bundle`（1.39 MB，含 `restructure`
-  完整历史，`git bundle verify` 通过）——直接拷到新电脑即可：
-
-  ```powershell
-  # 旧电脑（已执行过，需要更新时再跑一次）
-  git bundle create C:\ocean-restructure.bundle restructure
-  # 新电脑（bundle 就是个可以 clone 的仓库）
-  git clone C:\ocean-restructure.bundle ocean-front-prototype
-  cd ocean-front-prototype
-  git remote set-url origin https://github.com/JustPlayinger/ocean-front-prototype.git
-  git checkout restructure
-  ```
+- 验收：`git log --oneline -1` 应看到 `2cb455e`（或更新的提交）。
+- **备选（离线兜底）**：旧电脑上生成了 `F:\project\海洋锋面\ocean-all.bundle`（1.67 MB，
+  含 `main`/`restructure` + 全部远端跟踪分支 + 3 个 tag，`git bundle verify` 通过）。
+  拷到新电脑后 `git clone <bundle 路径> ocean-front-prototype` 即可离线拿到完整历史。
 
 
 - 新电脑：
