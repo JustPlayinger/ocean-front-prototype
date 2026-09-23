@@ -16,12 +16,12 @@
 start frontend\prototype\prototype-fishing.html
 
 # ② 三项检查（Node 18+；e2e 需要本机装有 Edge）
-node tools/data-check.mjs     # 数据文件结构与自洽：890 项断言
-node tools/e2e-check.mjs      # 交互端到端（无头 Edge + CDP）：100 项断言
+node tools/data-check.mjs     # 数据文件结构与自洽：914 项断言
+node tools/e2e-check.mjs      # 交互端到端（无头 Edge + CDP）：116 项断言
 node tools/layout-check.mjs   # 布局几何（1280 / 1680 两档）：23 项断言
 ```
 
-三项都必须 **0 失败**才算改对；`e2e-check` 每次会覆盖写截图到 `%TEMP%\shot-1-now.png` … `shot-10-empty.png`（Windows 上通常是 `C:\temp\`），可以直接拿来看页面长什么样。
+三项都必须 **0 失败**才算改对；`e2e-check` 每次会覆盖写截图到 `%TEMP%\shot-1-now.png` … `shot-13-memory.png`（Windows 上通常是 `C:\temp\`），可以直接拿来看页面长什么样（`shot-11-globe.png` 是球面档）。
 
 检查脚本本身就是回归网：数据一致性、地图是否真的画出来（含光栅化后数像素）、交互状态、文案关键口径、布局是否重叠或裁切。**改文案时如果断言挂了，先判断是"文案变了断言该更新"还是"信息丢了"**——口径类关键词（起评分、数据覆盖、front_present、-128、审图号等）是故意被断言的。
 
@@ -31,12 +31,12 @@ node tools/layout-check.mjs   # 布局几何（1280 / 1680 两档）：23 项断
 
 | 能力 | 实现说明 | 验证 |
 |---|---|---|
-| 真实底图 | Natural Earth 1:10m 陆地（浅色实色块 `#3a5068`）/ 海岸线（亮色 `rgba(196,229,252,.9)`）/ 200 m·1000 m 等深线；默认视野缩放 0.8，保证海岸线在画面内 | e2e：陆地填充 ≠ 海面底色；光栅化后陆地像素 > 2 万 |
+| 真实底图 | Natural Earth **三级 LOD**：1:10m 东海（浅色实色块 `#3a5068` / 亮色海岸线 / 200 m·1000 m 等深线，≤10° 跨度用）、1:50m 西太平洋 `asia.js`（10–40° 跨度叠上）、1:110m 全球 `world.js`（>40° 球面档用）；默认视野缩放 0.8，保证海岸线在画面内 | e2e：陆地填充 ≠ 海面底色；光栅化后陆地像素 > 2 万；default 视野下 land 路径只有 1 条 |
 | 真实水温场 | NOAA GHRSST 0.05° 逐日，按 0.5 °C 分箱 → 逐行游程 → 同档相邻行合并绘制 | e2e：路径数 = 数据文件里的档位数 |
 | 真实锋面 | 锋面带（原始像元）、锋面区中心线 + 编号（F001…，标注真实长度）、冷侧 / 暖侧（−20 / 20 编码） | e2e：地图对象数 = 数据文件对象数 |
 | 无观测掩码 | 数据里 −128 用斜线纹理，**只画在海上**（陆地画在其上，避免把陆地也标成"缺测"） | e2e：缺测层存在且与陆地分层 |
 | 读数辅助 | 真实整数度经纬网（带 °E / °N 标注）、比例尺（随缩放实时换算）、10 / 20 / 30 km 作业范围环、出发地标记；出发地可输入坐标（支持方向标注与中文逗号），也可进入“点选”模式后点地图设置 | e2e：格网线 ≥ 4 条且带 °E/°N；比例尺随缩放变化；点地图后坐标输入与结论同步 |
-| 视图操作 | 滚轮缩放（以指针为中心）、拖拽平移、◎ 回到出发地（含复位默认缩放） | e2e：缩放后 viewBox 变化、复位后与初始一致 |
+| 视图操作 | 滚轮/触控板**连续缩放**（以指针为中心）、拖拽平移（指针事件：鼠标 / 触摸 / 笔）、双击放大、`+/-` 与方向键、◎ 回到出发地（含复位默认缩放）、🌍 整颗地球 ↔ 数据窗口；**停止 0.5 s 记住视野**（`localStorage["of.view.v1"]`），下次打开自动回到上次停留的区域 | e2e：缩放后 viewBox 变化、复位后与初始一致；缩到最小进入球面档（世界轮廓 + 数据覆盖框 + 球面经纬网 + 口径提示、km 比例尺收起）；球面档屏幕↔经纬度往返误差 <0.5°；拖动改变中心经纬度；刷新后视野恢复 |
 | 图层开关 | 6 个可切换图层（水温 / 锋面带 / 锋面区 / 冷暖侧 / 无观测 / 推荐水域）；推荐水域是示例层，默认关闭；图例写明陆地来源 | layout：图例 6 行、开关可点；e2e：示例渔场不在首屏默认展示 |
 | 任意点查询 | 鼠标悬停**只显示 4 项**：经纬度 / 该格真实水温（NOAA GHRSST，与锋面不同源）/ 最近锋面距离 / 是否锋面区（是则冷暖侧）；缺测像元只说「这里没有观测数据」，不给任何数值；**点击钉住**（十字标记），Esc 或再点取消 | e2e：锋面区判定与数据同源、水温与数据一致、浮层恰好 4 项（坐标 + 3 行信息）且不含方位/编码/推荐水域 |
 | 选中回执 | 点任何目标（地图要素、结论卡、清单）→ 地图上出回执卡（名称 / 长度 / 距离 / 方位 / ✕），全站共用一套选中语义 | e2e：地图点击、卡片点击、✕/Esc 取消 |
@@ -130,13 +130,14 @@ ocean-front-prototype/                  产品仓（前端 + vendored 后端 + �
 │   ├── prototype-fishing.html          结构 + 样式（L0 顶栏 / 地图 / L1 结论 / L2 页签）
 │   ├── prototype-fishing.js            状态机 + 渲染 + 交互（唯一改动入口，只从 OFData 取数）
 │   ├── prototype-data.js               数据适配层：页面唯一数据入口 window.OFData
+│   ├── prototype-map.js                投影与视野：OFMap（平面档 ↔ 正射球面、经纬网、视野夹取、屏幕↔经纬度反算）
 │   └── data/                           脚本生成的数据（**不要手改**，随页面一起发布）
 │       ├── meta.js                     数据产品 / 许可 / 可用日期 / 已知问题（数据说明读它）
 │       ├── days.js                     清单：已导出的锋面与水温日期（HTML 按它注入 <script>）
 │       ├── day/<日期>.js               单日锋面：对象中心线、锋面带、冷暖侧、缺测掩码、质量统计
 │       ├── sst/<日期>.js               单日水温：按 0.5 °C 分箱的逐行游程
 │       ├── clim/same-period.js         历史同期统计（front_present 口径）
-│       └── base/basemap.js             底图（Natural Earth 裁剪抽稀结果）
+│       └── base/{basemap,asia,world}.js 底图三级 LOD（Natural Earth 公有领域裁剪抽稀结果）
 ├── backend/                            后端（上游 Ocean 仓快照，来源与改动见 UPSTREAM.md）
 │   ├── app/                            FastAPI：服务器端渲染 PNG + GeoJSON + 点查询 + 历史统计
 │   ├── scripts/                        数据拉取与导出（fetch_* / export_prototype_data.py）
@@ -147,8 +148,8 @@ ocean-front-prototype/                  产品仓（前端 + vendored 后端 + �
 │   ├── processed/ · cache/ · manifest/
 │   └── README.md
 ├── tools/
-│   ├── build-basemap.mjs               拉 Natural Earth → 裁剪抽稀 → frontend/prototype/data/base/basemap.js
-│   ├── data-check.mjs                  数据断言（890）
+│   ├── build-basemap.mjs               拉 Natural Earth → 三级 LOD 裁剪抽稀 → frontend/prototype/data/base/{basemap,asia,world}.js
+│   ├── data-check.mjs                  数据断言（914）
 │   ├── e2e-check.mjs                   交互断言（100，无头浏览器 + CDP，产出截图）
 │   └── layout-check.mjs                布局断言（23）
 ├── deploy/                             部署件（Windows → 阿里云 Ubuntu）
@@ -205,7 +206,7 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy.ps1 -ServerIp <公网IP
 
 ### 6.4 四条硬约束（改代码前先接受）
 
-1. **不手改生成文件**：`data/**`、`data/base/basemap.js` 都是脚本产物；要改内容就改脚本再重跑。
+1. **不手改生成文件**：`data/**`、`data/base/{basemap,asia,world}.js` 都是脚本产物；要改内容就改脚本再重跑（`node tools/build-basemap.mjs --set all`）。
 2. **不编数字**：没有数据源的变量一律标「未接入」或「示例数据 · 仅供参考」，不得插值、不得用样例值冒充真实值；预测页只能写明是规则预测参考，不能冒充业务预报。
 3. **缺数据要明说**：无观测、超范围、样本不足都必须给出原因与可行动作（换日期 / 放大范围 / 先补数据），并且不给结论。
 4. **单一真源**：时间 / 范围 / 图层在界面上各只出现一处；新增功能不得再引入第二套控件。
@@ -272,8 +273,8 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy.ps1 -ServerIp <公网IP
 
 | 项 | 期望值 |
 |---|---|
-| `node tools/data-check.mjs` | 0 失败 / 890 项 |
-| `node tools/e2e-check.mjs` | 0 失败 / 100 项（截图写入 `%TEMP%`） |
+| `node tools/data-check.mjs` | 0 失败 / 914 项 |
+| `node tools/e2e-check.mjs` | 0 失败 / 116 项（截图写入 `%TEMP%`） |
 | `node tools/layout-check.mjs` | 0 失败 / 23 项 |
 | 数据规模 | `data/` 3.24 MB；`day/*.js` 62 个、`sst/*.js` 62 个 |
 | 日期范围 | 2024-07-01 ~ 2024-08-31（62 天，逐日） |

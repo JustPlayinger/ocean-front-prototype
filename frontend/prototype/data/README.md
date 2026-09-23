@@ -9,7 +9,9 @@
 | `day/<日期>.js` | 同上（扫描 `data/raw/front/`，`--dates` 可指定） | 真实锋面：对象中心线、锋面带、冷暖侧、缺测掩码、质量统计 |
 | `sst/<日期>.js` | 同上（扫描 `data/raw/sst/`，`--no-sst` 可跳过） | 真实海温：NOAA GHRSST 0.05° 逐日，按 0.5 °C 分箱的逐行游程 |
 | `clim/same-period.js` | 同上（`--mode clim`） | 往年同期统计（唯一口径：front_present = 半径内线像元 > 0） |
-| `base/basemap.js` | `tools/build-basemap.mjs` | Natural Earth 公有领域底图（陆地 / 海岸线 / 200 m·1000 m 等深线） |
+| `base/basemap.js` | `tools/build-basemap.mjs` | Natural Earth 公有领域底图 1:10m 东海档（陆地 / 海岸线 / 200 m·1000 m 等深线） |
+| `base/asia.js` | 同上（`--set asia`） | Natural Earth 1:50m 西太平洋档（陆地 / 海岸线，裁到 95–155°E / 10°S–50°N） |
+| `base/world.js` | 同上（`--set world`） | Natural Earth 1:110m 全球档（球面视图用；跨 ±180° 的环已切开） |
 
 ```powershell
 # 重新生成（在 Ocean/backend 下）
@@ -19,8 +21,9 @@
 # ② 导出（扫 raw 目录里所有日期；海温自动跟着导出）
 .\.venv\Scripts\python.exe scripts\export_prototype_data.py
 .\.venv\Scripts\python.exe scripts\export_prototype_data.py --mode clim
-# 底图（在本仓根目录）
-node tools\build-basemap.mjs
+# 底图（三级 LOD，在本仓根目录）
+node tools\build-basemap.mjs                 # 默认 all：world + asia + donghai
+node tools\build-basemap.mjs --set world     # 只重生成球面档
 # 校验
 node tools\data-check.mjs
 ```

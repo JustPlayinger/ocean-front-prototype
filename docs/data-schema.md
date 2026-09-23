@@ -60,9 +60,17 @@ data/
 ├── sst/<日期>.js             window.OF_DATA_SST     单日真实海温（0.5 °C 分档游程）
 ├── clim/same-period.js      window.OF_DATA_CLIM    往年同期统计（唯一口径）
 ├── front_response/events.js window.OF_FRONT_RESPONSE 锋面事件与 AIS 表观捕捞响应表（预留入口）
-├── base/basemap.js          window.OF_DATA_BASE    陆地/海岸线/等深线
+├── base/basemap.js          window.OF_DATA_BASE    陆地/海岸线/等深线（1:10m 东海细节档）
+├── base/asia.js             window.OF_DATA_ASIA    陆地/海岸线（1:50m 西太平洋区域档）
+├── base/world.js            window.OF_DATA_WORLD   陆地/海岸线（1:110m 全球，球面档用）
 └── README.md
 ```
+
+> **底图三级 LOD**（都由 `tools/build-basemap.mjs` 生成，公有领域、离线提交）：
+> 视野跨度 ≤ 10° 只用 `basemap.js`（1:10m，含 200 m / 1000 m 等深线）；
+> 10°–40° 叠一层 `asia.js`（1:50m，裁到 95°E–155°E / 10°S–50°N）；
+> > 40° 进入球面档，只画 `world.js`（1:110m，全球不裁剪，跨 ±180° 的环已切开）。
+> 三级都只画在页面上，不参与任何数值计算。
 
 > **加日期不用改 HTML**：`prototype-fishing.html` 只引入 `data/days.js`，
 > 页面按清单用 `document.write` 同步注入 `frontend/prototype/data/day/*.js` 与 `frontend/prototype/data/sst/*.js`
@@ -140,9 +148,16 @@ probability  = 有锋面的天数 / 有效天数
 - 海温网格的起点是 `.025` 结尾（如 120.025 / 27.025），与锋面网格错开半格，绘制时各按自己的真实坐标
 - `OFData.sstCell(iso, lon, lat)` 直接在这份游程里查那一格的真实档位温度（不插值）
 
-### 3.5 `base/basemap.js`
+### 3.5 `base/basemap.js` / `base/asia.js` / `base/world.js`
 
-`layers.{land|coastline|isobath200|isobath1000}.chains`（经纬度折线数组，已裁剪到 `bbox` 并抽稀，陆地多边形丢弃内环/湖面）。
+三档同构：`layers.{land|coastline|…}.chains`（经纬度折线数组，已抽稀并定点化）。
+`basemap.js` = Natural Earth **1:10m**，裁剪到 `bbox` `[117.5, 25, 131.5, 35]`，含 `isobath200` / `isobath1000`，陆地多边形丢弃内环/湖面；
+`asia.js` = **1:50m**，裁剪到 `[95, -10, 155, 50]`，只有陆地与海岸线；
+`world.js` = **1:110m**，`bbox` 记为 `[-180, -90, 180, 90]` 且**不做矩形裁剪**（裁剪会把跨 ±180° 的环拆坏），
+生成时按反经线切开（`splitAtAntimeridian`），保证球面上不会连出横穿全球的假线；
+坐标精度：`world.js` 2 位小数（0.01°≈1.1 km，球面档够用），其余 3 位。
+
+三个文件都由 `node tools/build-basemap.mjs [--set all|world,asia,donghai]` 生成，`license` 均为 Natural Earth 公有领域。
 
 ### 3.6 `front_response/events.js`
 
