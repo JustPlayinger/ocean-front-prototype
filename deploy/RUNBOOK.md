@@ -91,6 +91,68 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy.ps1 -ServerIp 116.62.54
 远程 `remote-setup.sh`（装 Nginx / Python / MySQL / Node 20，建 `ocean` 用户，装 venv 依赖，装 systemd 与 Nginx 站点）→
 上传 `data\raw` 到 `/srv/ocean/data/raw` → **重跑一次 setup 收权限**（幂等）→ 公网验收。
 
+## 日常发布（改前端 / 改后端之后怎么上线）
+
+一次性部署用上面的阶段 B；**后续每次改代码**按下表走，都不用重装环境。
+
+| 改了什么 | 发布动作 |
+|---|---|
+| **只改前端**（`frontend/prototype/**`） | 传文件即可，**不用重启服务**（Nginx 直接读盘）：<br>`scp -i <key> frontend/prototype/*.js ocean:/opt/ocean/frontend/prototype/`<br>若改了 `data/**` 一并传目录；浏览器 `Ctrl+F5` 强刷。 |
+| **改了后端**（`backend/app/**`） | `scp -i <key> backend/app/*.py ocean:/opt/ocean/backend/app/`，然后 `ssh ocean 'systemctl restart ocean-api'`。<br>重启约 2~8 秒，期间 `/api/*` 会短暂 502。 |
+| **改了部署/服务配置**（`deploy/**`） | 重跑一次远程安装（幂等）：把 `deploy/remote-setup.sh` 传到 `/tmp/ocean-remote-setup.sh`，再 `ssh ocean 'bash /tmp/ocean-remote-setup.sh 116.62.54.140'`。 |
+| **改了取数脚本**（`tools/pipeline/**`） | 传文件即可；队列是 `setsid nohup` 常驻进程，**下次启动**才用新脚本。 |
+
+**推荐：整仓发布**（改动跨目录时最省事，幂等、且不会动数据）
+
+```powershell
+# 1) 本地打包（排除 .git / venv / 原始数据）
+tar -czf "$env:TEMP\ocean-deploy.tar.gz" --exclude=./.git --exclude=./backend/.venv `
+  --exclude=./data/raw --exclude=./data/cache --exclude=./data/processed `
+  --exclude=./.vscode --exclude=node_modules --exclude=__pycache__ --exclude='*.pyc' .
+
+# 2) 上传并解包（--overwrite；不会删除服务器上已有的额外文件）
+scp -i "$env:USERPROFILE\.ssh\id_ed25519_ocean" "$env:TEMP\ocean-deploy.tar.gz" ocean:/tmp/
+ssh ocean 'cd /opt/ocean && tar -xzf /tmp/ocean-deploy.tar.gz --overwrite'
+
+# 3) 权限收口 + 重启后端（必须：解包后属主会变成 root，而服务以 ocean 用户运行）
+ssh ocean 'chown -R ocean:ocean /opt/ocean && systemctl restart ocean-api'
+
+# 4) 验收
+curl.exe -sS "http://116.62.54.140/api/health"
+```
+
+> ⚠️ 解包**只覆盖同名文件、不删除**服务器上多出来的东西；反过来，**在服务器上直接改的内容会被仓库版本覆盖**。
+> 所以任何临时改在服务器上的修复，都要**先回流到仓库**再发布，否则下次发布会丢。
+
+**发布前先跑三项自检**（本仓库回归网）
+
+```powershell
+node tools/data-check.mjs       # 期望 0 失败 / 907 项
+node tools/e2e-check.mjs        # 期望 0 失败 / 108 项（离线 file://）
+node tools/layout-check.mjs     # 期望 0 失败 / 23 项
+# 同一套断言也可以直接打线上（服务器增强模式会自动启用）：
+$env:PAGE = 'http://116.62.54.140/prototype-fishing.html'
+node tools/e2e-check.mjs; node tools/layout-check.mjs
+Remove-Item Env:\PAGE
+```
+
+> 本机系统代理会让 `Invoke-WebRequest` 误报，一律用 `curl.exe`。
+> e2e 依赖无头 Edge 的 9337 调试端口：**上一次实例没退干净**时报「未能连接 Edge 调试端口」，等几秒重试即可。
+
+### 服务器增强模式（2026-09-23 上线）
+
+前端默认是纯离线的（`file://` 双击即可用）；**同源部署时会自动探测 `/api` 并切换到服务器模式**：
+
+- 启动时拉 `/api/catalog` → 拿到服务器上的全量日期（当前 **15,706 天**，1982-01-01 ~ 2024-12-31）；
+- 日期控件范围随之扩展到全量（此前只到本地导出的 62 天）；
+- 切到「服务器有、本地没有」的日期时，**按需**请求 `GET /api/frontend/day/<date>`，把结果注入 `OFData` 的 `DAYS`/`SST` 缓存后**沿用同一套渲染逻辑**，渲染层零改动；
+- 加载中地图显示「正在从服务器取这一天」（不显示空图）；失败则提示并回退；**404 不重试**。
+
+后端实现见 `backend/app/frontend_payload.py`：它**复用 `backend/scripts/export_prototype_data.py` 的构建函数**，
+因此返回结构与离线 `data/day|sst/<date>.js` **逐字段一致** —— 将来改 RLE / 抽稀口径只需改那一处。
+
+跨域部署（前后端不同源）时，在页面显式指定：`window.OF_API_BASE = "http://<IP>/api"`。
+
 ## 阶段 C · 验收
 
 ```powershell

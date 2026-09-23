@@ -782,15 +782,19 @@ check("日期控件范围与数据一致（不写死日期）",
   bounds.inputMin + " ~ " + bounds.inputMax);
 const clampHi = await evalJS(`var n = document.getElementById("timeDate"); n.value = "2099-12-01";
   n.dispatchEvent(new Event("change", { bubbles: true })); return n.value;`);
-check("日期超出已导出范围 → 收敛到数据里的最后一天", clampHi === bounds.max, clampHi + " = " + bounds.max);
-const clampLo = await evalJS(`var n = document.getElementById("timeDate"); n.value = "1999-01-01";
+check("日期超出可用范围 → 收敛到数据里的最后一天", clampHi === bounds.max, clampHi + " = " + bounds.max);
+// 服务器增强模式下 DATE_MIN 是服务器全量的第一天（1982-01-01），越界值必须按 min 反推，不能写死 1999。
+const belowMin = addIsoDays(bounds.min, -1);
+const clampLo = await evalJS(`var n = document.getElementById("timeDate"); n.value = "${belowMin}";
   n.dispatchEvent(new Event("change", { bubbles: true })); return n.value;`);
-check("日期早于导出起点 → 收敛到数据里的第一天", clampLo === bounds.min, clampLo + " = " + bounds.min);
+check("日期早于可用起点 → 收敛到数据里的第一天", clampLo === bounds.min, clampLo + " = " + bounds.min);
 const noData = await evalJS(`var d = new Date(Date.parse(OFData.firstDate() + "T00:00:00Z") - 86400000).toISOString().slice(0, 10);
   return OFData.dateInfo(d);`);
+// 文案里的可选范围来自本地导出清单（服务器模式下与 bounds 不同），因此只校验「确实给出了范围」。
 check("没导出的日期给出明确原因与可选范围（不是空图）",
-  noData.ok === false && /这天没有数据/.test(noData.title) && noData.desc.indexOf(bounds.min) >= 0,
-  noData.desc.slice(0, 46));
+  noData.ok === false && /这天没有数据/.test(noData.title) &&
+  /只导出了 \d{4}-\d{2}-\d{2} ~ \d{4}-\d{2}-\d{2}，共 \d+ 天/.test(noData.desc),
+  noData.desc.slice(0, 60));
 
 // ===== 15) 键盘可达性 =====
 const kb = await evalJS(`var b = document.querySelector('#tabs button[data-pane="now"]'); b.focus();
@@ -802,6 +806,12 @@ await click('#tabs button[data-pane="now"]');
 // ===== 16) 覆盖层可见性：按 computed style 与命中测试判，不看 hidden 属性 =====
 // （曾经的回归：.map-empty{display:grid} 压过 UA 的 [hidden]{display:none}，
 //   有数据时遮罩也一直盖在地图上，而只断言 el.hidden 的测试全绿。）
+// 服务器模式下切到「服务器有、本地没有」的日期会进入按需加载中间态（地图遮罩显示「正在取这一天」），
+// 而覆盖层断言要检查的是「有数据」的正常态，所以先落到一个本地已有数据的日期上。
+const localDates = await evalJS(`return Object.keys(window.OF_DATA_DAYS || {}).sort();`);
+const localLast = localDates[localDates.length - 1];
+const localFirst = localDates[0];
+await evalJS(`state.date = "${localLast}"; refresh(); return 1;`);
 const vis = await evalJS(`var ov = document.getElementById("mapEmpty"), m = document.getElementById("map"),
     r = m.getBoundingClientRect();
   var hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
@@ -826,14 +836,14 @@ check("没有数据的那一天才出现遮罩，并说明原因（不给结论�
   emptyState.display !== "none" && /没有数据/.test(emptyState.title) && /先看数据/.test(emptyState.hero),
   emptyState.display + " · " + emptyState.title + " · " + emptyState.hero);
 await shot("shot-10-empty.png");
-await evalJS(`state.date = OFData.lastDate(); refresh(); return 1;`);
+await evalJS(`state.date = "${localLast}"; refresh(); return 1;`);
 const restored = await evalJS(`return { display: getComputedStyle(document.getElementById("mapEmpty")).display,
   date: document.getElementById("timeDate").value, hero: document.getElementById("heroVerdict").textContent };`);
 check("回到有数据的日期 → 遮罩消失、结论恢复",
-  restored.display === "none" && restored.date === bounds.max, restored.date + " · display=" + restored.display);
+  restored.display === "none" && restored.date === localLast, restored.date + " · display=" + restored.display);
 
 // ===== 17) 时间播放 =====
-const playback = await evalJS(`state.date = OFData.firstDate(); refresh();
+const playback = await evalJS(`state.date = "${localFirst}"; refresh();
   var before = document.getElementById("timeDate").value;
   document.getElementById("datePlay").click();
   return new Promise(function(resolve) {
