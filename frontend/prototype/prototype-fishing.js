@@ -414,7 +414,7 @@ function rlePathGlobe(runs, grid) {
         anyVisible = OFMap.visible(ring[k][0], ring[k][1], _view);
       }
       if (!anyVisible) continue;
-      d += OFMap.path(ring, _view, { closed: true, rim: true });
+      d += OFMap.path(ring, _view, { closed: true });
     }
     open = null;
   };
@@ -548,20 +548,46 @@ function sstColor(c) {
 // 真实海表温度场（NOAA GHRSST）：按档位分组后画，档位内相邻行会合并，看起来是连续温度场
 // v1.9：按「数据片」画 —— 一天可能有多片（作业海域明细 + 按视野取的概览/明细），每片自带 grid 与分辨率
 function drawSstPatch(svg, patch, sel) {
-  if (!state.layers.sst || !patch.sst) return;
-  const day = patch.sst;
+  if (!state.layers.sst) return;
+  // 全球粗格（1°，sstCoarse）先画、垫在下面；东海/窗口的 0.05° 明细后画压在上面 —— 两者并存
+  if (patch.sstCoarse) drawSstLayer(svg, patch.sstCoarse, sel, true);
+  if (patch.sst) drawSstLayer(svg, patch.sst, sel, patch.overview);
+}
+
+function drawSstLayer(svg, day, sel, coarse) {
   const binC = day.bin_c || OFData.sstBinC();
   const byBin = new Map();
   (day.runs || []).forEach((run) => {
     if (!byBin.has(run[3])) byBin.set(run[3], []);
     byBin.get(run[3]).push(run);
   });
-  const base = patch.overview ? 0.34 : 0.52;          // 概览淡一点，避免和 0.05° 明细混淆
+  const base = coarse ? 0.30 : 0.52;           // 概览/粗格淡一点，避免和 0.05° 明细混淆
   byBin.forEach((runs, bin) => {
     el("path", { d: rlePath(runs, day.grid), "data-layer": "sst", fill: sstColor(bin * binC),
       stroke: "none", "shape-rendering": "crispEdges",
       opacity: base * (sel && sel.type !== "sst" ? 0.35 : 1) }, svg);
   });
+}
+
+// 绕极环（南极大陆：环里包含 ±90 的极点）**不画填充**：
+// 它在平面档不可能表示成合法多边形（闭合弦横穿整幅地图 → 非零填充把陆地翻到另一侧），
+// 球面档同样会连出横穿球面的直线。海岸线层是独立折线，轮廓照旧画出来。
+// （数据层同样值得修：tools/build-basemap.mjs 的 splitAtAntimeridian 只把环切开、
+//   没沿反经线补到极点；这里先在渲染层兜住，避免整档底图退化。）
+const polarFiltered = new WeakMap();
+function landFillChains(data) {
+  const cached = polarFiltered.get(data);
+  if (cached) return cached;
+  const land = data.layers && data.layers.land;
+  const chains = (land && land.chains) || [];
+  const kept = chains.filter(function (ring) {
+    for (let i = 0; i < ring.length; i++) {
+      if (Math.abs(ring[i][1]) >= 89.5) return false;
+    }
+    return true;
+  });
+  polarFiltered.set(data, kept);
+  return kept;
 }
 
 // 陆地画在数据层之上：海上的"没有观测"用斜线纹理，陆地是实色块 + 亮海岸线
@@ -572,8 +598,13 @@ function drawLand(svg) {
   sets.forEach((set, i) => {
     const top = i === sets.length - 1;
     const layers = set.data.layers || {};
-    if (layers.land) {
-      const d = OFMap.paths(layers.land.chains, _view, { closed: true, rim: true });
+    // 1:110m 世界档在平面档只画轮廓不填色：它的环跨 180°/极点，平面投影下存在
+    // "填充落到另一侧"的退化情形（实测在几内亚湾视图会把整幅画面填成陆地色）。
+    // 球面档有可见性重建，填色安全，照旧填。
+    const bbox = set.data.bbox || [-180, -90, 180, 90];
+    const wholeGlobe = bbox[0] <= -180 && bbox[1] <= -90 && bbox[2] >= 180 && bbox[3] >= 90;
+    if (layers.land && (globeMode() || !wholeGlobe)) {
+      const d = OFMap.paths(landFillChains(set.data), _view, { closed: true });
       if (d) el("path", { d, "data-layer": "land", stroke: "none",
         fill: globeMode() ? "#33475e" : top ? "#3a5068" : "#31465c" }, svg);
     }

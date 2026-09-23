@@ -59,14 +59,21 @@ def parse_bbox(value: str) -> tuple[float, float, float, float]:
     return (parts[0], parts[1], parts[2], parts[3])
 
 
-def subset_url(base_url: str, dataset: str, day: date, bbox, variables) -> str:
+def subset_url(base_url: str, dataset: str, day: date, bbox, variables, stride: tuple[int, int] = (1, 1)) -> str:
+    """构造 ERDDAP griddap 的 NetCDF 子集 URL。
+
+    stride = (lon步长, lat步长)（单位 = 原始格点，0.05°）：
+    全球粗格概览用 stride=(20,20) → 1°（360×180），单日约 0.3MB；
+    (10,10) → 0.5°（720×360），约 1.3MB。默认 (1,1) = 原始分辨率。
+    """
     min_lon, min_lat, max_lon, max_lat = bbox
+    lon_step, lat_step = stride
     stamp = day.isoformat()
     selectors = []
     for name in variables:
         selectors.append(
             f"{name}[({stamp}T00:00:00Z):1:({stamp}T23:59:59Z)]"
-            f"[({min_lat}):1:({max_lat})][({min_lon}):1:({max_lon})]"
+            f"[({min_lat}):{lat_step}:({max_lat})][({min_lon}):{lon_step}:({max_lon})]"
         )
     query = quote(",".join(selectors), safe="[],():TZ-.,")
     return f"{base_url.rstrip('/')}/griddap/{dataset}.nc?{query}"
@@ -102,6 +109,7 @@ def fetch_sst(
     retries: int = 4,
     retry_wait: float = 3.0,
     sleep_between: float = 0.5,
+    stride: tuple[int, int] = (1, 1),
 ) -> list[str]:
     session = retrying_session()
     failures: list[str] = []
@@ -115,7 +123,7 @@ def fetch_sst(
                 flush=True,
             )
             continue
-        url = subset_url(base_url, dataset, day, bbox, variables)
+        url = subset_url(base_url, dataset, day, bbox, variables, stride)
         for attempt in range(1, retries + 1):
             try:
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -177,6 +185,12 @@ def main() -> None:
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
     parser.add_argument("--bbox", type=parse_bbox, default=DEFAULT_BBOX)
     parser.add_argument("--variables", default=",".join(DEFAULT_VARIABLES))
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=1,
+        help="经纬度步长（原始格点，0.05°）：20 → 1° 全球概览（≈0.3MB/天）、10 → 0.5°；1 = 原始分辨率",
+    )
     parser.add_argument("--force", action="store_true", help="overwrite files that already exist")
     parser.add_argument(
         "--continue-on-error",
@@ -194,6 +208,8 @@ def main() -> None:
     print(f"dataset: {args.dataset} @ {args.base_url}", flush=True)
     print(f"window: lon {args.bbox[0]}~{args.bbox[2]}, lat {args.bbox[1]}~{args.bbox[3]}", flush=True)
     print(f"variables: {', '.join(variables)}", flush=True)
+    if args.stride > 1:
+        print(f"stride: {args.stride}（分辨率 ≈ {0.05 * args.stride:.2f}°）", flush=True)
     failures = fetch_sst(
         args.dates,
         args.output_root,
@@ -207,6 +223,7 @@ def main() -> None:
         retries=args.retries,
         retry_wait=args.retry_wait,
         sleep_between=args.sleep,
+        stride=(args.stride, args.stride),
     )
     if failures and not args.continue_on_error:
         raise SystemExit(1)

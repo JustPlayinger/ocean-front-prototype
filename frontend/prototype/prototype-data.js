@@ -238,6 +238,7 @@
       grid: payload.front.grid,
       front: payload.front,
       sst: payload.sst || null,
+      sstCoarse: payload.sst_coarse || null,      // 全球粗格海温（1°）：垫在明细下面，别处也有海温
       primary: !!isPrimary,
     };
     const list = PATCHES[iso] || (PATCHES[iso] = []);
@@ -315,7 +316,7 @@
         key: "local", bbox: null, step: 1,
         resolutionDeg: local.grid && local.grid.dlon ? local.grid.dlon : 0.05,
         mode: "detail", overview: false,
-        grid: local.grid, front: local, sst: SST[iso] || null, primary: true,
+        grid: local.grid, front: local, sst: SST[iso] || null, sstCoarse: null, primary: true,
       });
     }
     return list.sort(function (a, b) {
@@ -607,13 +608,20 @@
     },
     // 某个经纬度落在哪一档海温：直接在真实游程里查，不做插值
     // v1.9：海温可能来自不同的片（东海子集 + 按视野取的子集），从最细的一片开始找
+    // v1.11：同一片还可能有全球粗格海温（sstCoarse）→ 一并纳入候选，仍按分辨率从细到粗找
     sstCell: function (iso, lon, lat) {
-      const list = patches(iso).filter(function (item) { return !!item.sst; });
-      if (!list.length) return null;
-      const ordered = list.slice().sort(function (a, b) { return (a.sst.grid.dlon || 0.05) - (b.sst.grid.dlon || 0.05); });
+      const candidates = [];
+      patches(iso).forEach(function (item) {
+        if (item.sst) candidates.push({ sst: item.sst });
+        if (item.sstCoarse) candidates.push({ sst: item.sstCoarse });
+      });
+      if (!candidates.length) return null;
+      candidates.sort(function (a, b) {
+        return (a.sst.grid.dlon || 0.05) - (b.sst.grid.dlon || 0.05);
+      });
       let outside = null;
-      for (let i = 0; i < ordered.length; i++) {
-        const info = sstCellInPatch(ordered[i], lon, lat);
+      for (let i = 0; i < candidates.length; i++) {
+        const info = sstCellInPatch(candidates[i], lon, lat);
         if (!info) continue;
         if (info.inGrid) return info;
         if (!outside) outside = info;

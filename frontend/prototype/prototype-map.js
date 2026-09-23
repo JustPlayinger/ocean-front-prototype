@@ -98,23 +98,84 @@
     return [wrapLon(lon), lat];
   }
 
-  // 经纬度折线 → SVG path：球面档按可见性切段，跨地平线处断开（不画假连续）
+  // ---- 球面档的可见性重建（v1.11）----
+  // 旧做法是把背面点「贴到球缘」（toSvg 里 z<0 时归一化）——那会让闭合多边形自交：
+  // 填充整片反转（海陆颜色互换）、还会连出横穿球面的直线。改成：
+  //   ① 只投影可见点；② 整条不可见就整条不画；③ 闭合面在出界段之间**沿球缘补弧**（采样 3°）。
+  function projectTrue(lon, lat, view) {
+    const c = xyPlane(view.lon0, view.lat0);
+    const o = ortho(lon, lat, view.lon0, view.lat0);
+    return [c[0] + R_GLOBE * o.x, c[1] - R_GLOBE * o.y];
+  }
+
+  function globeRuns(pts, view) {
+    const runs = [];
+    let current = null;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      if (!visible(p[0], p[1], view)) { current = null; continue; }
+      if (!current) { current = []; runs.push(current); }
+      current.push(projectTrue(p[0], p[1], view));
+    }
+    return runs;
+  }
+
+  // 沿球缘（屏幕空间的圆）补一段弧：取短弧，采样 3°
+  function limbArc(from, to, view, out) {
+    const c = xyPlane(view.lon0, view.lat0);
+    const a0 = Math.atan2(from[1] - c[1], from[0] - c[0]);
+    const a1 = Math.atan2(to[1] - c[1], to[0] - c[0]);
+    let delta = a1 - a0;
+    while (delta > Math.PI) delta -= 2 * Math.PI;
+    while (delta < -Math.PI) delta += 2 * Math.PI;
+    const steps = Math.max(2, Math.ceil(Math.abs(delta) / (3 * DEG)));
+    for (let i = 1; i < steps; i++) {
+      const a = a0 + (delta * i) / steps;
+      out.push([c[0] + R_GLOBE * Math.cos(a), c[1] + R_GLOBE * Math.sin(a)]);
+    }
+  }
+
+  function globePath(pts, view, closed, fmt) {
+    const runs = globeRuns(pts, view);
+    if (!runs.length) return "";                       // 整条不可见：不画
+    if (!closed) {
+      return runs.map(function (run) {
+        if (run.length < 2) return "";
+        let d = "M" + fmt(run[0][0]) + "," + fmt(run[0][1]);
+        for (let k = 1; k < run.length; k++) d += "L" + fmt(run[k][0]) + "," + fmt(run[k][1]);
+        return d;
+      }).filter(Boolean).join(" ");
+    }
+    if (runs.length === 1) {
+      const run = runs[0];
+      if (run.length < 2) return "";
+      let d = "M" + fmt(run[0][0]) + "," + fmt(run[0][1]);
+      for (let k = 1; k < run.length; k++) d += "L" + fmt(run[k][0]) + "," + fmt(run[k][1]);
+      return d + "Z";
+    }
+    // 多段：段与段之间用球缘弧连起来（含最后一段回到第一段），保证轮廓不自交
+    const ring = [];
+    for (let i = 0; i < runs.length; i++) {
+      const run = runs[i];
+      const next = runs[(i + 1) % runs.length];
+      for (let k = 0; k < run.length; k++) ring.push(run[k]);
+      limbArc(run[run.length - 1], next[0], view, ring);
+    }
+    if (ring.length < 3) return "";
+    let d = "M" + fmt(ring[0][0]) + "," + fmt(ring[0][1]);
+    for (let k = 1; k < ring.length; k++) d += "L" + fmt(ring[k][0]) + "," + fmt(ring[k][1]);
+    return d + "Z";
+  }
+
+  // 经纬度折线 → SVG path：球面档按可见性切段，闭合面沿球缘补弧（不画假连续、不自交）
   function path(pts, view, opts) {
     const o = opts || {};
     const digits = o.round == null ? 1 : o.round;
     const fmt = (v) => Number(v.toFixed(digits));
+    if (isGlobe(view)) return globePath(pts, view, !!o.closed, fmt);
     let d = "", open = false;
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i];
-      if (isGlobe(view) && !o.rim && !visible(p[0], p[1], view)) {
-        if (open && o.closed) {                                  // 面：贴到球缘再继续，保持闭合
-          const q = toSvg(p[0], p[1], view);
-          d += "L" + fmt(q[0]) + "," + fmt(q[1]);
-        } else {
-          open = false;                                          // 线：断开
-        }
-        continue;
-      }
       const q = toSvg(p[0], p[1], view);
       d += (open ? "L" : "M") + fmt(q[0]) + "," + fmt(q[1]);
       open = true;
@@ -201,7 +262,7 @@
     for (let lat = latMin; lat <= latMax + 1e-9; lat += s) ring.push([lonMax, lat]);
     for (let lon = lonMax; lon >= lonMin - 1e-9; lon -= s) ring.push([lon, latMax]);
     for (let lat = latMax; lat >= latMin - 1e-9; lat -= s) ring.push([lonMin, lat]);
-    return path(ring, view, { closed: true, rim: true });
+    return path(ring, view, { closed: true });     // 球面档：出界段沿球缘补弧；整框在背面则返回 ""
   }
 
   // 比例尺用：屏幕每像素代表多少公里（球面档取球心处，随纬度变化，页面会注明口径）

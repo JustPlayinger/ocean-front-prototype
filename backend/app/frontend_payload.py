@@ -51,7 +51,7 @@ STEPS: tuple[int, ...] = (1, 2, 4, 10, 20, 40)
 # 单次响应的像元上限（0.05° 下默认窗口 900×840=75.6 万；再大就自动降一档）
 MAX_CELLS = 1_800_000
 # 缓存文件名前缀：改出口径时把它 +1，避免旧缓存被继续命中
-CACHE_VERSION = "v1"
+CACHE_VERSION = "v2"   # v2（2026-09-23）：新增 sst_coarse（全球粗格海温）字段，旧缓存必须作废
 CACHE_SUBDIR = "frontend_payload"
 # 缓存文件上限（超出按最后修改时间删最旧的），防止长期乱拖视野把盘吃掉
 CACHE_MAX_FILES = 150
@@ -304,10 +304,29 @@ def build_frontend_payload(
             )
             front["has_sst"] = True
 
+    # 全球粗格海温（可选）：生产上按 --stride 抓的全球概览（1°≈0.3MB/天），
+    # 单独放 raw/sst_global/，与东海 0.05° 明细**并存**：前端粗格垫底、明细压在上面，
+    # 于是"作业海域很细、别处也有海温"，不是二选一。
+    sst_coarse: dict[str, object] | None = None
+    coarse_path = exporter.find_sst_file(raw_root / "sst_global", day)
+    if coarse_path is not None:
+        window_coarse = _sst_window(coarse_path, window)
+        if window_coarse is not None:
+            sst_coarse = exporter.build_sst_payload(
+                day,
+                window_coarse[0],
+                window_coarse[1],
+                window_coarse[2],
+                source_file=coarse_path.name,
+            )
+            if sst is None:
+                front["has_sst"] = True
+
     payload: dict[str, object] = {
         "date": day,
         "front": front,
         "sst": sst,
+        "sst_coarse": sst_coarse,
         "window": {
             "bbox": [round(value, 3) for value in window],
             "step": chosen,
