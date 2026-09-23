@@ -1428,7 +1428,10 @@ function renderAI() {
     (responseMeta && responseMeta.note ? "；" + responseMeta.note : "") + "</div>" +
     '<div class="line"><span class="k">预测证据</span> → <b>预测页</b>：' + state.predWindow + " 天规则预测参考，首选 " +
     (bestBase ? mdText(bestBase.date) + " · " + bestBase.score + "%" : "暂无") + "</div>" +
-    '<div class="line"><span class="k">限制证据</span> → <b>数据说明</b>：强度、真实海况、真实预报尚未接入；AIS fixture 不是真实 GFW/AIS 证据</div>';
+    '<div class="line"><span class="k">限制证据</span> → <b>数据说明</b>：强度、真实海况、真实预报尚未接入；' +
+    (responseMeta && responseMeta.isSynthetic
+      ? "AIS fixture 不是真实 GFW/AIS 证据"
+      : "AIS 响应为 GFW 表观捕捞活动聚合，不等于渔获量 / 产量 / 收益") + "</div>";
 
   next.innerHTML =
     '<div class="row clickable" data-pane-jump="future"><span class="i">1</span><span class="grow"><b>查看规则预测参考</b><small>' +

@@ -244,16 +244,27 @@ const ais20 = await evalJS(`var r = OFData.frontResponse(document.getElementById
     list: document.getElementById("aisResponseList").textContent,
     why: document.getElementById("aisResponseWhyBody").textContent
   };`);
-check("AIS 响应表通过 OFData 暴露，并明确当前是 synthetic fixture",
-  ais20.available === true && ais20.meta.status === "synthetic_fixture" && ais20.meta.isSynthetic === true &&
+// AIS 响应已从 synthetic fixture 换成真实 GFW apparent fishing effort 聚合结果：
+// 断言不再绑定夹具数值，改为「与数据同源」的动态比对，保留原有检查意图。
+const fmtHoursE2e = (v) => (v == null || !Number.isFinite(v) ? "—" : (Math.round(v * 10) / 10).toString() + " h");
+check("AIS 响应表通过 OFData 暴露，并带真实来源与「单日临时 ID」口径",
+  ais20.available === true && ais20.meta.status === "real" && ais20.meta.isSynthetic === false &&
+  !!ais20.meta.source && ais20.meta.source.kind === "gfw_apparent_fishing_effort" &&
+  ais20.meta.metric === "apparent_fishing_effort" && ais20.meta.unit === "fishing_hours" &&
   ais20.response.available === true && ais20.response.frontIdScope === "local_day",
-  JSON.stringify({ status: ais20.meta.status, synthetic: ais20.meta.isSynthetic, scope: ais20.response.frontIdScope }));
-check("当前页历史 AIS 响应卡片能展示响应增强夹具，并说明不是真实 AIS/GFW 证据",
-  /夹具 · 响应增强/.test(ais20.tag) && /57\.8 h/.test(ais20.list) && /\+36%/.test(ais20.list) &&
-  /synthetic fixture/.test(ais20.list) && /pre7=42\.5 h/.test(ais20.why) &&
-  /control=36\.4 h/.test(ais20.why) && /2024-07-29 ~ 2024-08-04/.test(ais20.why) &&
+  JSON.stringify({ status: ais20.meta.status, synthetic: ais20.meta.isSynthetic,
+    kind: ais20.meta.source && ais20.meta.source.kind, scope: ais20.response.frontIdScope }));
+check("当前页历史 AIS 响应卡片展示真实响应与 caveat（数值与数据同源、不参与评分）",
+  /^(响应增强|未见明确增强)$/.test(ais20.tag.trim()) &&
+  ais20.list.indexOf(fmtHoursE2e(ais20.response.post13Hours)) >= 0 &&
+  ais20.list.indexOf("control " + fmtHoursE2e(ais20.response.controlHours)) >= 0 &&
+  /用于解释历史表观捕捞活动响应/.test(ais20.list) && /不参与当前把握度评分/.test(ais20.list) &&
+  ais20.why.indexOf("pre7=" + fmtHoursE2e(ais20.response.pre7Hours)) >= 0 &&
+  ais20.why.indexOf("post1-3=" + fmtHoursE2e(ais20.response.post13Hours)) >= 0 &&
+  ais20.why.indexOf("control=" + fmtHoursE2e(ais20.response.controlHours)) >= 0 &&
+  ais20.why.indexOf(ais20.response.preWindow.start + " ~ " + ais20.response.preWindow.end) >= 0 &&
   /不是长期锋面轨迹 ID/.test(ais20.why),
-  ais20.tag + " · " + ais20.list.slice(0, 80));
+  ais20.tag + " · post13=" + ais20.response.post13Hours + " · lift=" + ais20.response.liftPercent);
 const aisPlaceholder = await evalJS(`window.__frontResponseFns = {
     available: OFData.frontResponseAvailable,
     response: OFData.frontResponse,
@@ -290,32 +301,49 @@ const ais10 = await evalJS(`document.querySelector('#rangeSeg button[data-range=
   var r = OFData.frontResponse(document.getElementById("timeDate").value, state.range);
   return { range: state.range, response: r, tag: document.getElementById("aisResponseTag").textContent,
     list: document.getElementById("aisResponseList").textContent };`);
-check("切到 10 km 后，同一契约能展示“无明显增强”状态",
-  ais10.range === 10 && ais10.response.available === true && ais10.response.enhanced === false &&
-  /夹具 · 未见明确增强/.test(ais10.tag) && /34 h/.test(ais10.list),
-  ais10.tag + " · range=" + ais10.range);
+check("切到 10 km 后，同一契约给出该半径自己的响应（不复用 20 km 的值）",
+  ais10.range === 10 && ais10.response.available === true && ais10.response.bufferKm === 10 &&
+  /^(响应增强|未见明确增强)$/.test(ais10.tag.trim()) &&
+  ais10.list.indexOf(fmtHoursE2e(ais10.response.post13Hours)) >= 0,
+  ais10.tag + " · range=" + ais10.range + " · post13=" + ais10.response.post13Hours);
 const aisFollowContext = await evalJS(`document.querySelector('#rangeSeg button[data-range="30"]').click();
   setDate("2024-08-06");
   var r = OFData.frontResponse(document.getElementById("timeDate").value, state.range);
   return { date: state.date, range: state.range, response: r, tag: document.getElementById("aisResponseTag").textContent,
     list: document.getElementById("aisResponseList").textContent, why: document.getElementById("aisResponseWhyBody").textContent };`);
-check("日期与作业范围变化时，AIS 响应证据跟随同一个全局上下文",
+check("日期与作业范围变化时，AIS 响应证据跟随同一个全局上下文（数值与数据同源）",
   aisFollowContext.date === "2024-08-06" && aisFollowContext.range === 30 &&
-  aisFollowContext.response.available === true && aisFollowContext.response.post13Hours === 60.2 &&
-  /60\.2 h/.test(aisFollowContext.list) && /pre7=58 h/.test(aisFollowContext.why) &&
-  /2024-07-30 ~ 2024-08-05/.test(aisFollowContext.why),
-  aisFollowContext.date + " / " + aisFollowContext.range + " km · " + aisFollowContext.list.slice(0, 80));
-const aisMissing = await evalJS(`document.querySelector('#rangeSeg button[data-range="20"]').click();
+  aisFollowContext.response.available === true && aisFollowContext.response.bufferKm === 30 &&
+  aisFollowContext.list.indexOf(fmtHoursE2e(aisFollowContext.response.post13Hours)) >= 0 &&
+  aisFollowContext.why.indexOf("pre7=" + fmtHoursE2e(aisFollowContext.response.pre7Hours)) >= 0 &&
+  aisFollowContext.why.indexOf(aisFollowContext.response.postWindow.start + " ~ " + aisFollowContext.response.postWindow.end) >= 0,
+  aisFollowContext.date + " / " + aisFollowContext.range + " km · post13=" + aisFollowContext.response.post13Hours);
+// 真实窗口（2024-07-01 ~ 08-31）GFW 覆盖完整，没有天然的 missing_coverage 样本；
+// 这里注入一条不可用响应，验证 UI「不把缺失当 0、不给增强结论」的行为（check 意图不变）。
+const aisMissing = await evalJS(`window.__frFns = { r: OFData.frontResponse };
+  OFData.frontResponse = function (iso, rangeKm) {
+    return { status: "missing_coverage", responseId: null, frontEventId: null, date: iso, frontId: null,
+      frontIdScope: "local_day", bufferKm: rangeKm, preWindow: null, postWindow: null, exploratoryWindow: null,
+      control: null, coverageStatus: "missing_coverage", reason: "missing_coverage", evidenceLabel: "不可用",
+      isSynthetic: false, note: "", available: false, raw: null };
+  };
+  document.querySelector('#rangeSeg button[data-range="20"]').click();
   setDate("2024-08-07");
-  var r = OFData.frontResponse(document.getElementById("timeDate").value, state.range);
-  return { date: state.date, range: state.range, response: r, tag: document.getElementById("aisResponseTag").textContent,
-    list: document.getElementById("aisResponseList").textContent };`);
-check("AIS/GFW 覆盖不足时显示不可用，不输出增强/无增强结论",
+  renderAisResponse(snapshot());
+  var out = { date: state.date, range: state.range, response: OFData.frontResponse(state.date, state.range),
+    tag: document.getElementById("aisResponseTag").textContent,
+    list: document.getElementById("aisResponseList").textContent };
+  OFData.frontResponse = window.__frFns.r;
+  delete window.__frFns;
+  refresh();
+  return out;`);
+check("AIS/GFW 覆盖不足时显示不可用，不输出增强/无增强结论（缺测不按 0 处理）",
   aisMissing.date === "2024-08-07" && aisMissing.range === 20 && aisMissing.response.available === false &&
   aisMissing.response.status === "missing_coverage" && /不可用/.test(aisMissing.tag) &&
-  /missing_coverage/.test(aisMissing.list) && /不把缺失解释成 0 fishing hours/.test(aisMissing.list) &&
-  !/夹具 · 响应增强|夹具 · 未见明确增强|^响应增强|^未见明确增强/.test(aisMissing.tag + aisMissing.list),
-  aisMissing.tag + " · " + aisMissing.list.slice(0, 80));
+  /missing_coverage/.test(aisMissing.list) &&
+  /不把缺失解释成 0 fishing hours/.test(aisMissing.list) &&
+  !/响应增强|未见明确增强|无明显增强/.test(aisMissing.tag),
+  aisMissing.tag + " · " + aisMissing.list.slice(0, 70));
 await evalJS(`setDate("2024-08-05"); document.querySelector('#rangeSeg button[data-range="20"]').click(); return state.range;`);
 
 // ===== 4) 结论块：已并入「当前」页（2026-09-14 起不再常驻） =====
@@ -522,11 +550,12 @@ const ai = await evalJS(`return {
   evidence: document.getElementById("aiEvidenceBody").textContent,
   cards: document.querySelectorAll("#pane-ai > .card").length,
   planBox: !!document.getElementById("aiPlanBox") };`);
-check("AI 分析只做证据组织与任务编排",
+check("AI 分析只做证据组织与任务编排（AIS 证据随真实数据，不冒充渔获量）",
   /证据驱动/.test(ai.tag) && /解析任务/.test(ai.plan) && /证据边界/.test(ai.plan) &&
   /AI 只组织证据/.test(ai.plan) && /查看规则预测参考/.test(ai.next) &&
-  /当前证据/.test(ai.evidence) && /预测证据/.test(ai.evidence) &&
-  /AIS 响应/.test(ai.evidence) && /post1-3=41\.1 h/.test(ai.evidence),
+  /当前证据/.test(ai.evidence) && /预测证据/.test(ai.evidence) && /AIS 响应/.test(ai.evidence) &&
+  /post1-3=[\d.]+ h/.test(ai.evidence) && /pre7=[\d.]+ h/.test(ai.evidence) &&
+  /不等于渔获量/.test(ai.evidence),
   ai.tag + " · " + ai.plan.slice(0, 36));
 check("AI 页合并为一张复核卡，任务编排放入展开项",
   ai.cards === 1 && ai.planBox === true, "cards=" + ai.cards);
@@ -550,9 +579,10 @@ check("算法说明给出口径（起评分 / 数据覆盖 / front_present）",
   /起评分/.test(basis.rulesText) && /数据覆盖/.test(basis.rulesText) && /front_present/.test(basis.rulesText), "ok");
 check("数据说明写清 AIS response 的 source、metric、unit、公开边界和不入评分",
   /apparent_fishing_effort/.test(basis.dataText) && /fishing_hours/.test(basis.dataText) &&
-  /synthetic_fixture/.test(basis.dataText) && /not_applicable/.test(basis.dataText) &&
-  /raw\/fine-grained committed=false/.test(basis.dataText) && /不参与评分/.test(basis.rulesText),
-  "AIS source / metric / boundary ok");
+  /gfw_apparent_fishing_effort/.test(basis.dataText) && /CC BY-NC 4\.0/.test(basis.dataText) &&
+  /aggregate_only/.test(basis.dataText) && /raw\/fine-grained committed=false/.test(basis.dataText) &&
+  /不参与评分/.test(basis.rulesText),
+  "AIS source / metric / license / boundary ok");
 const unsupportedClaims = await evalJS(`var re = new RegExp(${JSON.stringify(unsupportedClaimPattern)}, "ig");
   var areas = {
     page: document.body.textContent,
