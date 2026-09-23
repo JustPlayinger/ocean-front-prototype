@@ -104,8 +104,16 @@ Linux/macOS 把 `.\\.venv\\Scripts\\python.exe` 换成 `.venv/bin/python`。
 
 ### 3.3 SSH 密钥（**必须从旧电脑拷过来**，服务器只认这一把）
 
-- 私钥 `id_ed25519_ocean`（无口令）+ 同名 `.pub`，旧电脑位置 `C:\Users\<你>\.ssh\`；
-  服务器 `~/.ssh/authorized_keys` 里对应的注释是 `ocean-front-ecs`。
+- 私钥 `id_ed25519_ocean`（**无口令**，411 字节）+ 同名 `.pub`（98 字节），旧电脑位置 `C:\Users\<你>\.ssh\`。
+- **指纹核对**（这是判定"是不是这把"的唯一依据）：
+
+  ```text
+  SHA256:IPb2hUrat6S2VeGK3J7IzRY5ziF/PSAOrs1b6+i4RM4   ocean-front-ecs (ED25519)
+  公钥：ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHD19i9zSlPPo/cxo84CJ1lYk1jsT98DnqUipMwjUTpU ocean-front-ecs
+  ```
+
+  2026-09-23 核对结果：本地 `~/.ssh` **只有这一对密钥**，服务器 `/root/.ssh/authorized_keys`
+  **也只有这一把**，指纹完全一致 → 新电脑上只要这把私钥就能连。
 - 拷到新电脑同一位置（Windows 记得只给当前用户读权限），然后建 `~/.ssh/config`：
 
   ```sshconfig
@@ -118,6 +126,12 @@ Linux/macOS 把 `.\\.venv\\Scripts\\python.exe` 换成 `.venv/bin/python`。
   ```
 
 - **验收**：`ssh ocean 'echo ok; uptime'` 有输出即可；再跑 `ssh ocean 'ocean-ops health'` 看主机状态。
+  没有 config 时也能直接连：
+  `ssh -i <私钥路径> root@116.62.54.140 'echo ok'`。
+
+> **安全提醒**：这把私钥**没有口令**，谁拿到文件谁就是那台服务器的 root。
+> 转交请走 U 盘 / 加密压缩包等可信渠道，别贴聊天记录、别放网盘公开链接，用完记得从临时位置删掉。
+> 顺带：GFW 的 token 不在本地，在服务器 `/etc/ocean/gfw.env`（新机器不需要它，除非要把渔场队列搬到本地跑）。
 
 ### 3.4 VS Code（可选，但强烈建议）
 
