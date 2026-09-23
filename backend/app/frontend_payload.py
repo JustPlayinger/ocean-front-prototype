@@ -91,19 +91,28 @@ def snap_bbox(bbox: tuple[float, float, float, float], resolution: float = 0.05)
     return (snap(min_lon), snap(min_lat), snap(max_lon), snap(max_lat))
 
 
+# 注：STEPS 是后端允许的降采样档位（与前端 stepForWindow 的取值集合一致），
+# MAX_CELLS 只作显式 step 的兜底参考（见 pick_step 的说明）。
+
+
 def pick_step(bbox: tuple[float, float, float, float], step: int | None, cell_deg: float = 0.05) -> int:
-    """选降采样步长：显式给了就用（校验），否则按窗口像元数自动升档。"""
+    """选降采样步长。
+
+    - 显式给了 step：校验后直接用（前端会按自己的阈值显式传）；
+    - 没给：按**窗口宽度**选档，口径与前端 ``stepForWindow`` 完全一致
+      （≤25° → 1、≤60° → 4、≤120° → 20、更大 → 40），再兜一层像元上限。
+      为什么不用"像元数最小可行档"：游程数跟**锋面总长度**走，全球 0.2° 只有 162 万像元，
+      但会产出 7.6 万条游程（≈4 MB）；1° 只有 1.3 万条、2° 只有 3.6 千条 —— 按像元数选会挑错。
+    """
     if step is not None:
         if step not in STEPS:
             raise WindowError("step 只能是 " + "/".join(str(item) for item in STEPS))
         return int(step)
-    min_lon, min_lat, max_lon, max_lat = bbox
-    nx = (max_lon - min_lon) / cell_deg
-    ny = (max_lat - min_lat) / cell_deg
-    for candidate in STEPS:
-        if (nx / candidate) * (ny / candidate) <= MAX_CELLS:
+    width = bbox[2] - bbox[0]
+    for limit, candidate in ((25.0, 1), (60.0, 4), (120.0, 20)):
+        if width <= limit:
             return candidate
-    return STEPS[-1]
+    return 40
 
 
 def coarsen(
@@ -238,7 +247,12 @@ def build_frontend_payload(
     """
     raw_root = Path(settings.raw_data_dir)
     window = snap_bbox(bbox or BBOX)
-    chosen = pick_step(window, step)
+    if step is not None:
+        chosen = pick_step(window, step)
+    elif bbox is not None:
+        chosen = pick_step(window, None)     # 显式要了窗口：按窗口宽度自动选档（大窗口给概览）
+    else:
+        chosen = 1                           # 默认作业窗口永远 0.05° 明细（45°×42° ≈ 76 万格，实测 ~1s）
     cache_path = _cache_path(day, window, chosen)
     cached = _read_cache(cache_path)
     if cached is not None:

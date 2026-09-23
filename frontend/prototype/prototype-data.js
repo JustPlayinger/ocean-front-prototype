@@ -167,12 +167,14 @@
   const MAX_PATCHES_PER_DATE = 4;
   const VIEW_WINDOW = { key: null, bbox: null, step: 1, inflight: {}, failed: {} };
 
-  /** 视野跨度 → 降采样档（与后端 STEPS 对齐：1=0.05°、4=0.2°、20=1°、40=2°） */
-  function stepForWindow(widthDeg) {
-    if (!(widthDeg > 0)) return 1;
-    if (widthDeg <= 12) return 1;
-    if (widthDeg <= 40) return 4;
-    if (widthDeg <= 90) return 20;
+  /** 视野跨度 → 降采样档（与后端 STEPS 对齐：1=0.05°、4=0.2°、20=1°、40=2°）
+   *  阈值按「屏幕上看什么」定：≤25° 仍给 0.05° 明细（25°×25° 约 25 万格，后端 ~0.5s、可缓存），
+   *  再大才逐档降采样，避免球面/大洲尺度拖不动的粗格。 */
+  function stepForWindow(spanDeg) {
+    if (!(spanDeg > 0)) return 1;
+    if (spanDeg <= 25) return 1;
+    if (spanDeg <= 60) return 4;
+    if (spanDeg <= 120) return 20;
     return 40;
   }
 
@@ -194,7 +196,8 @@
     if (maxLat - minLat < 5) { const mid = (maxLat + minLat) / 2; minLat = mid - 2.5; maxLat = mid + 2.5; }
     minLon = Math.max(-180, minLon); maxLon = Math.min(180, maxLon);
     minLat = Math.max(-90, minLat); maxLat = Math.min(90, maxLat);
-    const step = stepForWindow(maxLon - minLon);
+    // 档位按「可见跨度」定（窗口本身要 5° 吸附 + 2° 余量，比可见范围大一圈）
+    const step = stepForWindow(bounds.lonMax - bounds.lonMin);
     return { bbox: [minLon, minLat, maxLon, maxLat], step: step };
   }
 

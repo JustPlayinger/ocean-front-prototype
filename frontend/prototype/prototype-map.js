@@ -28,9 +28,11 @@
   const R_GLOBE = PX_LAT / DEG;                                  // ≈11937 单位
   const SPAN_MIN = 0.6;
   const SPAN_MAX_HARD = 380;                                     // 缩到最小：整颗球完整可见（留余量）
-  // 拖到哪都有海岸线：二级底图（1:50m 西太平洋）范围再留一圈
-  const PAN_BOUNDS = { lonMin: 95, lonMax: 155, latMin: -10, latMax: 50 };
-  const PAN_MARGIN = 4;
+  // 平面档的平移范围：v1.9 起数据按视野取数（全球都能取），不再把平面档锁在东亚，
+  // 而是允许任意经纬度 —— 只要求「可见框整体落在 ±180 内」，免得跨 180° 画出假连线；
+  // 纬度留 ±78（等距平面在高纬会失真，更靠极地交给球面档）。
+  const PAN_BOUNDS = { lonMin: -180, lonMax: 180, latMin: -78, latMax: 78 };
+  const PAN_MARGIN = 0;
 
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const wrapLon = (lon) => (((lon + 180) % 360) + 360) % 360 - 180;

@@ -359,9 +359,20 @@ function drawProbeMark(svg) {
 //   球面档 → 1:110m 世界轮廓 + 地球圆盘；平面档 → 跨度 > 10° 叠 1:50m 西太平洋，恒叠 1:10m 东海细节
 function basemapSets() {
   if (globeMode()) return [{ data: OFData.basemapWorld, detailed: false }];
+  // v1.9：平面档也能拖到任何海域，底图按「可见框和哪一档有交集」叠，
+  // 都不覆盖时用 1:110m 世界轮廓兜底 —— 保证任何视野都有海岸线，不出现"只有数据没有陆地"。
+  const box = OFMap.visibleBounds(_view, mapAspect());
+  const hits = function (data) {
+    const b = data && (data.bbox || [-180, -90, 180, 90]);
+    if (!b || !box) return false;
+    return box.lonMax >= b[0] && box.lonMin <= b[2] && box.latMax >= b[1] && box.latMin <= b[3];
+  };
+  const world = OFData.basemapWorld, asia = OFData.basemapAsia, local = OFData.basemap;
   const sets = [];
-  if (_view.span > 10) sets.push({ data: OFData.basemapAsia, detailed: false });   // 缩出去才有用
-  sets.push({ data: OFData.basemap, detailed: true });
+  const inLocal = hits(local);
+  if (asia && hits(asia) && (_view.span > 10 || !inLocal)) sets.push({ data: asia, detailed: false });
+  if (local && inLocal) sets.push({ data: local, detailed: true });
+  if (!sets.length && world) sets.push({ data: world, detailed: false });
   return sets.filter((s) => !!s.data);
 }
 
@@ -668,20 +679,25 @@ function drawGlobeCoverage(svg) {
       "font-size": 12, "paint-order": "stroke", stroke: "rgba(6,14,24,0.9)", "stroke-width": 3 }, svg)
       .textContent = "作业海域 105–150°E / 3–45°N";
   }
-  const win = OFData.viewWindow();
-  if (win && win.bbox && !(win.bbox[0] <= -180 && win.bbox[1] <= -90)) {
-    const box = OFMap.boxPath(win.bbox, _view);
-    if (box) {
-      el("path", { d: box, fill: "none", stroke: "rgba(226,240,255,0.42)",
-        "stroke-width": 1, "stroke-dasharray": "3 5", "data-layer": "window" }, svg);
-      const mid = xy((win.bbox[0] + win.bbox[2]) / 2, win.bbox[1]);
-      const step = 0.05 * (win.step || 1);
-      el("text", { x: mid[0], y: mid[1] + 14, "text-anchor": "middle", fill: "rgba(226,240,255,0.7)",
-        "font-size": 11, "paint-order": "stroke", stroke: "rgba(6,14,24,0.9)", "stroke-width": 3 }, svg)
-        .textContent = "已取 " + Math.round(win.bbox[0]) + "–" + Math.round(win.bbox[2]) + "°E / " +
-          Math.round(win.bbox[1]) + "–" + Math.round(win.bbox[3]) + "°N · " + step.toFixed(2) + "°";
-    }
-  }
+  // 已取的数据片各自画个框（球面档最有用：一眼看出哪块是 0.05°、哪块是概览）
+  OFData.patches(state.date).forEach(function (patch) {
+    if (!patch.bbox || patch.primary) return;
+    if (patch.bbox[0] <= -180 && patch.bbox[1] <= -90) return;      // 整颗地球的概览片不必画框
+    const box = OFMap.boxPath(patch.bbox, _view);
+    if (!box) return;
+    el("path", { d: box, fill: "none", stroke: "rgba(226,240,255,0.40)",
+      "stroke-width": 1, "stroke-dasharray": "3 5", "data-layer": "window" }, svg);
+    const mid = xy((patch.bbox[0] + patch.bbox[2]) / 2, patch.bbox[1]);
+    el("text", { x: mid[0], y: mid[1] + 14, "text-anchor": "middle", fill: "rgba(226,240,255,0.72)",
+      "font-size": 11, "paint-order": "stroke", stroke: "rgba(6,14,24,0.9)", "stroke-width": 3 }, svg)
+      .textContent = "已取 " + resolutionLabel(patch.resolutionDeg);
+  });
+}
+
+// 分辨率文案：0.05° / 0.2° / 1° / 2°
+function resolutionLabel(deg) {
+  const n = Number(deg) || 0.05;
+  return (n < 0.1 ? n.toFixed(2) : n.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")) + "°";
 }
 
 function drawMap(opts) {
@@ -714,14 +730,12 @@ function drawMap(opts) {
   drawGraticule(gratHost);
   if (ok && !skipData) {
     // 一天可能有多片（作业海域明细 + 按视野取的概览/明细）：概览先画，明细压在上面。
-    // 球面档：0.05° 锋面栅格在球面上≈0.3 像素、却要重投影上万条游程 → 跳过（概览片已覆盖全球）；
-    // 海温子集只有下载过的那块，能画就画出来（也是"哪块有海温"的直观提示）。
+    // 球面档只画概览片：0.05° 在球面上≈0.3 像素、却要重投影上万条游程，
+    // 而概览片本来就是按窗口取的全球粗格（服务器模式），离线则只留世界轮廓与作业海域框。
     OFData.patches(iso).forEach(function (patch) {
-      const fine = patch.resolutionDeg <= 0.1;
-      if (!globe || !fine) {
-        drawNodataPatch(stage, patch);
-        drawFrontPatch(stage, patch, patch.primary ? state.select : null);
-      }
+      if (globe && patch.resolutionDeg <= 0.1) return;
+      drawNodataPatch(stage, patch);
+      drawFrontPatch(stage, patch, patch.primary ? state.select : null);
       drawSstPatch(stage, patch, state.select);
     });
     drawExtras(stage, snap, iso, state.select);
@@ -1864,23 +1878,45 @@ function syncViewHint() {
   const span = Math.round(_view.span);
   const ready = OFData.hasDay(state.date) || OFData.serverAvailable(state.date);
   const list = ready ? OFData.patches(state.date) : [];
-  const coarse = list.filter((item) => item.overview)
-    .sort((a, b) => b.resolutionDeg - a.resolutionDeg)[0] || null;
-  const detailed = list.some((item) => item.resolutionDeg <= 0.05);
+  // 当前视野中心实际能看到的最高分辨率（有了它，提示才不会写着"2° 概览"却其实已经铺了 0.2°）
+  const bboxOf = function (patch) {
+    if (patch.bbox) return patch.bbox;
+    if (!patch.grid) return null;
+    const g = patch.grid;
+    return [g.lon0, g.lat0, g.lon0 + g.dlon * g.nx, g.lat0 + g.dlat * g.ny];
+  };
+  const covering = list.filter(function (patch) {
+    if (globeMode() && patch.resolutionDeg <= 0.1) return false;   // 球面档不画 0.05°，提示也只说能看见的
+    const b = bboxOf(patch);
+    return b && state.view.lon0 >= b[0] - 0.5 && state.view.lon0 <= b[2] + 0.5 &&
+      state.view.lat0 >= b[1] - 0.5 && state.view.lat0 <= b[3] + 0.5;
+  }).sort(function (a, b) { return a.resolutionDeg - b.resolutionDeg; });
+  const here = covering[0] || null;
+  const detailed = list.some(function (item) { return item.resolutionDeg <= 0.05; });
 
   if (globeMode()) {
     hint.hidden = false;
-    hint.textContent = coarse
-      ? "球面视图（可见约 " + span + "° 经度）：" + coarse.resolutionDeg.toFixed(1) +
-        "° 概览（真实数据按块聚合，不做对象识别）＋世界轮廓；放大到 40° 以内自动换 0.05° 明细"
-      : "球面视图（可见约 " + span + "° 经度）：正在取这一片的概览数据…（先画世界轮廓，不编数据）";
+    if (!OFData.serverEnabled()) {
+      hint.textContent = "球面视图（可见约 " + span + "° 经度）：离线版只带了作业海域那一片数据，" +
+        "球面上只画世界轮廓 / 作业海域框；要看 0.05° 栅格就放大，" +
+        "填上 API 地址（window.OF_API_BASE）后球面会自动取这一片的概览";
+      return;
+    }
+    const kind = here
+      ? (here.resolutionDeg <= 0.05 ? "0.05° 明细" :
+        resolutionLabel(here.resolutionDeg) + " 概览（真实数据按块聚合，不做对象识别）")
+      : (viewportLoading ? "正在取这一片的数据…" : "这一片还没有数据（先画世界轮廓，不编数据）");
+    hint.textContent = "球面视图（可见约 " + span + "° 经度）：视野中心 " + kind +
+      "；放大到 25° 以内自动换 0.05° 明细";
     return;
   }
+  // 平面档：只有「可见范围完全落在作业海域之外」才提示（默认视野与作业海域有交集时不打扰）
   const win = ready ? OFData.workingWindow(state.date) : null;
-  if (win && win.bbox) {
-    const cx = state.view.lon0, cy = state.view.lat0;
-    const outside = cx < win.bbox[0] || cx > win.bbox[2] || cy < win.bbox[1] || cy > win.bbox[3];
-    if (outside) {
+  const box = OFMap.visibleBounds(_view, mapAspect());
+  if (win && win.bbox && box) {
+    const apart = box.lonMax < win.bbox[0] || box.lonMin > win.bbox[2] ||
+      box.latMax < win.bbox[1] || box.latMin > win.bbox[3];
+    if (apart) {
       hint.hidden = false;
       hint.textContent = "当前视野在作业海域之外：图上数据是按这个窗口取的真实数据" +
         (detailed ? "（0.05°）" : "（概览）") + "；右侧结论与统计仍基于作业海域 " +
@@ -1891,6 +1927,7 @@ function syncViewHint() {
     }
   }
   hint.hidden = true;
+  hint.textContent = "";        // 收起时清空，避免截图/读屏里留着球面档的旧话
 }
 
 // 视野变了就去问服务器要这一片（防抖：拖动/缩放停稳后再发请求；同样的窗口不重复要）
@@ -1907,11 +1944,14 @@ function requestViewportPatch(soon) {
     if (!OFData.setViewWindow(bounds)) { syncViewHint(); return; }   // 窗口没变：不用取
     viewportLoading = true;
     if (globeMode()) syncViewHint();
-    showToast("正在取这一片的数据（按当前视野取数，窗口很大时给概览）…");
+    // 只有慢的时候才提示（快的时候提示反而刷屏）
+    const slowNotice = setTimeout(function () {
+      showToast("正在取这一片的数据（按当前视野取数，窗口很大时给概览）…");
+    }, 600);
     OFData.ensureViewport(iso).then((ok) => {
+      clearTimeout(slowNotice);
       viewportLoading = false;
-      if (ok) showToast("这一片数据已到位");
-      invalidate();
+      invalidate();                      // 取到就重画（地图自己给出反馈，不再弹提示刷屏）
       drawMap();
       syncViewHint();
       renderLegend(); renderPick(); renderProbe();

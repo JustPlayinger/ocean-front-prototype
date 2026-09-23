@@ -153,14 +153,35 @@ Remove-Item Env:\PAGE
 
 跨域部署（前后端不同源）时，在页面显式指定：`window.OF_API_BASE = "http://<IP>/api"`。
 
+### 数据铺满：按视野取数（2026-09-23 上线，v1.10）
+
+`GET /api/frontend/day/<date>` 支持 `bbox=minLon,minLat,maxLon,maxLat` 与 `step=1|2|4|10|20|40`：
+
+- **为什么**：原始锋面数据本身是全球 0.05°（7200×3600/天），但全球 0.05° 单日 payload 15.7 MB / 25s 不可行；
+  于是按「当前视野」取数，并按窗口宽度自动降一档（`≤25°`→0.05°、`≤60°`→0.2°、`≤120°`→1°、更大→2°）。
+- **口径**：概览窗口 `objects`/`front_line` 恒为空（1° 的聚合格不是锋面对象），返回 `front.overview` 标明
+  step / 分辨率 / 聚合规则；卡片统计与对象清单永远用 0.05° 主片（前端 `OFData.patches` 里 `primary: true` 的那片）。
+- **实测**（服务器上 `bash /tmp/probe-bbox.sh` 同款命令）：默认窗口 1.0 s / 360 KB；全球 1° 首次 2.5 s / 284 KB、
+  命中 **0.025 s**；全球 2° 89 KB；东亚 60° 窗口 1.2 s / 311 KB。
+- **缓存**：`/srv/ocean/data/cache/frontend_payload/v1_<date>_<bbox>_<step>.json`，上限 150 个文件
+  （超出按 mtime 淘汰最旧）；改出数口径时把 `frontend_payload.CACHE_VERSION` +1，否则旧缓存会被继续命中。
+  查缓存：`ls -lt /srv/ocean/data/cache/frontend_payload | head`、`du -sh`；清缓存：`rm -f .../v1_*.json`（安全，随时重算）。
+- **运维核对**：`curl -s -D- -o /dev/null "http://127.0.0.1:8000/api/frontend/day/2024-08-05?bbox=-55,25,-35,45"`
+  看 `X-Payload-Cache` 与 `%{time_total}`。
+- ⚠️ **发布后核对前端版本**：改完前端用**公网 URL** 核对内容指纹，别用 `curl 127.0.0.1` + `Host:` 头
+  （本机回环那条路径可能落到另一个站点/缓存，会得出"没生效"的错误结论）：
+  `curl -s http://116.62.54.140/prototype-fishing.js | md5sum` 对比 `md5sum /opt/ocean/frontend/prototype/prototype-fishing.js`，
+  或直接 `curl -s ... | grep -c resolutionLabel` 之类按版本特征定位。
+
 ### 图层与锋面强度（2026-09-23 上线）
 
 - **图层开关**在地图**左上角**「☰」呼出的抽屉里（默认收起）：鼠标靠近地图左边缘 28px 自动呼出、
   移开 0.6s 自动收起，点 ☰ 可固定展开、✕ 收起。共 7 个图层；机制仍是
   `data-layer` + `state.layers`，新增图层只要在 HTML 加一行并在 `drawDataLayers()` 里加一段绘制。
-- **数据窗口**：离线兜底是东海（120–128°E / 27–34°N，62 天）；服务器模式的 `GET /api/frontend/day`
-  用 **105–150°E / 3–45°N**（锋面对象 10 → 200 个）。实测单日开销：东海 23 KB / 0.16s、
-  本窗口 391 KB / 0.67s、**全球 15.7 MB / 25s —— 不可行，故不取全球**。
+- **数据窗口**：离线兜底是东海（120–128°E / 27–34°N，62 天）；服务器模式默认窗口 **105–150°E / 3–45°N**
+  （0.05°，锋面对象 10 → 200 个），实测 391~361 KB / 0.67~1.0s。
+  v1.10 起球面/大洲尺度**也**有真实数据：前端按视野请求 `bbox`，全球用 2° 概览（89 KB / 1.7s，缓存后 0.03s），
+  不再是"全球 15.7 MB 不可行"；`OFData.patches(iso)` 里一天可同时有多片（主片 0.05° + 概览片），渲染按粗→细叠加。
   前端视野随之自适应：离线 `DEFAULT_ZOOM=0.8`、服务器模式 `SERVER_ZOOM=0.35`（约 16° 经度）；
   「回到定位点」按当前模式取默认视野，否则会把视野缩回东海。
   服务器模式下 `loadThenRefresh()` 会用 `ensureDay(iso, force=true)` **覆盖本地数据**（服务器窗口更大），

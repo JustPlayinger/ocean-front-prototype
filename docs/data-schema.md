@@ -148,6 +148,40 @@ probability  = 有锋面的天数 / 有效天数
 - 海温网格的起点是 `.025` 结尾（如 120.025 / 27.025），与锋面网格错开半格，绘制时各按自己的真实坐标
 - `OFData.sstCell(iso, lon, lat)` 直接在这份游程里查那一格的真实档位温度（不插值）
 
+### 3.4.1 服务器按视野出数（v1.10）：`/api/frontend/day/{date}?bbox=&step=`
+
+离线文件是「导出好的那一块」，服务器模式则**按请求窗口现算**（同一套 `export_prototype_data.py` 函数，
+所以结构与离线文件逐字段一致）。原始锋面 NetCDF 本身是全球 0.05°（7200×3600），因此任意海域都有真实数据。
+
+| 参数 | 规则 |
+|---|---|
+| `bbox` | `minLon,minLat,maxLon,maxLat`（-180~180 / -90~90，要求 min<max）；省略 = 默认作业窗口 `105,3,150,45` |
+| `step` | 降采样步长（格），只能取 `1/2/4/10/20/40` → 分辨率 0.05°~2°；省略 = 按窗口宽度自动（`≤25°`→1、`≤60°`→4、`≤120°`→20、更大→40）；**默认作业窗口永远 1（0.05° 明细）** |
+| 响应头 | `X-Payload-Cache: hit/miss`（便于核对缓存） |
+| 错误 | `bbox`/`step` 不合法 → 422；当日锋面原始文件缺失 → 404（前端回退本地数据，不给空图） |
+
+响应 = 离线结构 + 两个新字段：
+
+```js
+{ date, front: {...与 data/day/<date>.js 同构...}, sst: {...或 null...},
+  window: { bbox: [minLon,minLat,maxLon,maxLat], step, resolution_deg, mode: "detail"|"overview", default: bool },
+  cached: bool }
+```
+
+- **概览窗口**（`step > 1`）额外带 `front.overview = {step, resolution_deg, source_resolution_deg, method, note}`，
+  并且 `objects`/`front_line` **恒为空**——降采样是显示层聚合（口径：块内锋面线 > 冷暖侧 > 整块缺测 > 无锋面），
+  1° 的聚合格不是锋面对象；统计与对象清单请始终用 0.05° 窗口（前端就是这么做的）。
+- **海温**只返回「请求窗口 ∩ 该文件实际范围」的交集；没有交集时 `sst = null`、`front.has_sst = false`
+  （海温是按需下载的子集，当前只有东海/西太平洋那块——不假装全球都有）。
+- **降采样选档为什么不用"像元数最小可行档"**：游程数与**锋面总长度**相关。全球 0.2° 只有 162 万像元，
+  但会产出 7.6 万条游程（≈4 MB）；1° 是 1.3 万条、2° 只有 3.6 千条 —— 按像元数会选错档，所以按窗口宽度定档。
+- **缓存**：按 `(date, bbox, step)` 落盘到 `data/cache/frontend_payload/v1_<date>_<bbox>_<step>.json`，
+  超过 150 个按最后修改时间淘汰最旧；改出数口径时请把 `CACHE_VERSION` +1。实测：默认窗口 1.0 s / 360 KB、
+  全球 1° 首次 2.5 s、命中 0.025 s。
+
+前端侧对应 `OFData.patches(iso)`（一天多片，每片自带 `grid`/`resolutionDeg`/`mode`，按「粗 → 细」渲染）与
+`OFData.cellInfo(iso, lon, lat).resolutionDeg`（这一点来自哪一片、什么分辨率）。
+
 ### 3.5 `base/basemap.js` / `base/asia.js` / `base/world.js`
 
 三档同构：`layers.{land|coastline|…}.chains`（经纬度折线数组，已抽稀并定点化）。

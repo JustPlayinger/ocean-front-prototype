@@ -109,6 +109,11 @@ const PROBE = `var b=document.getElementById("mapProbe"), m=document.getElementB
     inBounds: rb.left>=rm.left-1 && rb.top>=rm.top-1 && rb.right<=rm.right+1 && rb.bottom<=rm.bottom+1 };`;
 const results = [];
 const check = (label, cond, detail) => { results.push(`${cond ? "PASS" : "FAIL"}  ${label}${detail ? "  → " + detail : ""}`); };
+// 目标页面与浏览器可被环境变量覆盖（部署后跑线上时用 PAGE=http://... ），跑之前先打印清楚：
+// 线上页面是「服务器增强模式」，日期范围/视野与离线不同，别把服务器模式的结果当成离线回归。
+console.log("目标页面: " + PAGE + (process.env.PAGE ? "（环境变量 PAGE 覆盖）" : "（默认：本地文件，离线模式）"));
+console.log("浏览器: " + EDGE + (process.env.EDGE ? "（环境变量 EDGE 覆盖）" : ""));
+console.log("");
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const unsupportedClaimTerms = [
   "产量预测",
@@ -159,6 +164,36 @@ check("地图有真实经纬网（0.05° 数据窗口上的整数度格网）", 
 check("陆地是实色块且与海面底色不同（不是同色看不见）",
   boot.paths.land === 1 && boot.paths.landFill && boot.paths.landFill !== boot.paths.oceanFill,
   "陆地 " + boot.paths.landFill + " vs 海面 " + boot.paths.oceanFill);
+
+// ===== 数据片模型（v1.9：服务器按视野出数；离线时只有本地那一片）=====
+const patchModel = await evalJS(`var iso = document.getElementById("timeDate").value;
+  var list = OFData.patches(iso);
+  var win = OFData.workingWindow(iso);
+  var grid = OFData.grid(iso);
+  var cell = OFData.cellInfo(iso, 125.0, 30.0);
+  return { n: OFData.patchCount(iso), server: OFData.serverEnabled(),
+    modes: list.map(function (p) { return p.mode + "@" + p.resolutionDeg; }),
+    primary: list.filter(function (p) { return p.primary; }).length,
+    win: win && win.bbox, grid: { lon0: grid.lon0, lat0: grid.lat0, dlon: grid.dlon, dlat: grid.dlat, nx: grid.nx, ny: grid.ny },
+    cellIn: cell && cell.inGrid, cellRes: cell && cell.resolutionDeg,
+    steps: [OFData.stepForWindow(8), OFData.stepForWindow(30), OFData.stepForWindow(70), OFData.stepForWindow(200)],
+    viewWindow: OFData.viewWindow() };`);
+check("离线只有本地那一片数据，并被标成主片（detail@0.05）",
+  patchModel.n === 1 && patchModel.primary === 1 && patchModel.modes.join("") === "detail@0.05" && patchModel.server === false,
+  JSON.stringify({ n: patchModel.n, modes: patchModel.modes, server: patchModel.server }));
+check("作业海域范围由数据自己算出来（= 主片网格，不是写死的框）",
+  !!patchModel.win &&
+  Math.abs(patchModel.win[0] - patchModel.grid.lon0) < 1e-6 &&
+  Math.abs(patchModel.win[1] - patchModel.grid.lat0) < 1e-6 &&
+  Math.abs(patchModel.win[2] - (patchModel.grid.lon0 + patchModel.grid.dlon * patchModel.grid.nx)) < 1e-6 &&
+  Math.abs(patchModel.win[3] - (patchModel.grid.lat0 + patchModel.grid.dlat * patchModel.grid.ny)) < 1e-6,
+  JSON.stringify(patchModel.win));
+check("像元查询回报数据来自哪一片（离线 = 0.05° 主片，不冒充精细观测）",
+  patchModel.cellIn === true && patchModel.cellRes === 0.05, "resolutionDeg=" + patchModel.cellRes);
+check("降采样档位与后端 STEPS 对齐（8°/30°/70°/200° → 1/4/20/40）",
+  patchModel.steps.join(",") === "1,4,20,40", patchModel.steps.join(","));
+check("离线时不设视野窗口（不会去打服务器，也不会有半张图）",
+  patchModel.viewWindow.key === null && patchModel.viewWindow.bbox === null, JSON.stringify(patchModel.viewWindow));
 
 // 光栅化后数像素：陆地必须真的占了画面（防止"画了但看不见"）
 const raster = await evalJS(`
@@ -878,10 +913,10 @@ check("缩放到最小 = 整颗地球（球面档：世界轮廓 + 数据覆盖�
   && globeOut.coverage === 1 && globeOut.graticule >= 4,
   "span=" + globeOut.span + "° · land=" + globeOut.worldLand + " · coast=" + globeOut.coast
   + " · coverage=" + globeOut.coverage + " · grat=" + globeOut.graticule);
-check("球面档说清口径：只画轮廓/覆盖框，并收起 km 比例尺",
-  globeOut.hintHidden === false && /球面视图/.test(globeOut.hintText) && globeOut.sst === 0
-  && globeOut.barW === "0px" && /球面/.test(globeOut.barText),
-  "hint=" + globeOut.hintText.slice(0, 24) + " · sst=" + globeOut.sst + " · bar=" + globeOut.barW + "/" + globeOut.barText);
+check("球面档说清口径：写明是轮廓/概览，并收起 km 比例尺",
+  globeOut.hintHidden === false && /球面视图/.test(globeOut.hintText) && /轮廓|概览/.test(globeOut.hintText)
+  && globeOut.sst === 0 && globeOut.barW === "0px" && /球面/.test(globeOut.barText),
+  "hint=" + globeOut.hintText.slice(0, 30) + " · sst=" + globeOut.sst + " · bar=" + globeOut.barW + "/" + globeOut.barText);
 await shot("shot-11-globe.png");
 
 const globeRound = await evalJS(`var m = document.getElementById("map"), r = m.getBoundingClientRect();
