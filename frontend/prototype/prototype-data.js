@@ -258,7 +258,9 @@
 
   const OFData = {
     meta: META,
-    basemap: BASE,
+    basemap: BASE,                                  // 1:10m 东海细节（离线兜底档）
+    basemapAsia: window.OF_DATA_ASIA || null,       // 1:50m 西太平洋（区域档）
+    basemapWorld: window.OF_DATA_WORLD || null,     // 1:110m 全球（球面档）
     clim: CLIM,
 
     // ---- 服务器增强模式（可选）----

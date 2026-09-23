@@ -859,6 +859,108 @@ check("播放按钮会推进日期，暂停后按钮复位",
   playback.mid > playback.before && playback.after === playback.mid && playback.playing === false && playback.text === "▶",
   JSON.stringify(playback));
 
+// ===== 17.5) 视野：缩到最小 = 整颗地球 / 球面档往返 / 视野记忆（v1.8 新增） =====
+const mapRect = `document.getElementById("map").getBoundingClientRect()`;
+const globeOut = await evalJS(`var r = ${mapRect};
+  for (var i = 0; i < 60; i++) zoomAt(r.left + r.width / 2, r.top + r.height / 2, 1 / 1.25);
+  return { mode: OFMap.modeOf(OFMap.spanOf(state.zoom)), span: Math.round(OFMap.spanOf(state.zoom)),
+    worldLand: document.querySelectorAll('#mapSvg path[data-layer="land"]').length,
+    coast: document.querySelectorAll('#mapSvg path[data-layer="coast"]').length,
+    coverage: document.querySelectorAll('#mapSvg path[data-layer="coverage"]').length,
+    graticule: document.querySelectorAll("#gratHost path").length,
+    hintHidden: document.getElementById("mapViewHint").hidden,
+    hintText: document.getElementById("mapViewHint").textContent,
+    barW: document.getElementById("mapScale").style.width,
+    barText: document.getElementById("mapScaleText").textContent,
+    sst: document.querySelectorAll('#mapSvg path[data-layer="sst"]').length };`);
+check("缩放到最小 = 整颗地球（球面档：世界轮廓 + 数据覆盖框 + 球面经纬网）",
+  globeOut.mode === "globe" && globeOut.span >= 60 && globeOut.worldLand >= 1 && globeOut.coast >= 1
+  && globeOut.coverage === 1 && globeOut.graticule >= 4,
+  "span=" + globeOut.span + "° · land=" + globeOut.worldLand + " · coast=" + globeOut.coast
+  + " · coverage=" + globeOut.coverage + " · grat=" + globeOut.graticule);
+check("球面档说清口径：只画轮廓/覆盖框，并收起 km 比例尺",
+  globeOut.hintHidden === false && /球面视图/.test(globeOut.hintText) && globeOut.sst === 0
+  && globeOut.barW === "0px" && /球面/.test(globeOut.barText),
+  "hint=" + globeOut.hintText.slice(0, 24) + " · sst=" + globeOut.sst + " · bar=" + globeOut.barW + "/" + globeOut.barText);
+await shot("shot-11-globe.png");
+
+const globeRound = await evalJS(`var m = document.getElementById("map"), r = m.getBoundingClientRect();
+  var pts = [[124.5, 30.2], [110, 20], [140, 40], [-40, -20]];
+  var worst = 0, off = 0, hidden = 0;
+  pts.forEach(function (p) {
+    if (!OFMap.visible(p[0], p[1], _view)) { hidden++; return; }   // 背面点不参与往返
+    var s = screenOf(p[0], p[1]);
+    var g = geoOfScreen(s.x + r.left, s.y + r.top);
+    if (!g) { off++; return; }
+    var d = Math.hypot(g[0] - p[0], g[1] - p[1]);
+    if (d > worst) worst = d;
+  });
+  return { mode: OFMap.modeOf(OFMap.spanOf(state.zoom)), worst: worst, off: off, hidden: hidden };`);
+check("球面档屏幕坐标 ↔ 经纬度双向换算自洽（悬停/点选不会跑偏）",
+  globeRound.mode === "globe" && globeRound.off === 0 && globeRound.worst < 0.5,
+  "最大误差 " + globeRound.worst.toFixed(4) + "° · 反算失败 " + globeRound.off + " 点 · 背面跳过 " + globeRound.hidden);
+
+const globeDrag = await evalJS(`var m = document.getElementById("map"), r = m.getBoundingClientRect();
+  var before = { lon: state.view.lon0, lat: state.view.lat0 };
+  m.dispatchEvent(new MouseEvent("mousedown", { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, bubbles: true, button: 0 }));
+  for (var i = 1; i <= 6; i++) {
+    m.dispatchEvent(new MouseEvent("mousemove", { clientX: r.left + r.width / 2 + i * 20, clientY: r.top + r.height / 2 + i * 6, bubbles: true }));
+  }
+  window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  return { before: before, after: { lon: state.view.lon0, lat: state.view.lat0 },
+    mode: OFMap.modeOf(OFMap.spanOf(state.zoom)), span: Math.round(OFMap.spanOf(state.zoom)) };`);
+check("球面档能拖动转动地球（中心经纬度随之改变，纬度夹在 ±89°）",
+  globeDrag.mode === "globe" && globeDrag.after.lon !== globeDrag.before.lon
+  && Math.abs(globeDrag.after.lat) <= 89 && globeDrag.span === globeOut.span,
+  JSON.stringify(globeDrag.before) + " → " + JSON.stringify(globeDrag.after));
+
+const planeBack = await evalJS(`document.getElementById("globeReset").click();
+  return { mode: OFMap.modeOf(OFMap.spanOf(state.zoom)), span: Math.round(OFMap.spanOf(state.zoom)),
+    sst: document.querySelectorAll('#mapSvg path[data-layer="sst"]').length,
+    land: document.querySelectorAll('#mapSvg path[data-layer="land"]').length,
+    hintHidden: document.getElementById("mapViewHint").hidden };`);
+check("点「🌍」回到数据窗口：0.05° 栅格图层回来、球面提示收起",
+  planeBack.mode === "plane" && planeBack.span <= 20 && planeBack.sst >= 1 && planeBack.land >= 1 && planeBack.hintHidden === true,
+  "span=" + planeBack.span + "° · sst=" + planeBack.sst + " · land=" + planeBack.land);
+
+const planeOut = await evalJS(`var r = ${mapRect};
+  for (var i = 0; i < 3; i++) zoomAt(r.left + r.width / 2, r.top + r.height / 2, 1 / 1.25);
+  return { mode: OFMap.modeOf(OFMap.spanOf(state.zoom)), span: Math.round(OFMap.spanOf(state.zoom)),
+    land: document.querySelectorAll('#mapSvg path[data-layer="land"]').length,
+    lon: Math.round(state.view.lon0), lat: Math.round(state.view.lat0),
+    barText: document.getElementById("mapScaleText").textContent };`);
+check("平面档可以缩到看整个数据窗口（跨 20°+ 仍不切球，并叠上 1:50m 底图）",
+  planeOut.mode === "plane" && planeOut.span >= 20 && planeOut.land >= 2,
+  "span=" + planeOut.span + "° · 底图档数=" + planeOut.land + " · 中心 " + planeOut.lon + "E/" + planeOut.lat + "N · 比例尺 " + planeOut.barText);
+await shot("shot-12-plane-wide.png");
+
+const memSaved = await evalJS(`centerOn(133.5, 27.5, 0.6);
+  return new Promise(function (res) {
+    setTimeout(function () {
+      var raw = null; try { raw = localStorage.getItem("of.view.v1"); } catch (e) {}
+      res({ raw: raw });
+    }, 700);
+  });`);
+check("视野记忆：停下 0.5s 后把中心与缩放写进 localStorage",
+  !!memSaved.raw && Math.abs(Number(JSON.parse(memSaved.raw).lon0) - 133.5) < 0.01,
+  String(memSaved.raw));
+
+await send("Page.reload", {});
+let readyAfterReload = false;
+for (let i = 0; i < 60 && !readyAfterReload; i++) {
+  await sleep(250);
+  try {
+    readyAfterReload = (await evalJS(`return typeof OFMap === "object" && typeof state === "object" &&
+      !!document.getElementById("gratHost") && typeof state.view === "object";`)) === true;
+  } catch (e) { readyAfterReload = false; }
+}
+const memBack = await evalJS(`return { lon: Math.round(state.view.lon0 * 100) / 100, lat: Math.round(state.view.lat0 * 100) / 100,
+  zoom: Math.round(state.zoom * 1000) / 1000, mode: OFMap.modeOf(OFMap.spanOf(state.zoom)) };`);
+check("刷新页面后回到上次停留的视野（不用手动拖回去）",
+  Math.abs(memBack.lon - 133.5) < 0.05 && Math.abs(memBack.lat - 27.5) < 0.05 && Math.abs(memBack.zoom - 0.6) < 0.01,
+  "恢复为 " + memBack.lon + "E/" + memBack.lat + "N · zoom=" + memBack.zoom + " · " + memBack.mode);
+await shot("shot-13-memory.png");
+
 // ===== 18) 运行期异常 =====
 check("无运行期 JS 异常（含资源加载失败）", errors.length === 0, errors.slice(0, 3).join(" || ") || "none");
 

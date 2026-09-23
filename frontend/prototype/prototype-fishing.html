@@ -100,6 +100,15 @@
       radial-gradient(ellipse at 70% 45%, rgba(23,88,140,.35), transparent 60%),
       linear-gradient(160deg, #0a1828, #0d2138 45%, #0a1828);
     border-right: 1px solid var(--line);
+    touch-action: none;              /* 单指拖动 = 平移地图，不触发页面手势 */
+  }
+  .map:focus-visible { outline: 1px solid rgba(77,212,198,.5); outline-offset: -2px; }
+  /* 球面视图的口径提示（球上只画轮廓与覆盖框，栅格数据要放大才显示） */
+  .map-view-hint {
+    position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+    max-width: min(640px, calc(100% - 240px)); z-index: 6; pointer-events: none;
+    background: rgba(10,22,36,.86); border: 1px solid var(--line); border-radius: 9px;
+    padding: 5px 10px; font-size: 11.5px; line-height: 1.5; color: var(--text-dim); text-align: center;
   }
   .map.pick-origin { cursor: crosshair; }
   .map svg { width: 100%; height: 100%; display: block; }
@@ -418,7 +427,9 @@
         <button class="ctrl" title="放大地图" id="zoomIn">＋</button>
         <button class="ctrl" title="缩小地图" id="zoomOut">－</button>
         <button class="ctrl" title="回到定位点" id="recenter">◎</button>
+        <button class="ctrl" title="看整颗地球 / 回到数据窗口" id="globeReset">🌍</button>
       </div>
+      <div class="map-view-hint" id="mapViewHint" hidden></div>
       <button class="ctrl layer-toggle" id="layerToggle" title="图层开关（鼠标移到左边缘也会自动展开）" aria-controls="layerDrawer" aria-expanded="false">☰</button>
       <!-- 图层抽屉：默认收起在左侧，鼠标靠近左边缘自动呼出，✕ 或移开自动收起 -->
       <aside class="map-legend layer-drawer" id="layerDrawer" aria-hidden="true">
@@ -596,6 +607,8 @@
 
 <!-- 真实数据（脚本生成，不要手改） -->
 <script src="data/meta.js"></script>
+<script src="data/base/world.js"></script>
+<script src="data/base/asia.js"></script>
 <script src="data/base/basemap.js"></script>
 <script src="data/clim/same-period.js"></script>
 <script src="data/front_response/events.js"></script>
@@ -616,6 +629,8 @@
 </script>
 <!-- 适配层：页面唯一的数据入口 -->
 <script src="prototype-data.js"></script>
+<!-- 地图投影与视野（平面档 ↔ 球面档、经纬网、视野夹取） -->
+<script src="prototype-map.js"></script>
 <script src="prototype-fishing.js"></script>
 </body>
 </html>

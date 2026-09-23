@@ -178,6 +178,53 @@ check("底图写明公有领域来源", /public domain|公有领域/i.test(BASE.
 const baseKb = statSync(join(DATA, "base", "basemap.js")).size / 1024;
 check("底图体积可控（< 400 KB）", baseKb < 400, baseKb.toFixed(1) + " KB");
 
+// ===== 底图二级 / 一级（三级 LOD：东海 1:10m 细节 → 西太平洋 1:50m 区域 → 全球 1:110m 球面） =====
+const asiaWin = readJs(join("base", "asia.js")).run();
+const ASIA = asiaWin.OF_DATA_ASIA;
+const worldWin = readJs(join("base", "world.js")).run();
+const WORLD = worldWin.OF_DATA_WORLD;
+check("区域底图（asia.js 1:50m）存在且层齐备",
+  !!(ASIA && ASIA.layers && ASIA.layers.land && ASIA.layers.coastline &&
+     ASIA.layers.land.chains.length > 0 && ASIA.layers.coastline.chains.length > 0),
+  ASIA ? Object.keys(ASIA.layers).map((k) => k + ":" + ASIA.layers[k].chains.length).join(" ") : "缺失");
+check("球面底图（world.js 1:110m）存在且层齐备",
+  !!(WORLD && WORLD.layers && WORLD.layers.land && WORLD.layers.coastline &&
+     WORLD.layers.land.chains.length > 0 && WORLD.layers.coastline.chains.length > 0),
+  WORLD ? Object.keys(WORLD.layers).map((k) => k + ":" + WORLD.layers[k].chains.length).join(" ") : "缺失");
+check("两级底图都写明公有领域来源与全球/区域范围",
+  /public domain|公有领域/i.test(ASIA.license) && /Natural Earth/.test(ASIA.source) &&
+  /public domain|公有领域/i.test(WORLD.license) && /Natural Earth/.test(WORLD.source) &&
+  WORLD.bbox.join(",") === "-180,-90,180,90" && ASIA.bbox.join(",") === "95,-10,155,50",
+  "asia " + ASIA.bbox.join(",") + " · world " + WORLD.bbox.join(","));
+// 球面上最怕「跨 180° 经线被连成一条横穿全球的假线」，逐段查经度跳变
+function maxLonJump(product) {
+  let worst = 0, where = "";
+  ["land", "coastline"].forEach((k) => product.layers[k].chains.forEach((chain) => {
+    for (let i = 1; i < chain.length; i++) {
+      const d = Math.abs(chain[i][0] - chain[i - 1][0]);
+      if (d > worst) { worst = d; where = k + " @ " + JSON.stringify(chain[i - 1]) + "→" + JSON.stringify(chain[i]); }
+    }
+  }));
+  return { worst: worst, where: where };
+}
+const jumpW = maxLonJump(WORLD), jumpA = maxLonJump(ASIA);
+// 阈值 30°：1:110m 底图在南极等稀疏海域本来就有十几度的长直段，
+// 但绝不允许出现接近 360° 的跳变（那是跨反经线的假线，投影到球面会横穿整颗球）。
+check("球面底图不跨反经线乱连（相邻点经度跳变 < 30°）",
+  jumpW.worst < 30 && jumpW.worst > 0,
+  "world 最大 " + jumpW.worst.toFixed(2) + "°");
+// 区域档是裁出来的：沿裁剪框边走的那几段本来就该是直线（平面档下无妨），放宽到 90°
+check("区域底图经度跳变在裁剪框边允许范围内（< 90°）", jumpA.worst < 90,
+  "asia 最大 " + jumpA.worst.toFixed(2) + "°");
+const asiaOut = ["land", "coastline"].flatMap((k) => ASIA.layers[k].chains.flat().filter((p) => !inBox(p, ASIA.bbox)));
+check("区域底图坐标都在裁剪窗口内，球面底图坐标都是合法经纬度",
+  asiaOut.length === 0 &&
+  ["land", "coastline"].every((k) => WORLD.layers[k].chains.flat()
+    .every((p) => p[0] >= -180 && p[0] <= 180 && p[1] >= -90 && p[1] <= 90)),
+  asiaOut.length ? "越界 " + asiaOut.length + " 点" : "全部通过");
+const lodKb = statSync(join(DATA, "base", "asia.js")).size / 1024 + statSync(join(DATA, "base", "world.js")).size / 1024;
+check("两级底图体积可控（合计 < 400 KB，不影响双击打开）", lodKb < 400, lodKb.toFixed(1) + " KB");
+
 // ===== 往年同期 =====
 const climFile = readJs(join("clim", "same-period.js"));
 const CLIM = climFile.run().OF_DATA_CLIM;

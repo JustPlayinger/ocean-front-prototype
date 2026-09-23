@@ -20,11 +20,12 @@
 // ==================== 常量 ====================
 const KM_PER_DEG = 111.195;
 
-// 地图投影：东西向与南北向 1 km 一样长，半径圈才是正圆
-const ANCHOR = { lon: 124.5, lat: 30.2 };
-const PX_LON = 180;
+// 地图投影统一由 prototype-map.js（OFMap）提供：平面档等距 km（半径圈才是正圆），
+// 缩得太远自动切到球面档（正射投影，最小缩放 = 整颗地球）。这里只留兼容别名。
+const ANCHOR = OFMap.ANCHOR;
+const PX_LON = OFMap.PX_LON;
+const PX_LAT = OFMap.PX_LAT;
 const KM2PX = PX_LON / (KM_PER_DEG * Math.cos((ANCHOR.lat * Math.PI) / 180));
-const PX_LAT = KM2PX * KM_PER_DEG;
 
 // 时间范围直接来自数据（有几天就只让选几天）
 // 「服务器增强模式」启用后这三个值会被 applyServerRange() 重新计算，故用 let。
@@ -35,6 +36,10 @@ let DATE_MIN = OFData.firstDate();
 let DATE_MAX = OFData.lastDate();
 const DEFAULT_ZOOM = 0.8;              // 离线兜底视野（东海窗口 120–128°E，略微拉远让海岸线进画面）
 const SERVER_ZOOM = 0.35;              // 服务器模式视野：数据窗口扩到 105–150°E，显示约 16° 经度
+const MAX_ZOOM = 8;                    // 最深：0.05° 像元级别
+const GLOBE_FADE_MS = 220;             // 平面↔球面切换时的淡出时长（遮住投影形变那一下）
+// 视野记忆：下次打开回到上次停留的地方（localStorage 不可用时静默降级）
+const VIEW_KEY = "of.view.v1";
 
 // ==================== 状态（唯一真源） ====================
 const state = {
@@ -48,9 +53,10 @@ const state = {
   climMode: "day",                         // 历史页：day / period / month / year
   predWindow: 3,                            // 预测页：1 / 3 / 7 天窗口
   pickOrigin: false,                        // 地图点选出发地模式
-  zoom: DEFAULT_ZOOM,                      // 默认视野：显示约 16° 经度（数据窗口 105–150°E）
-  view: { cx: 500, cy: 320 },              // 视窗中心（SVG 坐标）：滚轮缩放/拖拽平移用
+  zoom: DEFAULT_ZOOM,                      // 视野缩放：viewBox 宽 = 1000 / zoom（可见经度跨度 = 5.556 / zoom）
+  view: { lon0: 124.5, lat0: 30.2 },       // 视野中心（地理真源）：拖拽/缩放都只改这两个数 + zoom
 };
+let viewRestored = false;                  // 是否从「视野记忆」恢复（服务器模式不再覆盖它）
 
 const $ = (id) => document.getElementById(id);
 const SELECT_LABEL = { front: "锋面区", coldwarm: "冷侧 / 暖侧", fishing: "推荐水域（示例）" };
@@ -75,8 +81,19 @@ function addDays(iso, n) {
 }
 function mdText(iso) { const p = iso.split("-"); return Number(p[1]) + " 月 " + Number(p[2]) + " 日"; }
 function kmPerLon(lat) { return KM_PER_DEG * Math.cos((lat * Math.PI) / 180); }
-function xy(lon, lat) { return [500 + (lon - ANCHOR.lon) * PX_LON, 320 - (lat - ANCHOR.lat) * PX_LAT]; }
-function geoOfXY(x, y) { return [ANCHOR.lon + (x - 500) / PX_LON, ANCHOR.lat - (y - 320) / PX_LAT]; }
+// 当前视野（投影模块的入参）：缓存成一个对象——xy() 每次绘制要调用上万次，不做逐次分配
+const _view = { lon0: state.view.lon0, lat0: state.view.lat0, span: OFMap.spanOf(DEFAULT_ZOOM), mode: "plane" };
+function syncView() {
+  _view.lon0 = state.view.lon0;
+  _view.lat0 = state.view.lat0;
+  _view.span = OFMap.spanOf(state.zoom);
+  _view.mode = OFMap.modeOf(_view.span);
+  return _view;
+}
+function globeMode() { return _view.mode === "globe"; }
+// 经纬度 <-> SVG 坐标：平面档与旧版逐位一致；球面档走正射投影（球外/背面返回 null，调用方要说清楚）
+function xy(lon, lat) { return OFMap.toSvg(lon, lat, _view); }
+function geoOfXY(x, y) { return OFMap.fromSvg(x, y, _view); }
 function fmtCoord(lon, lat) { return lon.toFixed(2) + "°E, " + lat.toFixed(2) + "°N"; }
 function parseCoord(raw) {
   const text = String(raw || "").replace(/[，；;]/g, ",");
@@ -299,7 +316,6 @@ function smoothPathOf(pts) {
   return d;
 }
 // 多条折线合成一个 path（一个 DOM 节点，几千段也不卡）
-function chainsPath(chains) { return chains.map((pts) => pathOf(pts) + " Z").join(" "); }
 function chainLinesPath(chains) { return chains.map((pts) => pathOf(pts)).join(" "); }
 
 // 逐行 RLE 还原成矩形（每格一个矩形，合成一个 path；不插值、不放大）
@@ -332,17 +348,42 @@ function rlePath(runs, grid) {
 
 function drawProbeMark(svg) {
   if (!state.probe) return;
+  // 球面档：钉在背面或球外的点不画（免得看起来像钉在球缘上）
+  if (!OFMap.visible(state.probe.lon, state.probe.lat, _view)) return;
   const p = xy(state.probe.lon, state.probe.lat);
   el("line", { x1: p[0] - 11, y1: p[1], x2: p[0] + 11, y2: p[1], stroke: "#ffd9a0", "stroke-width": 1.4 }, svg);
   el("line", { x1: p[0], y1: p[1] - 11, x2: p[0], y2: p[1] + 11, stroke: "#ffd9a0", "stroke-width": 1.4 }, svg);
   el("circle", { cx: p[0], cy: p[1], r: 3.2, fill: "#ffd9a0" }, svg);
 }
 
-// 底图：真实陆地 / 海岸线 / 等深线（Natural Earth 1:10m，公有领域）
+// 底图分档（LOD）：
+//   球面档 → 1:110m 世界轮廓 + 地球圆盘；平面档 → 跨度 > 10° 叠 1:50m 西太平洋，恒叠 1:10m 东海细节
+function basemapSets() {
+  if (globeMode()) return [{ data: OFData.basemapWorld, detailed: false }];
+  const sets = [];
+  if (_view.span > 10) sets.push({ data: OFData.basemapAsia, detailed: false });   // 缩出去才有用
+  sets.push({ data: OFData.basemap, detailed: true });
+  return sets.filter((s) => !!s.data);
+}
+
+// 底图：真实陆地 / 海岸线 / 等深线（Natural Earth，公有领域）
 function drawBackground(svg) {
+  const box = currentView();
+  if (globeMode()) {
+    // 球面档：先铺深空底色，再画地球圆盘（正射投影的可见半球）
+    el("rect", { x: box.x - 4, y: box.y - 4, width: box.w + 8, height: box.h + 8,
+      fill: "#050b14", "data-layer": "space" }, svg);
+    const c = xy(_view.lon0, _view.lat0);
+    el("circle", { cx: c[0], cy: c[1], r: OFMap.R_GLOBE, fill: "#0e2440", "data-layer": "globe" }, svg);
+    el("circle", { cx: c[0], cy: c[1], r: OFMap.R_GLOBE, fill: "none",
+      stroke: "rgba(120,190,225,0.55)", "stroke-width": 1.6 }, svg);
+    return;
+  }
+  el("rect", { x: box.x - 4, y: box.y - 4, width: box.w + 8, height: box.h + 8,
+    fill: "#0d2135", "data-layer": "ocean" }, svg);
+  // 等深线只在东海细节档画（跨度过大时线条挤在一起没有信息量）
   const base = OFData.basemap;
-  el("rect", { x: -400, y: -400, width: 1800, height: 1440, fill: "#0d2135", "data-layer": "ocean" }, svg);
-  if (!base) return;
+  if (!base || _view.span > 12) return;
   el("path", { d: chainLinesPath(base.layers.isobath200.chains), fill: "none",
     stroke: "rgba(120,190,215,0.42)", "stroke-width": 1, "stroke-dasharray": "7 5" }, svg);
   el("path", { d: chainLinesPath(base.layers.isobath1000.chains), fill: "none",
@@ -355,24 +396,35 @@ function currentView() {
   return { x: raw[0], y: raw[1], w: raw[2] || 1000, h: raw[3] || 640 };
 }
 
-// 真实经纬网：按整数度画线并标度数（原来是无标签的等分格网，看不出这是哪儿）
+// 真实经纬网：平面档按整数度画直线并标度数；球面档按 10°/15°/30° 画采样曲线（跟着球面弯）
 function drawGraticule(host) {
   const g = host;
   const box = currentView();
-  const lonMin = geoOfXY(box.x, 0)[0], lonMax = geoOfXY(box.x + box.w, 0)[0];
-  const latMax = geoOfXY(0, box.y)[1], latMin = geoOfXY(0, box.y + box.h)[1];
+  const aspect = box.h > 0 ? box.w / box.h : 1.6;
   const tag = (text, x, y) => {
     const t = el("text", { x, y, fill: "rgba(186,214,235,0.6)", "font-size": 10.5,
       "paint-order": "stroke", stroke: "rgba(6,14,24,0.85)", "stroke-width": 3 }, g);
     t.textContent = text;
   };
-  for (let lon = Math.ceil(lonMin); lon <= Math.floor(lonMax); lon++) {
-    const x = xy(lon, 0)[0];
+  if (globeMode()) {
+    const step = _view.span > 120 ? 30 : _view.span > 60 ? 15 : 10;
+    OFMap.graticule(_view, aspect).forEach((line) => {
+      if (!line.d) return;
+      el("path", { d: line.d, fill: "none", stroke: "rgba(150,200,230,0.14)" }, g);
+      if (!line.label || line.value % (step * 2) !== 0) return;
+      const q = xy(line.label[0], line.label[1]);
+      tag(line.value + (line.kind === "lon" ? "°E" : "°N"), q[0] + 4, q[1] + (line.kind === "lon" ? 12 : -4));
+    });
+    return;
+  }
+  const b = OFMap.visibleBounds(_view, aspect);
+  for (let lon = Math.ceil(b.lonMin); lon <= Math.floor(b.lonMax); lon++) {
+    const x = xy(lon, b.latMin)[0];
     el("line", { x1: x, y1: box.y, x2: x, y2: box.y + box.h, stroke: "rgba(150,200,230,0.10)" }, g);
     if (lon % 2 === 0) tag(lon + "°E", x + 3, box.y + 12);
   }
-  for (let lat = Math.ceil(latMin); lat <= Math.floor(latMax); lat++) {
-    const y = xy(0, lat)[1];
+  for (let lat = Math.ceil(b.latMin); lat <= Math.floor(b.latMax); lat++) {
+    const y = xy(b.lonMin, lat)[1];
     el("line", { x1: box.x, y1: y, x2: box.x + box.w, y2: y, stroke: "rgba(150,200,230,0.10)" }, g);
     if (lat % 2 === 0) tag(lat + "°N", box.x + 4, y - 3);
   }
@@ -417,13 +469,24 @@ function drawSst(svg, iso) {
 
 // 陆地画在数据层之上：海上的"没有观测"用斜线纹理，陆地是实色块 + 亮海岸线
 // （数据里的 -128 同时包含陆地与云；陆地填充要明显浅于海面，否则等于看不见）
+// 分档：最细的一档最亮；球面档只有 1:110m 世界轮廓，填充略暗以突出球体感。
 function drawLand(svg) {
-  const base = OFData.basemap;
-  if (!base) return;
-  el("path", { d: chainsPath(base.layers.land.chains), "data-layer": "land",
-    fill: "#3a5068", stroke: "none" }, svg);
-  el("path", { d: chainLinesPath(base.layers.coastline.chains), "data-layer": "coast",
-    fill: "none", stroke: "rgba(196,229,252,0.9)", "stroke-width": 1.4 }, svg);
+  const sets = basemapSets();
+  sets.forEach((set, i) => {
+    const top = i === sets.length - 1;
+    const layers = set.data.layers || {};
+    if (layers.land) {
+      const d = OFMap.paths(layers.land.chains, _view, { closed: true, rim: true });
+      if (d) el("path", { d, "data-layer": "land", stroke: "none",
+        fill: globeMode() ? "#33475e" : top ? "#3a5068" : "#31465c" }, svg);
+    }
+    if (layers.coastline) {
+      const d = OFMap.paths(layers.coastline.chains, _view);
+      if (d) el("path", { d, "data-layer": "coast", fill: "none",
+        stroke: globeMode() ? "rgba(190,225,250,0.72)" : top ? "rgba(196,229,252,0.9)" : "rgba(160,205,235,0.5)",
+        "stroke-width": globeMode() ? 1.1 : top ? 1.4 : 1.0 }, svg);
+    }
+  });
 }
 
 // 海上没有观测的像元（云 / 未观测；数据里 -128 与陆地共用编码）
@@ -549,24 +612,52 @@ function drawDataLayers(svg, snap, iso, grid, sel) {
 }
 
 // 定位点与找鱼范围（没数据时也保留，作为参照）
+// 球面档不画 km 半径圈（球面上圆的形状会变形，画了一圈反而不诚实），只保留定位点与坐标
 function drawOriginLayer(svg) {
   const q = xy(state.lon, state.lat);
-  [10, 20, 30].forEach((km) => {
-    const r = km * KM2PX;
-    const isRange = km === state.range;
-    el("circle", { cx: q[0], cy: q[1], r, fill: isRange ? "rgba(77,212,198,0.05)" : "none",
-      stroke: isRange ? "rgba(77,212,198,0.55)" : "rgba(140,225,212,0.26)", "stroke-width": isRange ? 1.2 : 1,
-      "stroke-dasharray": isRange ? "5 4" : "3 5" }, svg);
-    el("text", { x: q[0], y: q[1] - r - 4, "text-anchor": "middle",
-      fill: isRange ? "rgba(165,242,230,0.9)" : "rgba(140,225,212,0.4)",
-      "font-size": isRange ? 10 : 8.5 }, svg).textContent = km + " km";
-  });
+  if (!globeMode()) {
+    [10, 20, 30].forEach((km) => {
+      const r = km * KM2PX;
+      const isRange = km === state.range;
+      el("circle", { cx: q[0], cy: q[1], r, fill: isRange ? "rgba(77,212,198,0.05)" : "none",
+        stroke: isRange ? "rgba(77,212,198,0.55)" : "rgba(140,225,212,0.26)", "stroke-width": isRange ? 1.2 : 1,
+        "stroke-dasharray": isRange ? "5 4" : "3 5" }, svg);
+      el("text", { x: q[0], y: q[1] - r - 4, "text-anchor": "middle",
+        fill: isRange ? "rgba(165,242,230,0.9)" : "rgba(140,225,212,0.4)",
+        "font-size": isRange ? 10 : 8.5 }, svg).textContent = km + " km";
+    });
+  }
   el("circle", { cx: q[0], cy: q[1], r: 8, fill: "none", stroke: "#4dd4c6", "stroke-width": 2, class: "pulse" }, svg);
   el("circle", { cx: q[0], cy: q[1], r: 5, fill: "#fff" }, svg);
   el("text", { x: q[0] + 14, y: q[1] - 12, fill: "#fff", "font-size": 13, "font-weight": "bold",
     "paint-order": "stroke", stroke: "rgba(8,16,26,0.85)", "stroke-width": 3 }, svg)
     .textContent = fmtCoord(state.lon, state.lat);
-  el("text", { x: 956, y: 40, fill: "rgba(200,225,240,0.6)", "font-size": 13 }, svg).textContent = "N ↑";
+  if (!globeMode()) {
+    el("text", { x: 956, y: 40, fill: "rgba(200,225,240,0.6)", "font-size": 13 }, svg).textContent = "N ↑";
+  }
+}
+
+// 球面档：数据覆盖框（服务器导出窗口 105–150°E / 3–45°N）+ 一句口径说明
+function drawGlobeCoverage(svg) {
+  const d = OFMap.boxPath(OFMap.DATA_BBOX, _view);
+  if (!d) return;
+  el("path", { d, fill: "rgba(77,212,198,0.07)", stroke: "rgba(77,212,198,0.65)",
+    "stroke-width": 1.2, "stroke-dasharray": "6 4", "data-layer": "coverage" }, svg);
+  const box = OFMap.DATA_BBOX;
+  const label = xy((box[0] + box[2]) / 2, box[3]);
+  el("text", { x: label[0], y: label[1] - 8, "text-anchor": "middle", fill: "rgba(165,242,230,0.95)",
+    "font-size": 12, "paint-order": "stroke", stroke: "rgba(6,14,24,0.9)", "stroke-width": 3 }, svg)
+    .textContent = "数据覆盖 105–150°E / 3–45°N";
+}
+
+// 球面档：当天锋面对象中心线（真实几何，淡显；球面上按可见性切段，不造假连续）
+function drawGlobeFrontObjects(svg, iso) {
+  const objs = dayObjects();
+  if (!objs || !objs.length) return;
+  const d = objs.map((obj) => OFMap.path(obj.points || [], _view)).filter(Boolean).join(" ");
+  if (!d) return;
+  el("path", { d, fill: "none", stroke: "rgba(255,176,124,0.55)", "stroke-width": 0.9,
+    "data-layer": "front-globe" }, svg);
 }
 
 function drawMap() {
@@ -577,6 +668,7 @@ function drawMap() {
   const ok = snap.ok;
   const iso = state.date;
   const grid = ok ? OFData.grid(iso) : null;
+  const globe = globeMode();
 
   // 没数据就盖一层说明，不让地图假装有东西
   $("mapEmpty").hidden = ok;
@@ -591,19 +683,26 @@ function drawMap() {
   el("rect", { width: 6, height: 6, fill: "rgba(150,166,182,0.30)" }, hatch);
   el("line", { x1: 0, y1: 0, x2: 0, y2: 6, stroke: "rgba(206,222,238,0.5)", "stroke-width": 1.6 }, hatch);
 
-  drawBackground(svg);
-  const gratHost = el("g", { id: "gratHost" }, svg);
+  // 所有图层放进一档 stage：平面↔球面切换时整档淡出，遮住投影形变那一下
+  const stage = el("g", { id: "mapStage", style: "transition:opacity " + GLOBE_FADE_MS + "ms ease" }, svg);
+  drawBackground(stage);
+  const gratHost = el("g", { id: "gratHost" }, stage);
   drawGraticule(gratHost);
-  if (ok) {
-    drawSst(svg, iso);
-    drawNodata(svg, iso, grid);
-    drawDataLayers(svg, snap, iso, grid, state.select);
+  if (globe) {
+    // 球面档只画低分辨率信息：世界轮廓 + 覆盖框 + 当天锋面对象线（0.05° 栅格留给平面档）
+    drawGlobeCoverage(stage);
+    if (ok) drawGlobeFrontObjects(stage, iso);
+  } else if (ok) {
+    drawSst(stage, iso);
+    drawNodata(stage, iso, grid);
+    drawDataLayers(stage, snap, iso, grid, state.select);
   }
-  drawLand(svg);                       // 陆地压在数据层之上：海上缺测用纹理，陆地保持实色
-  drawOriginLayer(svg);
-  drawProbeMark(svg);
+  drawLand(stage);                     // 陆地压在数据层之上：海上缺测用纹理，陆地保持实色
+  drawOriginLayer(stage);
+  drawProbeMark(stage);
   el("style", {}, defs).textContent =
     "@keyframes pulseAnim{0%{r:8;opacity:.9}100%{r:32;opacity:0}}.pulse{animation:pulseAnim 1.6s ease-out infinite}";
+  syncViewHint(globe);
   updateScaleBar();
 }
 
@@ -1596,9 +1695,12 @@ function applyServerRange() {
   AVAILABLE_DATES = OFData.availableDates();
   DATE_MIN = OFData.firstDate();
   DATE_MAX = OFData.lastDate();
-  // 服务器模式的数据窗口比离线兜底大得多（105–150°E / 3–45°N），默认视野相应拉远
-  state.zoom = SERVER_ZOOM;
-  applyZoom(false);
+  // 服务器模式的数据窗口比离线兜底大得多（105–150°E / 3–45°N），默认视野相应拉远；
+  // 但「上次停留的视野」优先（视野记忆），别把它顶掉。
+  if (!viewRestored) {
+    state.zoom = SERVER_ZOOM;
+    applyZoom(false);
+  }
 }
 
 // 图层抽屉：默认收起在左侧；鼠标靠近左边缘自动呼出，移开延时自动收起；点 ☰ 可固定展开
@@ -1625,57 +1727,178 @@ function switchTab(name) {
   document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.id === "pane-" + name));
 }
 
-// 视窗：中心 + 缩放；中心被夹在数据窗口内，拖动不会把图拖没
-const VIEW_BOX = { x0: -310, y0: -470, x1: 1130, y1: 986 };
+// ==================== 视野：中心 + 缩放（两档投影自动切换） ====================
+// 视窗长宽比跟着元素真实大小走。旧版固定 640/zoom + preserveAspectRatio="slice"，
+// 元素比例不一致时会被裁掉一条边：既让"能看到的范围"变小，也让两轴边界不一致。
+function mapAspect() {
+  const r = $("map").getBoundingClientRect();
+  return r.height > 0 ? r.width / r.height : 1.6;
+}
+// 缩放下限：整颗地球刚好装得下（球面档）；上限：0.05° 像元级
+function zoomOutLimit() { return OFMap.SPAN_AT_ZOOM1 / OFMap.maxSpan(mapAspect()); }
+function clampZoom(z) { return clamp(z, zoomOutLimit(), MAX_ZOOM); }
+function viewSpan() { return OFMap.spanOf(state.zoom); }
+
+// 拖动/缩放共用的位移换算：SVG 单位 → 经纬度（两档各自的每度尺度）
+function nudgeView(dxUnits, dyUnits, atLat) {
+  if (globeMode()) {
+    const perDeg = (OFMap.R_GLOBE * Math.PI) / 180;
+    state.view.lon0 -= dxUnits / (perDeg * Math.max(0.15, Math.cos((atLat * Math.PI) / 180)));
+    state.view.lat0 += dyUnits / perDeg;
+  } else {
+    state.view.lon0 -= dxUnits / PX_LON;
+    state.view.lat0 += dyUnits / PX_LAT;
+  }
+  state.view.lon0 = OFMap.wrapLon(state.view.lon0);
+  state.view.lat0 = clamp(state.view.lat0, -89, 89);
+}
+
 function applyZoom(smooth) {
-  const w = 1000 / state.zoom, h = 640 / state.zoom;
-  state.view.cx = clamp(state.view.cx, VIEW_BOX.x0 + w / 2, VIEW_BOX.x1 - w / 2);
-  state.view.cy = clamp(state.view.cy, VIEW_BOX.y0 + h / 2, VIEW_BOX.y1 - h / 2);
+  const aspect = mapAspect();
+  state.zoom = clampZoom(state.zoom);
+  const before = _view.mode;
+  const c = OFMap.clampCenter(state.view.lon0, state.view.lat0, viewSpan(), aspect);
+  state.view.lon0 = c.lon;
+  state.view.lat0 = c.lat;
+  syncView();
+  const w = 1000 / state.zoom, h = w / aspect;          // 视窗比例 = 元素比例 → 不再裁切
+  const o = xy(state.view.lon0, state.view.lat0);
   const svg = $("mapSvg");
   svg.style.transition = smooth === false ? "none" : "all .25s ease";
-  svg.setAttribute("viewBox", (state.view.cx - w / 2) + " " + (state.view.cy - h / 2) + " " + w + " " + h);
-  refreshGraticule();
+  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  svg.setAttribute("viewBox", (o[0] - w / 2) + " " + (o[1] - h / 2) + " " + w + " " + h);
+  if (before !== _view.mode) {
+    drawMap();                                          // 平面↔球面：几何全变，必须整档重画
+    fadeInStage();
+  } else if (globeMode()) {
+    drawMap();                                          // 球面档：转动的是球面，几何必须重投影
+  } else {
+    refreshGraticule();                                 // 平面档：只动视窗，经纬网节流重画
+  }
   updateScaleBar();
+  saveViewSoon();
 }
-function refreshGraticule() {
+// 投影切换：新档从半透明淡入，遮住"等距平面 ↔ 正射球面"那一下形变
+function fadeInStage() {
+  const stage = $("mapStage");
+  if (!stage) return;
+  stage.style.transition = "none";
+  stage.style.opacity = "0.3";
+  requestAnimationFrame(() => {
+    const s = $("mapStage");
+    if (!s) return;
+    s.style.transition = "opacity " + GLOBE_FADE_MS + "ms ease";
+    s.style.opacity = "1";
+  });
+}
+// 经纬网节流重画：拖动时不再每帧重建（旧版每帧 innerHTML 清空重画，是发涩的主因）
+let gratTimer = 0;
+function refreshGraticule(soon) {
+  if (soon) {
+    if (gratTimer) return;
+    gratTimer = setTimeout(() => { gratTimer = 0; refreshGraticule(); }, 140);
+    return;
+  }
   const host = $("gratHost");
   if (!host) return;
   host.innerHTML = "";
   drawGraticule(host);
 }
-// 比例尺：把"图上 50 km"换算成屏幕像素（纯几何换算，不涉及数据）
+// 比例尺：把"图上 N km"换算成屏幕像素（纯几何换算，不涉及数据）。
+// 平面档选一个落在 60–140 px 的整数刻度；球面档比例随纬度变化，不给假装精确的数字。
+const NICE_KM = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
 function updateScaleBar() {
-  const bar = $("mapScale");
-  if (!bar) return;
+  const bar = $("mapScale"), text = $("mapScaleText");
+  if (!bar || !text) return;
   const rect = $("mapSvg").getBoundingClientRect();
   const box = currentView();
   if (!rect.width || !box.w) return;
-  const s = Math.max(rect.width / box.w, rect.height / box.h);
-  const km = 50;
-  bar.style.width = (km * KM2PX * s).toFixed(0) + "px";
-  $("mapScaleText").textContent = km + " km";
+  if (globeMode()) {
+    bar.style.width = "0px";
+    bar.style.opacity = "0.25";
+    text.textContent = "球面视图 · 比例随纬度变化";
+    return;
+  }
+  const kmPerPx = OFMap.kmPerPx(state.view.lat0, box.w / rect.width);
+  const want = NICE_KM.find((km) => km / kmPerPx >= 60) || NICE_KM[NICE_KM.length - 1];
+  bar.style.opacity = "1";
+  bar.style.width = Math.round(want / kmPerPx) + "px";
+  text.textContent = want + " km";
 }
-// 以光标为中心缩放：把光标底下的地点钉在原位
+// 球面档的口径提示：球上只画轮廓与锋面对象线，栅格数据要放大才显示（无数据不编造）
+function syncViewHint(globe) {
+  const hint = $("mapViewHint");
+  if (!hint) return;
+  if (!globe) { hint.hidden = true; return; }
+  const span = Math.round(_view.span);
+  hint.hidden = false;
+  hint.textContent = "球面视图（可见约 " + span + "° 经度）：全球轮廓 + 数据覆盖框 + 锋面对象线；"
+    + "放大到 40° 以内显示 0.05° 栅格（海温 / 锋面带 / 冷暖侧）";
+}
+
+// 一键在「整颗地球」与「数据窗口」之间切换
+function centerGlobe() {
+  if (globeMode()) {
+    centerOn(127.5, 24, OFMap.zoomForSpan(18));
+    showToast("已回到数据窗口（105–150°E / 3–45°N）");
+  } else {
+    state.zoom = zoomOutLimit();
+    centerOn(127.5, 24, state.zoom);
+    showToast("已缩到整颗地球（滚轮可放大）");
+  }
+}
+
+// 以光标为中心缩放：把光标底下的地点钉在原位（平面档与球面档同一套算法）
 function zoomAt(clientX, clientY, factor) {
   const svg = $("mapSvg"), rect = svg.getBoundingClientRect();
   const target = geoOfScreen(clientX, clientY);
-  const next = clamp(state.zoom * factor, 0.6, 8);
+  const next = clampZoom(state.zoom * factor);
   if (next === state.zoom) return;
   state.zoom = next;
   applyZoom(false);
   const box = currentView();
-  const s = Math.max(rect.width / box.w, rect.height / box.h);
-  const p = screenOf(target[0], target[1]);
-  state.view.cx += (p.x - (clientX - rect.left)) / s;
-  state.view.cy += (p.y - (clientY - rect.top)) / s;
+  const s = rect.width / box.w;
+  if (target && !globeMode()) {
+    const p = screenOf(target[0], target[1]);
+    nudgeView((p.x - (clientX - rect.left)) / s, (p.y - (clientY - rect.top)) / s, target[1]);
+  } else if (target && globeMode() && OFMap.visible(target[0], target[1], _view)) {
+    const p = screenOf(target[0], target[1]);
+    nudgeView((p.x - (clientX - rect.left)) / s, (p.y - (clientY - rect.top)) / s, target[1]);
+  }
   applyZoom(false);
 }
 function centerOn(lon, lat, zoom) {
-  const p = xy(lon, lat);
-  state.view.cx = p[0];
-  state.view.cy = p[1];
-  if (zoom) state.zoom = zoom;
+  state.view.lon0 = OFMap.wrapLon(lon);
+  state.view.lat0 = clamp(lat, -89, 89);
+  if (zoom) state.zoom = clampZoom(zoom);
   applyZoom();
+}
+// ==================== 视野记忆：下次打开回到上次停留的区域 ====================
+function saveViewSoon() {
+  clearTimeout(saveViewSoon.timer);
+  saveViewSoon.timer = setTimeout(saveView, 500);
+}
+function saveView() {
+  try {
+    localStorage.setItem(VIEW_KEY, JSON.stringify({
+      lon0: Math.round(state.view.lon0 * 1000) / 1000,
+      lat0: Math.round(state.view.lat0 * 1000) / 1000,
+      zoom: Math.round(state.zoom * 10000) / 10000,
+    }));
+  } catch (e) { /* 隐私模式 / 禁用存储：静默降级，不记忆 */ }
+}
+function loadView() {
+  try {
+    const raw = localStorage.getItem(VIEW_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    const lon0 = Number(v && v.lon0), lat0 = Number(v && v.lat0), zoom = Number(v && v.zoom);
+    if (!isFinite(lon0) || !isFinite(lat0) || !isFinite(zoom) || zoom <= 0) return null;
+    return { lon0: OFMap.wrapLon(lon0), lat0: clamp(lat0, -89, 89), zoom: zoom };
+  } catch (e) { return null; }
+}
+function clearView() {
+  try { localStorage.removeItem(VIEW_KEY); } catch (e) { /* 同上 */ }
 }
 function syncOriginPicker() {
   const btn = $("pickOriginBtn");
@@ -1742,41 +1965,74 @@ function bind() {
   $("locInput").addEventListener("keydown", (e) => { if (e.key === "Enter") doLocate(); });
 
   // ===== 地图：拖拽平移 / 滚轮以光标为中心缩放 =====
-  let drag = null, suppressClick = false;
+  // 指针事件统一鼠标 / 触摸 / 笔（并保留 mouse 回退：既有自动化检查用合成 MouseEvent 驱动）
+  let drag = null, suppressClick = false, sawPointer = false;
   const interactive = (t) => !!(t && t.closest && t.closest(".map-legend, .map-controls, .map-pick, .map-probe"));
-  $("map").addEventListener("mousedown", (e) => {
+  const dragStart = (x, y) => { drag = { x: x, y: y, moved: 0 }; hoverPt = null; renderProbe(); };
+  const dragMove = (x, y) => {
+    if (!drag) return false;
+    const rect = $("mapSvg").getBoundingClientRect();
+    const box = currentView();
+    const s = rect.width / box.w;                     // 视窗不再裁切：两轴同一个比例
+    nudgeView((x - drag.x) / s, (y - drag.y) / s, state.view.lat0);
+    drag.moved += Math.abs(x - drag.x) + Math.abs(y - drag.y);
+    drag.x = x;
+    drag.y = y;
+    const wasGlobe = globeMode();
+    syncView();
+    if (wasGlobe || globeMode()) {
+      // 球面档：转动的是球面，必须重投影（rAF 节流，一帧最多重画一次）
+      if (!drag.raf) {
+        drag.raf = requestAnimationFrame(() => {
+          if (drag) drag.raf = 0;
+          drawMap();
+        });
+      }
+    } else {
+      applyZoom(false);                               // 平面档：只改 viewBox，不重画数据
+      refreshGraticule(true);
+    }
+    return true;
+  };
+  const dragEnd = () => {
+    if (drag && drag.moved > 4) suppressClick = true;  // 拖动结束那一下不算点击
+    if (drag) { drag = null; saveViewSoon(); }
+    const host = $("gratHost");
+    if (host && !globeMode()) refreshGraticule();
+    if (globeMode()) updateScaleBar();
+  };
+  const mapPane = $("map");
+  mapPane.addEventListener("pointerdown", (e) => {
+    sawPointer = true;
     if (e.button !== 0 || interactive(e.target)) return;
-    drag = { x: e.clientX, y: e.clientY, moved: 0 };
-    hoverPt = null;
-    renderProbe();
+    if (mapPane.setPointerCapture) { try { mapPane.setPointerCapture(e.pointerId); } catch (err) {} }
+    dragStart(e.clientX, e.clientY);
   });
-  window.addEventListener("mouseup", () => {
-    if (drag && drag.moved > 4) suppressClick = true;   // 拖动结束那一下不算点击
-    drag = null;
+  mapPane.addEventListener("pointermove", (e) => { if (sawPointer) dragMove(e.clientX, e.clientY); });
+  mapPane.addEventListener("pointerup", () => dragEnd());
+  mapPane.addEventListener("pointercancel", () => dragEnd());
+  mapPane.addEventListener("mousedown", (e) => {
+    if (sawPointer) return;                            // 已经在走指针事件，避免重复触发
+    if (e.button !== 0 || interactive(e.target)) return;
+    dragStart(e.clientX, e.clientY);
   });
-  $("map").addEventListener("wheel", (e) => {
+  window.addEventListener("mouseup", () => { if (!sawPointer) dragEnd(); });
+  mapPane.addEventListener("wheel", (e) => {
     if (interactive(e.target)) return;
     e.preventDefault();
-    zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.2 : 1 / 1.2);
+    // 连续缩放：滚轮/触控板（含 ctrl+wheel 捏合）同一个路径，不再按固定 1.2 倍跳变
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+    const factor = Math.exp(-e.deltaY * unit * 0.0016);
+    zoomAt(e.clientX, e.clientY, factor);
   }, { passive: false });
-  window.addEventListener("resize", updateScaleBar);
+  window.addEventListener("resize", () => { applyZoom(false); });
 
   // ===== 地图：鼠标指到哪，就显示哪里的数据 =====
   const map = $("map");
-  let pending = null, raf = 0;
+  let pending = null, raf = 0, lastPinAt = 0;
   map.addEventListener("mousemove", (e) => {
-    if (drag) {
-      const rect = $("mapSvg").getBoundingClientRect();
-      const box = currentView();
-      const s = Math.max(rect.width / box.w, rect.height / box.h);
-      state.view.cx -= (e.clientX - drag.x) / s;
-      state.view.cy -= (e.clientY - drag.y) / s;
-      drag.moved += Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y);
-      drag.x = e.clientX;
-      drag.y = e.clientY;
-      applyZoom(false);
-      return;
-    }
+    if (drag && !sawPointer) { dragMove(e.clientX, e.clientY); return; }   // 合成鼠标事件（自动化）走这条
+    if (drag) return;
     const r = map.getBoundingClientRect();
     pending = { x: e.clientX - r.left, y: e.clientY - r.top, cx: e.clientX, cy: e.clientY };
     if (raf) return;
@@ -1786,6 +2042,7 @@ function bind() {
       pending = null;
       if (!p || state.probe) return;   // 已经钉住时，鼠标不再抢浮层
       const g = geoOfScreen(p.cx, p.cy);
+      if (!g) { hoverPt = null; renderProbe(); return; }   // 球面档：指到了球外
       hoverPt = { lon: g[0], lat: g[1], x: p.x, y: p.y };
       renderProbe();
     });
@@ -1795,6 +2052,7 @@ function bind() {
     if (suppressClick) { suppressClick = false; return; }   // 拖动之后的那一下不算点击
     if (e.target.closest && e.target.closest(".map-legend, .map-controls, .map-pick, .map-probe, .map-empty")) return;
     const g = geoOfScreen(e.clientX, e.clientY);
+    if (!g) { showToast("这一点在地球背面或球外，没有坐标"); return; }
     if (state.pickOrigin) {
       setOrigin(g[0], g[1], "map");
       return;
@@ -1808,9 +2066,17 @@ function bind() {
       const cell = cellAt(g[0], g[1]);
       state.probe = { lon: g[0], lat: g[1] };
       state.select = null;
+      lastPinAt = Date.now();
       showToast(!cell || !cell.inGrid ? "已钉住：这一点在导出范围外"
         : cell.nodata ? "已钉住：这一点没有观测数据" : "已钉住 " + fmtCoord(g[0], g[1]));
     }
+    renderLegend(); drawMap(); syncSelect(); renderPick(); renderProbe();
+  });
+  // 双击放大：第一下点击会先钉住，这里在 400 ms 内把它撤回（保持「点一下=钉住」的既有语义）
+  map.addEventListener("dblclick", (e) => {
+    if (e.target.closest && e.target.closest(".map-legend, .map-controls, .map-pick, .map-probe, .map-empty")) return;
+    if (state.probe && Date.now() - lastPinAt < 400) state.probe = null;
+    zoomAt(e.clientX, e.clientY, 1.7);
     renderLegend(); drawMap(); syncSelect(); renderPick(); renderProbe();
   });
   $("pickClose").addEventListener("click", () => {
@@ -1838,8 +2104,33 @@ function bind() {
   $("zoomIn").addEventListener("click", () => { const c = mapCenter(); zoomAt(c[0], c[1], 1.25); });
   $("zoomOut").addEventListener("click", () => { const c = mapCenter(); zoomAt(c[0], c[1], 1 / 1.25); });
   // 复位到「当前模式的默认视野」：服务器模式数据窗口更大，用 0.8 会把视野缩回东海
-  $("recenter").addEventListener("click",
-    () => centerOn(state.lon, state.lat, OFData.serverEnabled() ? SERVER_ZOOM : DEFAULT_ZOOM));
+  $("recenter").addEventListener("click", () => {
+    centerOn(state.lon, state.lat, OFData.serverEnabled() ? SERVER_ZOOM : DEFAULT_ZOOM);
+    showToast("视野已回到出发地");
+  });
+  $("globeReset").addEventListener("click", () => centerGlobe());
+
+  // 键盘：地图聚焦时方向键平移、+/- 缩放（可访问性；页签方向键逻辑不受影响）
+  $("map").setAttribute("tabindex", "0");
+  $("map").addEventListener("keydown", (e) => {
+    const step = 40;
+    const pan = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+    if (pan) {
+      e.preventDefault();
+      const box = currentView();
+      const s = $("mapSvg").getBoundingClientRect().width / box.w;
+      nudgeView(pan[0] / s, pan[1] / s, state.view.lat0);
+      const wasGlobe = globeMode();
+      syncView();
+      if (wasGlobe || globeMode()) drawMap(); else { applyZoom(false); refreshGraticule(); }
+      return;
+    }
+    if (e.key === "+" || e.key === "=" || e.key === "-" || e.key === "_") {
+      e.preventDefault();
+      const c = mapCenter();
+      zoomAt(c[0], c[1], e.key === "+" || e.key === "=" ? 1.25 : 1 / 1.25);
+    }
+  });
 
   // 图层开关（图例）
   document.querySelectorAll(".legend-row[data-layer]").forEach((row) => {
@@ -1914,10 +2205,20 @@ function bind() {
 }
 
 // ==================== 启动 ====================
+// 视野记忆：上次关掉时停在哪，这次就回到哪（localStorage 不可用 / 首次打开时用默认东海视野）
+const savedView = loadView();
+if (savedView) {
+  state.view.lon0 = savedView.lon0;
+  state.view.lat0 = savedView.lat0;
+  state.zoom = savedView.zoom;
+  viewRestored = true;
+}
 bind();
+syncView();
 refresh();
 applyZoom(false);      // 按 state.zoom 设定初始视野（默认略微拉远，海岸线在画面内）
 switchTab("now");
+if (viewRestored) showToast("已回到上次停留的视野（“◎”回到出发地，“🌍”看整颗地球）");
 
 // 服务器增强模式（可选）：成功则把日期范围扩到服务器上的全量日期并重渲染；
 // file:// 打开或 API 不可达时静默跳过，页面保持纯离线行为。
