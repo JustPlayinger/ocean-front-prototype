@@ -10,6 +10,7 @@
 重新生成数据见 [`docs/data-schema.md`](docs/data-schema.md) 与 [`frontend/prototype/data/README.md`](frontend/prototype/data/README.md)。
 **服务器部署**（公网访问 + 服务器端渲染）见 [`deploy/RUNBOOK.md`](deploy/RUNBOOK.md)。
 **换电脑接手**（另一台电脑拉仓库、配 SSH、接续三条取数队列）见 [`deploy/HANDOVER.md`](deploy/HANDOVER.md)。
+**与协作者仓（Ocean）的同步规范**见 [`docs/collab-sync.md`](docs/collab-sync.md)。
 
 ## 数据（真实接入部分）
 
