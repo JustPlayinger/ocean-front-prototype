@@ -228,6 +228,8 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy.ps1 -ServerIp <公网IP
 | 回环核对前端版本出错 | `curl 127.0.0.1/…` + `Host:` 头拿到的是另一份内容，误判"改了没生效" | 用公网 URL 核对（`curl -s http://116.62.54.140/prototype-fishing.js \| md5sum`），或按版本特征串 `grep -c` |
 | 栅格图层忘了走投影 | 球面档看到"几条直线把区域切开"的假三角形、球面上数据只剩作业海域附近（矩形是按平面常量摆的） | 画 RLE 一律经 `rlePath()`（球面档走 `rlePathGlobe()`：≤15° 切段 + 背面丢弃 + 贴球缘）；新增栅格图层不要在页面里自己拼屏幕矩形 |
 | 球面档拖动把球拖出画面 | 拖完球心不在画面正中（球被拖走、只剩半颗） | 球面档拖动/松手都必须走 `applyZoom()`（同步 viewBox），不能只调 `drawMap()`；e2e 有"球心 ±2px"回归断言 |
+| Windows 写的 `.sh` 带 CRLF | 传上服务器执行报 `$'\r': command not found` / `syntax error near unexpected token` | 传前转 LF，或服务器上 `tr -d '\r' < f > f.tmp && mv f.tmp f`；`bash -n f` 先验语法 |
+| 上游 ERDDAP 数据集重载 | 抓取日志全是 `404 Currently unknown datasetID=noaacwBLENDEDCsstDaily`，任务空烧重试、进度不涨 | 用 `tools/pipeline/sst_plan.sh`（先探上游再跑）；大面积 404 时先等上游恢复，别急着改代码 |
 ### 6.6 当前状态：待你决定 / 未推送的东西
 
 | 事项 | 现状 | 建议 |
