@@ -277,7 +277,7 @@
 5. 海况（风/浪/涌）是否有真实数据源？若有，应把"能不能出海"升为 L1 必答项并替换示例值。
 6. 指针查询是否需要"一次钉多个点"做对比（当前支持 1 个钉住点 + 指针临时查看）？
 7. **海表温度来源**：接 Copernicus C3S（需账号）还是先用 NOAA ACSPO 免登录产品打样？
-   → **v1.3 已定**：先用 **NOAA CoastWatch ERDDAP `noaacwBLENDEDCsstDaily`**（GHRSST Geo-Polar Blended 夜间融合，0.05° 逐日，免账号、可离线留存子集）打通到页面；页面与「依据」页都标明**与锋面数据集（ESA CCI/C3S）不是同一产品**。要同源再走 Copernicus C3S（`copernicusmarine` 命令模板已在 `Ocean/backend/app/data_preparation.py`）。
+   → **v1.3 已定**：先用 **NOAA CoastWatch ERDDAP `noaacwBLENDEDCsstDaily`**（GHRSST Geo-Polar Blended 夜间融合，0.05° 逐日，免账号、可离线留存子集）打通到页面；页面与「依据」页都标明**与锋面数据集（ESA CCI/C3S）不是同一产品**。要同源再走 Copernicus C3S（`copernicusmarine` 命令模板已在 `backend/app/data_preparation.py`）。
 8. **往年同期要补多少历史日期**？按月补齐后「这个月」口径才能真正出数（当前每年只取 3 天）。
    → v1.3 现状：样本＝2015—2024 的 8 月 5—7 日（个别年缺 1 天，页面按「有效天数」算并写明抽样口径）；日期页面已扩到 2024-07-01 ~ 08-31 共 62 天，「整月」口径仍需按月补历史样本。
 9. **渔场数据与许可**：GFW 公开数据是非商业授权，是否申请商业许可 / 改用合作方 AIS 数据？
