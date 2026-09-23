@@ -49,6 +49,18 @@
 
   推成功（需要 GitHub 凭据/令牌）再换电脑；**没推成功就别换**，否则今天所有修复（catalog 缓存、
   2 worker、sync 修复、ops 脚本…）都拿不到。
+- **推不上去的兜底**：用 `git bundle` 把分支整个打包成单文件带走（不需要网络/远端）：
+
+  ```powershell
+  # 旧电脑
+  git bundle create C:\ocean-restructure.bundle restructure
+  # 新电脑（bundle 就是个可以 clone 的仓库）
+  git clone C:\ocean-restructure.bundle ocean-front-prototype
+  cd ocean-front-prototype
+  git remote set-url origin https://github.com/JustPlayinger/ocean-front-prototype.git
+  git checkout restructure
+  ```
+
 - 新电脑：
 
   ```bash
