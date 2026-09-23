@@ -153,6 +153,21 @@ Remove-Item Env:\PAGE
 
 跨域部署（前后端不同源）时，在页面显式指定：`window.OF_API_BASE = "http://<IP>/api"`。
 
+### 图层与锋面强度（2026-09-23 上线）
+
+- **图层开关**在地图右上角「☰」呼出的抽屉里（默认收起，`✕` 或再点收起），共 7 个图层；机制仍是
+  `data-layer` + `state.layers`，新增图层只要在这里加一行并在 `drawDataLayers()` 里加一段绘制。
+- **渔场线索图层**（默认关）：数据来自 `GET /api/fishing/<date>`（GFW apparent fishing effort，0.1°）。
+  渲染取当日 `hours` 的**前 40%（≥ P60）**画暖色圆点，半径与不透明度随 `hours` 递增，**上限 700 点**兜底；
+  低于 P60 的格子不画 —— 这是「可写覆盖内无作业不渲染」，**不是**把缺失当 0。
+  ⚠️ 边界：界面与图例必须写「表观捕捞活动（fishing hours），不等于渔获量 / 产量」（`docs/data-governance-gfw-ais.md`）。
+  离线（`file://`）没有该数据源，图层开关可点但无渲染，属预期。
+- **锋面强度**：口径＝**跨锋面 SST 温差 / 梯度**（数据集自带的 `frontal_intensity` 未下载，约 90 GB；
+  需求文档 §6.2 把「`frontal_intensity` 与局地温度梯度」并列，故用温度差作口径，界面始终写明）。
+  实现见 `frontend/prototype/prototype-data.js` 的 `frontIntensity()`：把锋面折线投影到局部 km 平面 →
+  沿法向两侧各偏 10 km → 反投影回经纬度 → 用 `sstCell()` 取**真实档位温度（不插值）**，最多 12 个断面取均值；
+  两侧任一为缺测则该断面不参与，**不用 0 顶替**。选中锋面时在回执卡显示强度，结论行的首选/最近锋面也带强度等级。
+
 ## 阶段 C · 验收
 
 ```powershell
