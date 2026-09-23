@@ -47,6 +47,12 @@ foreach ($year in $Years) {
     Write-Host "[$year] 本地 $($local.Count) · 服务器 $($remote.Count) · 待传 $($missing.Count)"
     if (-not $missing) { continue }
 
+    # scp 不会创建远程目录：2014 及更早的年份目录还不存在时，
+    # `scp file ocean:/path/2014/` 会直接报 "No such file or directory" 并让整轮同步中断
+    # （实测：1992–2014 的文件因此从没传上去过）。所以先把年份目录建好。
+    & ssh @sshArgs "mkdir -p $RemoteRoot/$year"
+    if ($LASTEXITCODE -ne 0) { throw "无法创建远程目录：$RemoteRoot/$year" }
+
     for ($i = 0; $i -lt $missing.Count; $i += $BatchSize) {
         $end = [Math]::Min($i + $BatchSize - 1, $missing.Count - 1)
         $batch = @($missing[$i..$end])
