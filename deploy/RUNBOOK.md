@@ -170,6 +170,22 @@ Remove-Item Env:\PAGE
   看 `X-Payload-Cache` 与 `%{time_total}`。
 - **流量特征**：页面启动/换日期时前端会**预热一次全球 2° 概览**（`bbox=-180,-90,180,90&step=40`，≈89 KB），
   之后每个新视野窗口再各一次；同一窗口不重复取，失败 20 s 后才重试。日常演示每天的请求数是个位数。
+
+### 海温两级（v1.11）：东海明细 + 全球粗格
+
+- `raw/sst/`（东海 120.03–128.02°E / 27.02–34.03°N，0.05°，5,300+ 天，≈640MB）：**作业海域的明细**，
+  由 `tools/pipeline/sst_pipeline.py` 逐年补（后台常驻，2022 → 2002）。
+- `raw/sst_global/`（全球，1° = `--stride 20`，单日 ≈0.3MB；全量 2002–2024 ≈2.5GB）：**别处的粗格概览**，
+  由 `tools/pipeline/sst_global_pipeline.py` 抓（同样后台常驻、可续跑）：
+  ```bash
+  cd /opt/ocean && OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw \
+    setsid nohup /opt/ocean/venv/bin/python tools/pipeline/sst_global_pipeline.py \
+      --stride 20 --years 2024 > /var/log/ocean-sst-global.log 2>&1 &
+  ```
+  后端 `GET /api/frontend/day` 会同时给 `sst`（东海明细）与 `sst_coarse`（全球粗格），前端粗格垫底、明细压上。
+- 单日全球子集在 ERDDAP 侧要现裁 1–3 分钟，**必须 nohup/setsid**（前台 ssh 一断就被杀）。
+- ⚠️ ERDDAP 偶发 `Currently unknown datasetID=...`（上游在重载数据集，不是我们的错）：
+  脚本带 `--retries` 会自己重试；大面积 404 时先等上游恢复（见 §6 排障表）。
 - ⚠️ **发布后核对前端版本**：改完前端用**公网 URL** 核对内容指纹，别用 `curl 127.0.0.1` + `Host:` 头
   （本机回环那条路径可能落到另一个站点/缓存，会得出"没生效"的错误结论）：
   `curl -s http://116.62.54.140/prototype-fishing.js | md5sum` 对比 `md5sum /opt/ocean/frontend/prototype/prototype-fishing.js`，
