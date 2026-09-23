@@ -89,12 +89,45 @@ cmd_erddap() {
   bash "$(dirname "$0")/probe-erddap.sh"
 }
 
+cmd_years() {
+  echo "===== 逐年覆盖（锋面 / 海温 / 渔场）====="
+  printf '  %-6s %6s %6s %6s\n' 年份 锋面 海温 渔场
+  for year in $(seq 1982 2026); do
+    front=$(ls "$RAW"/front/"$year"/*.nc 2>/dev/null | wc -l)
+    sst=$(ls "$RAW"/sst/"$year"/*.nc 2>/dev/null | wc -l)
+    fish=$(ls "$RAW"/fishing/effort-"$year"*.json 2>/dev/null | wc -l)
+    if [ "$front" -eq 0 ] && [ "$sst" -eq 0 ] && [ "$fish" -eq 0 ]; then continue; fi
+    printf '  %-6s %6s %6s %6s\n' "$year" "$front" "$sst" "$fish"
+  done
+  echo
+  printf '  合计   %6s %6s %6s\n' \
+    "$(find "$RAW"/front -name '*.nc' 2>/dev/null | wc -l)" \
+    "$(find "$RAW"/sst -name '*.nc' 2>/dev/null | wc -l)" \
+    "$(ls "$RAW"/fishing/effort-*.json 2>/dev/null | wc -l)"
+}
+
+cmd_growth() {
+  a_front=$(find "$RAW"/front -name '*.nc' 2>/dev/null | wc -l)
+  a_sst=$(find "$RAW"/sst -name '*.nc' 2>/dev/null | wc -l)
+  a_fish=$(ls "$RAW"/fishing/effort-*.json 2>/dev/null | wc -l)
+  printf '%s  锋面=%s 海温=%s 渔场=%s\n' "$(date +%H:%M:%S)" "$a_front" "$a_sst" "$a_fish"
+  sleep 30
+  b_front=$(find "$RAW"/front -name '*.nc' 2>/dev/null | wc -l)
+  b_sst=$(find "$RAW"/sst -name '*.nc' 2>/dev/null | wc -l)
+  b_fish=$(ls "$RAW"/fishing/effort-*.json 2>/dev/null | wc -l)
+  printf '%s  锋面=%s 海温=%s 渔场=%s\n' "$(date +%H:%M:%S)" "$b_front" "$b_sst" "$b_fish"
+  printf '30 秒增量：锋面 +%s · 海温 +%s · 渔场 +%s\n' \
+    "$((b_front - a_front))" "$((b_sst - a_sst))" "$((b_fish - a_fish))"
+}
+
 case "${1:-all}" in
   health) cmd_health ;;
   data) cmd_data ;;
+  years) cmd_years ;;
+  growth) cmd_growth ;;
   perf) cmd_perf ;;
   logs) cmd_logs ;;
   erddap) cmd_erddap ;;
   all) cmd_health; echo; cmd_data; echo; cmd_logs ;;
-  *) echo "用法: bash server-ops.sh {health|data|perf|logs|erddap|all}"; exit 2 ;;
+  *) echo "用法: bash server-ops.sh {health|data|years|growth|perf|logs|erddap|all}"; exit 2 ;;
 esac

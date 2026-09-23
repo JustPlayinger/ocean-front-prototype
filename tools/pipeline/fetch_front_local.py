@@ -115,6 +115,40 @@ def main() -> int:
     log(f"队列：{len(base_years)} 年 × {passes} 轮 · {base_years[0]} → {base_years[-1]} · 并发 {args.workers}"
         f" · 每批 {args.batch_size} 天 · 同步={'关闭' if args.no_sync else '开启'}")
 
+    # 上传（scp 到服务器）比下载慢得多，所以同步放后台、不阻塞下载：
+    # 上一次同步还在跑就跳过这次，它落地时会把期间新下的文件一起带上。
+    sync_process: subprocess.Popen | None = None
+    sync_handles: list = []
+
+    def sync_command(*, rebuild_index: bool) -> list[str]:
+        command = ["powershell", "-ExecutionPolicy", "Bypass", "-NoProfile", "-File", str(SYNC_PS1)]
+        if not rebuild_index:
+            command.append("-SkipIndexRebuild")
+        return command
+
+    def kick_sync(*, rebuild_index: bool) -> None:
+        nonlocal sync_process
+
+        if args.no_sync:
+            return
+        if sync_process is not None:
+            code = sync_process.poll()
+            if code is None:
+                log("   sync: 上一轮同步还在跑，跳过本次（不阻塞下载）")
+                return
+            log(f"   sync: 上一轮同步结束 exit={code}")
+        sync_log = args.log.with_name("front-sync.log")
+        sync_log.parent.mkdir(parents=True, exist_ok=True)
+        handle = sync_log.open("a", encoding="utf-8")
+        sync_handles.append(handle)
+        handle.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 开始同步 =====\n")
+        handle.flush()
+        sync_process = subprocess.Popen(
+            sync_command(rebuild_index=rebuild_index),
+            stdout=handle, stderr=subprocess.STDOUT, cwd=str(REPO),
+        )
+        log(f"   sync: 已启动后台同步，日志 {sync_log}")
+
     for year in years:
         if free_gb(REPO) < args.min_free_gb:
             log(f"本地磁盘可用不足 {args.min_free_gb} GB，停止队列（已下的文件都在，重启本脚本会续跑）")
@@ -147,14 +181,18 @@ def main() -> int:
         with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
             for index, code, fetched, seconds in pool.map(run_chunk, list(enumerate(chunks, start=1))):
                 log(f"   {year} 批 {index}/{len(chunks)} exit={code} 已落盘 {fetched} 天 用时 {seconds:.0f}s")
-                if not args.no_sync:
-                    sync = subprocess.run(
-                        ["powershell", "-ExecutionPolicy", "Bypass", "-NoProfile", "-File", str(SYNC_PS1)]
-                        + ([] if index == len(chunks) else ["-SkipIndexRebuild"]),
-                        capture_output=True, text=True, cwd=str(REPO),
-                    )
-                    tail = (sync.stdout or "").strip().splitlines()
-                    log("   sync: " + (tail[-1] if tail else f"exit={sync.returncode}"))
+                kick_sync(rebuild_index=index == len(chunks))
+
+    if not args.no_sync:
+        if sync_process is not None and sync_process.poll() is None:
+            log("   等待最后一轮后台同步结束…")
+            sync_process.wait()
+        log("   最后再同步一次：补齐期间新下的文件并重建索引")
+        final = subprocess.run(sync_command(rebuild_index=True), capture_output=True, text=True, cwd=str(REPO))
+        tail = (final.stdout or "").strip().splitlines()
+        log("   sync: " + (tail[-1] if tail else f"exit={final.returncode}"))
+        for handle in sync_handles:
+            handle.close()
 
     log("队列跑完")
     return 0

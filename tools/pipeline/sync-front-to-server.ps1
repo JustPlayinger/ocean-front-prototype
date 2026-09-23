@@ -11,7 +11,7 @@
 param(
     [string]$Server = 'root@116.62.54.140',
     [string]$RemoteRoot = '/srv/ocean/data/raw/front',
-    [string[]]$Years = @('2015', '2016', '2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024'),
+    [string[]]$Years = @(),
     [string]$KeyPath = (Join-Path $env:USERPROFILE '.ssh\id_ed25519_ocean'),
     [int]$BatchSize = 60,
     [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
@@ -21,6 +21,19 @@ $ErrorActionPreference = 'Stop'
 $sshArgs = @('-n', '-i', $KeyPath, '-o', 'StrictHostKeyChecking=accept-new', $Server)
 $localRoot = Join-Path $RepoRoot 'data\raw\front'
 $totalUploaded = 0
+
+# 默认同步"本地实际存在的所有年份"。
+# 这里曾经硬编码 2015–2024，结果 1991–2014 下好了却从没上传（服务器上正好卡在 3653 个文件 =
+# 2015–2024 十年），排查了很久才发现——所以改成自动探测，别再写死年份。
+if (-not $Years -or $Years.Count -eq 0) {
+    $Years = @(
+        Get-ChildItem $localRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d{4}$' } |
+            Sort-Object Name -Descending |
+            Select-Object -ExpandProperty Name
+    )
+    Write-Host "未指定 -Years，按本地目录自动同步这些年份：$($Years -join ',')"
+}
 
 foreach ($year in $Years) {
     $localDir = Join-Path $localRoot $year
