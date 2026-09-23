@@ -9,6 +9,7 @@
 浏览器直接打开 `frontend/prototype/prototype-fishing.html` 即可（改完建议 `Ctrl+F5` 强刷）；页面内的数据路径全是相对路径，移动整个 `frontend/prototype/` 目录也不影响。
 重新生成数据见 [`docs/data-schema.md`](docs/data-schema.md) 与 [`frontend/prototype/data/README.md`](frontend/prototype/data/README.md)。
 **服务器部署**（公网访问 + 服务器端渲染）见 [`deploy/RUNBOOK.md`](deploy/RUNBOOK.md)。
+**换电脑接手**（另一台电脑拉仓库、配 SSH、接续三条取数队列）见 [`deploy/HANDOVER.md`](deploy/HANDOVER.md)。
 
 ## 数据（真实接入部分）
 
@@ -99,6 +100,7 @@ ocean-front-prototype/                    # 产品仓（origin: JustPlayinger/oc
 │   ├── nginx/ocean.conf                  # 站点：/ → 前端，/api/ → 127.0.0.1:8000
 │   ├── systemd/ocean-api.service         # uvicorn 常驻
 │   └── RUNBOOK.md                        # 实施手册（含排错对照表与编码约定）
+│   └── HANDOVER.md                       # 换电脑接手：速览 + [A]拿代码/[B]配SSH/[C]续队列 + 排错手册
 ├── docs/
 │   ├── handover.md                       # 交接文档（已实现 / 欠缺 / 交接事项）
 │   ├── data-schema.md                    # 数据契约（来源/结构/生成/已知问题）
@@ -108,7 +110,8 @@ ocean-front-prototype/                    # 产品仓（origin: JustPlayinger/oc
 └── README.md
 ```
 
-> 交接先看 **`docs/handover.md`**（运行与验收命令、数据结构、评分口径、欠缺清单、已知坑、演示话术）；部署先看 **`deploy/RUNBOOK.md`**。
+> 交接先看 **`docs/handover.md`**（运行与验收命令、数据结构、评分口径、欠缺清单、已知坑、演示话术）；
+> **换电脑接手 / 取数队列接续**先看 **`deploy/HANDOVER.md`**；部署先看 **`deploy/RUNBOOK.md`**。
 
 > 两处 `data/` 的分工：`frontend/prototype/data/` 是**随页面发布的离线兜底导出物**（入库）；
 > `data/raw` 是**原始 NetCDF 与运行产物**（不入库，只在本地与服务器之间同步，服务器上是 `/srv/ocean/data`）。
