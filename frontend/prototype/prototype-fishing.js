@@ -317,9 +317,54 @@ function smoothPathOf(pts) {
 // 多条折线合成一个 path（一个 DOM 节点，几千段也不卡）
 function chainLinesPath(chains) { return chains.map((pts) => pathOf(pts)).join(" "); }
 
+// 概览档的锋面线：把聚合格按「行中线」画成细线段 —— 位置照实、但不假装一格 2° 宽的带。
+// 相邻行的线段视觉上自然连成锋面线；平面档直接连直线，球面档按 ≤15° 采样并断开背面段。
+function bandSegmentPath(runs, grid) {
+  let d = "";
+  let open = null;
+  const flush = () => {
+    if (!open) return;
+    const lat = grid.lat0 + (open.row + open.rows / 2) * grid.dlat;
+    const lonA = grid.lon0 + open.col * grid.dlon;
+    const lonB = lonA + open.count * grid.dlon;
+    if (globeMode()) {
+      const segs = Math.max(1, Math.ceil((lonB - lonA) / RLE_SEG_DEG));
+      const pts = [];
+      let anyVisible = false;
+      for (let k = 0; k <= segs; k++) {
+        const lon = lonA + ((lonB - lonA) * k) / segs;
+        pts.push([lon, lat]);
+        if (OFMap.visible(lon, lat, _view)) anyVisible = true;
+      }
+      if (anyVisible) d += OFMap.path(pts, _view, {});
+    } else {
+      const a = xy(lonA, lat), b = xy(lonB, lat);
+      d += "M" + a[0].toFixed(1) + "," + a[1].toFixed(1) + "L" + b[0].toFixed(1) + "," + b[1].toFixed(1);
+    }
+    open = null;
+  };
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i];
+    if (open && run[0] === open.row + open.rows && run[1] === open.col && run[2] === open.count) {
+      open.rows += 1;
+    } else {
+      flush();
+      open = { row: run[0], col: run[1], count: run[2], rows: 1 };
+    }
+  }
+  flush();
+  return d;
+}
+
 // 逐行 RLE 还原成矩形（每格一个矩形，合成一个 path；不插值、不放大）
 // 相邻行里起止相同的 run 会合并成一个矩形，避免 0.05° 格子拼出"马赛克 + 缝"
+// ⚠️ 平面档是线性投影 → 可以直接用屏幕矩形拼（快、无缝）；
+//    球面档**必须走投影**（否则矩形按平面常量摆到盘外，看起来就是"几条直线把区域切开"）。
 function rlePath(runs, grid) {
+  return globeMode() ? rlePathGlobe(runs, grid) : rlePathPlane(runs, grid);
+}
+
+function rlePathPlane(runs, grid) {
   const w = grid.dlon * PX_LON;
   const h = grid.dlat * PX_LAT;
   let d = "";
@@ -330,6 +375,47 @@ function rlePath(runs, grid) {
     const yTop = 320 - (grid.lat0 + (open.row + open.rows) * grid.dlat - ANCHOR.lat) * PX_LAT;
     d += "M" + x.toFixed(1) + "," + yTop.toFixed(1) + "h" + (open.count * w).toFixed(1) +
       "v" + (open.rows * h).toFixed(1) + "h" + (-open.count * w).toFixed(1) + "z";
+    open = null;
+  };
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i];
+    if (open && run[0] === open.row + open.rows && run[1] === open.col && run[2] === open.count) {
+      open.rows += 1;
+    } else {
+      flush();
+      open = { row: run[0], col: run[1], count: run[2], rows: 1 };
+    }
+  }
+  flush();
+  return d;
+}
+
+// 球面档：把每个 run 沿经度切成 ≤ SEG_DEG 的小条，逐条按正交投影画。
+// - 整条在背面 → 不画（这是原来"大三角形"的来源：背面四角被直接连线）；
+// - 跨地平线 → 交给 OFMap.path(rim)，背面角自动贴到球缘，保持闭合、不连线穿球。
+// SEG_DEG 取 15°：正交投影在 15° 内的弦高误差 <1%（球面上≈1 像素级），点数是原来的 1/8~1/4。
+const RLE_SEG_DEG = 15;
+function rlePathGlobe(runs, grid) {
+  const segCols = Math.max(1, Math.round(RLE_SEG_DEG / Math.max(grid.dlon, 0.001)));
+  let d = "";
+  let open = null;
+  const flush = () => {
+    if (!open) return;
+    const c0 = open.col, c1 = open.col + open.count;
+    const latMin = grid.lat0 + open.row * grid.dlat;
+    const latMax = latMin + open.rows * grid.dlat;
+    for (let c = c0; c < c1; c += segCols) {
+      const cols = Math.min(segCols, c1 - c);
+      const lonMin = grid.lon0 + c * grid.dlon;
+      const lonMax = lonMin + cols * grid.dlon;
+      const ring = [[lonMin, latMin], [lonMax, latMin], [lonMax, latMax], [lonMin, latMax]];
+      let anyVisible = false;
+      for (let k = 0; k < ring.length && !anyVisible; k++) {
+        anyVisible = OFMap.visible(ring[k][0], ring[k][1], _view);
+      }
+      if (!anyVisible) continue;
+      d += OFMap.path(ring, _view, { closed: true, rim: true });
+    }
     open = null;
   };
   for (let i = 0; i < runs.length; i++) {
@@ -536,9 +622,16 @@ function drawFrontPatch(svg, patch, sel) {
 
   // 锋面带：数据里的 -10 / 10 / 30 像元原样画；编码含义有歧义，图上不解释
   if (state.layers.band) {
-    el("path", { d: rlePath(day.front_band_rle || [], grid), "data-layer": "band",
-      fill: "rgba(255,236,170,0.5)", stroke: "none", "shape-rendering": "crispEdges",
-      opacity: 0.9 * dim("front") * alpha }, svg);
+    if (patch.overview) {
+      // 概览档：按聚合格的行中线画细线（否则 2° 的块铺开会把全球涂成一片黄）
+      el("path", { d: bandSegmentPath(day.front_band_rle || [], grid), "data-layer": "band",
+        fill: "none", stroke: "rgba(255,236,170,0.9)", "stroke-width": 1.3,
+        "stroke-linecap": "round", opacity: 0.95 * dim("front") * alpha }, svg);
+    } else {
+      el("path", { d: rlePath(day.front_band_rle || [], grid), "data-layer": "band",
+        fill: "rgba(255,236,170,0.5)", stroke: "none", "shape-rendering": "crispEdges",
+        opacity: 0.9 * dim("front") * alpha }, svg);
+    }
   }
 
   // 锋面线：只有明细片才有对象中心线与未编号短段（概览片后端不返回对象清单）
@@ -1671,6 +1764,18 @@ function loadThenRefresh(iso) {
     if (state.date !== iso) return;              // 期间用户又换了日期，丢弃这次结果
     if (!ok && !OFData.hasDay(iso)) showToast(mdText(iso) + " 没取到，请换个日期");
     refresh();
+    warmOverview(iso);                            // 顺手把全球 2° 概览取回来，缩到球面立刻有数据
+  });
+}
+
+// 预热全球概览：这一次取数不打乱界面（后台进行），到位后只重画地图
+function warmOverview(iso) {
+  if (!OFData.serverEnabled()) return;
+  OFData.prefetchOverview(iso).then(function (ok) {
+    if (!ok || state.date !== iso) return;
+    invalidate();
+    drawMap();
+    syncViewHint();
   });
 }
 
@@ -1967,6 +2072,7 @@ function centerGlobe() {
   } else {
     state.zoom = zoomOutLimit();
     centerOn(127.5, 24, state.zoom);
+    warmOverview(state.date);                     // 立刻去取全球概览，别等松手后的防抖
     showToast("已缩到整颗地球（滚轮可放大）");
   }
 }
@@ -2104,12 +2210,12 @@ function bind() {
     const wasGlobe = globeMode();
     syncView();
     if (wasGlobe || globeMode()) {
-      // 球面档：转动的是球面，必须重投影（rAF 节流，一帧最多重画一次）；
-      // 拖动中先跳过数据片（概览层也要重投影几千条游程），松手时再补上
+      // 球面档：拖动的是「球体转动」——中心点始终留在画面正中的球心，
+      // 所以必须走 applyZoom（它会同步 viewBox），只调 drawMap 会让球被拖出画面。
       if (!drag.raf) {
         drag.raf = requestAnimationFrame(() => {
           if (drag) drag.raf = 0;
-          drawMap({ skipData: true });
+          applyZoom(false, { skipData: true });
         });
       }
     } else {
@@ -2122,7 +2228,7 @@ function bind() {
     if (drag && drag.moved > 4) suppressClick = true;  // 拖动结束那一下不算点击
     const moved = !!(drag && drag.moved > 4);
     if (drag) { drag = null; saveViewSoon(); }
-    if (moved && globeMode()) drawMap();               // 松手：把数据片补回来
+    if (moved && globeMode()) applyZoom(false);       // 松手：同步 viewBox 并补回数据片
     const host = $("gratHost");
     if (host && !globeMode()) refreshGraticule();
     if (globeMode()) updateScaleBar();

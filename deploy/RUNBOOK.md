@@ -168,6 +168,8 @@ Remove-Item Env:\PAGE
   查缓存：`ls -lt /srv/ocean/data/cache/frontend_payload | head`、`du -sh`；清缓存：`rm -f .../v1_*.json`（安全，随时重算）。
 - **运维核对**：`curl -s -D- -o /dev/null "http://127.0.0.1:8000/api/frontend/day/2024-08-05?bbox=-55,25,-35,45"`
   看 `X-Payload-Cache` 与 `%{time_total}`。
+- **流量特征**：页面启动/换日期时前端会**预热一次全球 2° 概览**（`bbox=-180,-90,180,90&step=40`，≈89 KB），
+  之后每个新视野窗口再各一次；同一窗口不重复取，失败 20 s 后才重试。日常演示每天的请求数是个位数。
 - ⚠️ **发布后核对前端版本**：改完前端用**公网 URL** 核对内容指纹，别用 `curl 127.0.0.1` + `Host:` 头
   （本机回环那条路径可能落到另一个站点/缓存，会得出"没生效"的错误结论）：
   `curl -s http://116.62.54.140/prototype-fishing.js | md5sum` 对比 `md5sum /opt/ocean/frontend/prototype/prototype-fishing.js`，

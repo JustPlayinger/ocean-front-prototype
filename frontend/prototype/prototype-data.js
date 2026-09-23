@@ -134,11 +134,18 @@
   /** 服务器上是否存在该日期（不代表已加载）。 */
   function serverAvailable(iso) { return !!(SERVER.enabled && SERVER.dateSet[iso]); }
 
-  /** 按需把服务器单日数据注入 DAYS/SST；并发同一天只发一次，失败记住不重试。
-   *  force=true 时忽略本地已有数据（服务器窗口比离线兜底大，需要覆盖）。 */
+  /** 失败重试间隔：太短会连着打服务器，太长则用户在视野里看不到数据。
+   *  （后端重启/网络抖动会造成 502，之前失败后被永久记住 → 那一片就永远是空的。） */
+  const RETRY_MS = 20000;
+  const retryable = function (record, key) {
+    const at = record[key];
+    return !at || Date.now() - at < RETRY_MS;
+  };
+
+  /** 按需把服务器单日数据注入 DAYS/SST；并发同一天只发一次，失败后 20s 允许重试。 */
   function ensureDay(iso, force) {
     if (!force && Object.prototype.hasOwnProperty.call(DAYS, iso)) return Promise.resolve(true);
-    if (!serverAvailable(iso) || SERVER.failed[iso]) return Promise.resolve(false);
+    if (!serverAvailable(iso) || !retryable(SERVER.failed, iso)) return Promise.resolve(false);
     if (SERVER.inflight[iso]) return SERVER.inflight[iso];
     const url = SERVER.base + "/frontend/day/" + iso;
     const task = fetch(url, { cache: "no-store" })
@@ -151,9 +158,10 @@
         DAYS[iso] = payload.front;
         if (payload.sst) SST[iso] = payload.sst;
         if (payload.window) addPatch(iso, payload, true);   // 注册成「主片」（作业海域，永远是 0.05°）
+        delete SERVER.failed[iso];
         return true;
       })
-      .catch(function () { SERVER.failed[iso] = true; return false; })
+      .catch(function () { SERVER.failed[iso] = Date.now(); return false; })
       .then(function (ok) { delete SERVER.inflight[iso]; return ok; });
     SERVER.inflight[iso] = task;
     return task;
@@ -243,28 +251,45 @@
     return entry;
   }
 
-  /** 取某天当前视野的窗口片；已经取过/正在取/取不到都不重复打服务器 */
-  function ensureViewport(iso) {
-    if (!SERVER.enabled || !VIEW_WINDOW.bbox) return Promise.resolve(false);
-    const key = VIEW_WINDOW.key;
+  /** 取一片窗口数据（视野片与预热共用）：同一个 key 只发一次，失败 20s 后可重试 */
+  function fetchPatch(iso, key, url) {
     const list = PATCHES[iso] || [];
     if (list.some(function (item) { return item.key === key; })) return Promise.resolve(true);
-    if (VIEW_WINDOW.failed[key]) return Promise.resolve(false);
+    if (!retryable(VIEW_WINDOW.failed, key)) return Promise.resolve(false);
     if (VIEW_WINDOW.inflight[key]) return VIEW_WINDOW.inflight[key];
-    const url = SERVER.base + "/frontend/day/" + iso +
-      "?bbox=" + VIEW_WINDOW.bbox.join(",") + "&step=" + VIEW_WINDOW.step;
     const task = fetch(url, { cache: "no-store" })
       .then(function (response) {
         if (!response.ok) throw new Error("frontend/day window HTTP " + response.status);
         return response.json();
       })
       .then(function (payload) {
-        return !!addPatch(iso, payload, false);
+        const ok = !!addPatch(iso, payload, false);
+        if (ok) delete VIEW_WINDOW.failed[key];
+        return ok;
       })
-      .catch(function () { VIEW_WINDOW.failed[key] = true; return false; })
+      .catch(function () { VIEW_WINDOW.failed[key] = Date.now(); return false; })
       .then(function (ok) { delete VIEW_WINDOW.inflight[key]; return ok; });
     VIEW_WINDOW.inflight[key] = task;
     return task;
+  }
+
+  /** 取某天当前视野的窗口片 */
+  function ensureViewport(iso) {
+    if (!SERVER.enabled || !VIEW_WINDOW.bbox) return Promise.resolve(false);
+    return fetchPatch(iso, VIEW_WINDOW.key,
+      SERVER.base + "/frontend/day/" + iso +
+      "?bbox=" + VIEW_WINDOW.bbox.join(",") + "&step=" + VIEW_WINDOW.step);
+  }
+
+  /** 预热「整颗地球 2° 概览」：服务器模式下启动就把全球锋面拿一次，
+   *  这样缩到球面立刻有数据（不必等 0.42s 防抖 + 首次 ~2s 现算；服务器侧也有缓存）。 */
+  const GLOBAL_BBOX = [-180, -90, 180, 90];
+  const OVERVIEW_STEP = 40;                       // 2°：全球 180×90，实测 89KB / 缓存命中 0.03s
+  function prefetchOverview(iso) {
+    if (!SERVER.enabled) return Promise.resolve(false);
+    const key = bboxKey(GLOBAL_BBOX, OVERVIEW_STEP);
+    return fetchPatch(iso, key,
+      SERVER.base + "/frontend/day/" + iso + "?bbox=" + GLOBAL_BBOX.join(",") + "&step=" + OVERVIEW_STEP);
   }
 
   /** 渲染用：该日所有数据片，按「粗 → 细」排（概览先画，明细压在上面） */
@@ -473,6 +498,7 @@
     setViewWindow: setViewWindow,
     viewWindow: viewWindow,
     ensureViewport: ensureViewport,
+    prefetchOverview: prefetchOverview,
     workingWindow: workingWindow,
     stepForWindow: stepForWindow,
 

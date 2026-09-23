@@ -949,6 +949,18 @@ check("球面档能拖动转动地球（中心经纬度随之改变，纬度夹�
   && Math.abs(globeDrag.after.lat) <= 89 && globeDrag.span === globeOut.span,
   JSON.stringify(globeDrag.before) + " → " + JSON.stringify(globeDrag.after));
 
+// 拖动是「球体转动」：球心必须一直在画面正中（曾经只调 drawMap 不更新 viewBox，球会被拖出画面）
+const globeCenter = await evalJS(`var m = document.getElementById("map").getBoundingClientRect();
+  var disc = document.querySelector('#mapSvg circle[data-layer="globe"]');
+  var db = disc ? disc.getBoundingClientRect() : null;
+  return db ? { dx: Math.round((db.left + db.width / 2) - (m.left + m.width / 2)),
+    dy: Math.round((db.top + db.height / 2) - (m.top + m.height / 2)),
+    mapW: Math.round(m.width), viewBox: document.getElementById("mapSvg").getAttribute("viewBox"),
+    center: [Math.round(state.view.lon0), Math.round(state.view.lat0)] } : { missing: true };`);
+check("球面档拖动后球心仍在画面正中（viewBox 跟着中心走，不是把球拖出画面）",
+  globeCenter.missing !== true && Math.abs(globeCenter.dx) <= 2 && Math.abs(globeCenter.dy) <= 2,
+  JSON.stringify(globeCenter));
+
 const planeBack = await evalJS(`document.getElementById("globeReset").click();
   return { mode: OFMap.modeOf(OFMap.spanOf(state.zoom)), span: Math.round(OFMap.spanOf(state.zoom)),
     sst: document.querySelectorAll('#mapSvg path[data-layer="sst"]').length,
