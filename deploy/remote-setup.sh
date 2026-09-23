@@ -90,7 +90,10 @@ fi
 # ---------- 7. Nginx 站点 ----------
 if [ -f "$APP_DIR/deploy/nginx/ocean.conf" ]; then
   log "7/8 安装 Nginx 站点（server_name=$SERVER_IP）"
-  sed "s/@SERVER_IP@/$SERVER_IP/g" "$APP_DIR/deploy/nginx/ocean.conf" > /etc/nginx/sites-available/ocean
+  # 别名占位符：@SS_IP@ = IP 连字符形式（116-62-54-140，sslip.io 的写法）；@SERVER_IP@ = 点分 IP
+  IP_DASHED="${SERVER_IP//./-}"
+  sed -e "s/@SERVER_IP@/$SERVER_IP/g" -e "s/@SS_IP@/$IP_DASHED/g" \
+      "$APP_DIR/deploy/nginx/ocean.conf" > /etc/nginx/sites-available/ocean
   ln -sf /etc/nginx/sites-available/ocean /etc/nginx/sites-enabled/ocean
   nginx -t
   systemctl enable nginx >/dev/null 2>&1 || true

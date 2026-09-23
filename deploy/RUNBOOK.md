@@ -153,6 +153,26 @@ Remove-Item Env:\PAGE
 
 跨域部署（前后端不同源）时，在页面显式指定：`window.OF_API_BASE = "http://<IP>/api"`。
 
+### 访问入口与域名（2026-09-23）
+
+| 入口 | 可用性 | 说明 |
+|---|---|---|
+| `http://116.62.54.140/` | ✅ 公网可达（外部实测 200） | 主入口。本机无 ufw/iptables 拦截，nginx 监听 0.0.0.0:80；对外可达说明 **ECS 安全组已放行 80（0.0.0.0/0）** |
+| `http://haifeng.116-62-54-140.sslip.io/`<br>`http://ocean-front.116-62-54-140.sslip.io/` | ✅ 已配置并实测 200 | **免注册别名**：sslip.io / nip.io 是公共通配 DNS，`任意前缀.<IP 连字符形式>.sslip.io` 直接解析到该 IP。nginx 里已加精确名 + `~^.+\.116-62-54-140\.sslip\.io$` / `~^.+\.116\.62\.54\.140\.nip\.io$` 通配（改前请读 `deploy/nginx/ocean.conf` 顶部四条决策）。代价：名字里仍带着 IP；依赖第三方 DNS，国内解析可能不稳 |
+| 团队本机 hosts 别名 | ✅ 只影响自己机器 | Windows：`Add-Content $env:windir\System32\drivers\etc\hosts "116.62.54.140 haifeng.demo"`（需管理员）；macOS/Linux：`echo "116.62.54.140 haifeng.demo" | sudo tee -a /etc/hosts`。之后浏览器直接敲 `http://haifeng.demo/` |
+| **正式域名**（如 `haifeng.example.com`） | ⚠️ 暂不建议 | 国内 ECS 用域名对外提供 Web 服务**必须 ICP 备案**（未备案域名指向本机会被阿里云拦 80 端口）；地图类内容对外发布还需**审图号 + 合规底图**。备案与审图号办好之前，请用上面的 IP / 别名 / hosts |
+| 免费子域（duckdns.org / freedns.afraid.org） | 需你注册 | 给我「域名 + 更新 token」，我把解析更新脚本挂到服务器（cron）并加进 nginx server_name；同样受"未备案域名"这条约束 |
+
+**核对公开可达性**（不依赖自己的网络）：
+```bash
+# 服务器侧：确认在听、没被本机防火墙拦
+ss -ltnp | grep ':80 '           # 应看到 0.0.0.0:80
+ufw status; iptables -S | head   # 本机应为 inactive / ACCEPT
+# 外部侧：用第三方抓取服务或手机热点打开 http://116.62.54.140/（能看到地图即达标）
+```
+> 注意：部分云端抓取服务的出口策略会拦 `*.sslip.io` 这类生僻域名（返回 403），那不代表服务器有问题——
+> 判断服务器是否正常请用 IP 或 nginx 日志（`tail -f /var/log/nginx/access.log`）。
+
 ### 数据铺满：按视野取数（2026-09-23 上线，v1.10）
 
 `GET /api/frontend/day/<date>` 支持 `bbox=minLon,minLat,maxLon,maxLat` 与 `step=1|2|4|10|20|40`：
