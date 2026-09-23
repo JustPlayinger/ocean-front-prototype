@@ -175,7 +175,7 @@
 | `lon, lat` | 定位点（L0 ①） |
 | `range` | 找鱼范围 km，取值 10/20/30（L0 ②） |
 | ~~`species`~~ | v1.3 删除：本期不做目标鱼种；冷暖侧只展示（数据里的 −20/20），不参与评分 |
-| `date` | **唯一的出海日**（L0 ③），可选范围＝`OFData.availableDates()`（即 `data/day/` 实际导出的观测日期） |
+| `date` | **唯一的出海日**（L0 ③），可选范围＝`OFData.availableDates()`（即 `frontend/prototype/data/day/` 实际导出的观测日期） |
 | `layers` | `{sst, band, front, coldwarm, nodata, fishing}`（v1.3：新增**真实海温**图层——NOAA GHRSST 0.05° 逐日、按 0.5 °C 分档；v1.2 曾去掉无数据支撑的 SST 色带，现在有真实数据才加回来） |
 | `select` | `{type, id}` 或 `null`，全站唯一选中态（对应地图回执卡） |
 | `probe` | `{lon, lat}` 或 `null`，被钉住的地图点 |
@@ -244,7 +244,7 @@
 
 ## 8. 验收清单（已自动化，Edge 无头 + CDP）
 
-`node tools/data-check.mjs`（890 项）+ `node tools/e2e-check.mjs`（100 项）+ `node tools/layout-check.mjs`（23 项），全部 PASS 才算通过。
+`node tools/data-check.mjs`（897 项）+ `node tools/e2e-check.mjs`（108 项）+ `node tools/layout-check.mjs`（25 项），全部 PASS 才算通过。
 
 | 类别 | 断言（要点） |
 |---|---|
