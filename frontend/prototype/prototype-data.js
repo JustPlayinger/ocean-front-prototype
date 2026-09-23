@@ -157,6 +157,104 @@
     return task;
   }
 
+  // ---- 渔场线索（GFW apparent fishing effort；目前只有服务器模式提供）----
+  // 注意口径：这是基于 AIS 行为估计的「表观捕捞活动」（fishing hours），
+  // 不是渔获量/产量/鱼群密度，界面必须照实标注（见 docs/data-governance-gfw-ais.md）。
+  const FISHING = { days: {}, inflight: {}, failed: {} };
+
+  function fishingAvailable() { return SERVER.enabled === true; }
+
+  function fishingDay(iso) { return FISHING.days[iso] || null; }
+
+  /** 按需取某天的渔场格点；未启用服务器或 404 时返回 false（调用方按「无数据」处理，不按 0）。 */
+  function ensureFishing(iso) {
+    if (FISHING.days[iso]) return Promise.resolve(true);
+    if (!SERVER.enabled || FISHING.failed[iso]) return Promise.resolve(false);
+    if (FISHING.inflight[iso]) return FISHING.inflight[iso];
+    const task = fetch(SERVER.base + "/fishing/" + iso, { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) throw new Error("fishing HTTP " + response.status);
+        return response.json();
+      })
+      .then(function (data) {
+        FISHING.days[iso] = data && Array.isArray(data.cells) ? data : null;
+        return !!FISHING.days[iso];
+      })
+      .catch(function () { FISHING.failed[iso] = true; FISHING.days[iso] = null; return false; })
+      .then(function (ok) { delete FISHING.inflight[iso]; return ok; });
+    FISHING.inflight[iso] = task;
+    return task;
+  }
+
+  // ---- 锋面强度（本项目口径：跨锋面 SST 温差 / 梯度）----
+  // 数据集自带的 frontal_intensity 变量尚未下载（43 个分年包约 90 GB，盘不够）；
+  // 需求文档 §6.2 把「frontal_intensity 与局地温度梯度」并列为强度因素，
+  // 因此这里用「跨锋面温差」作为强度口径，并在界面上始终写明口径，不冒充数据集原变量。
+  const KM_PER_DEG_LAT = 111.195;
+
+  function kmPerDegLonAt(lat) {
+    return KM_PER_DEG_LAT * Math.max(Math.cos((lat * Math.PI) / 180), 0.01);
+  }
+
+  /**
+   * 沿锋面线两侧取样求温差。
+   * 做法：把折线投影到以折线中点为原点的局部 km 平面 → 在平面里沿法向各偏移 halfKm →
+   * 反投影回经纬度 → 用 sstCell 取真实档位温度（不插值）→ 统计温差与梯度。
+   */
+  function frontIntensity(iso, points, halfKm) {
+    const day = SST[iso];
+    if (!day || !Array.isArray(points) || points.length < 2) return null;
+    const offsetKm = halfKm || 10;
+    const mid = points[Math.floor(points.length / 2)];
+    const lon0 = mid[0];
+    const lat0 = mid[1];
+    const kx = kmPerDegLonAt(lat0);
+    const project = (p) => [(p[0] - lon0) * kx, (p[1] - lat0) * KM_PER_DEG_LAT];
+    const unproject = (x, y) => [lon0 + x / kx, lat0 + y / KM_PER_DEG_LAT];
+
+    const step = Math.max(1, Math.floor(points.length / 12));   // 最多 12 个采样点
+    const diffs = [];
+    for (let i = 0; i + 1 < points.length; i += step) {
+      const a = project(points[i]);
+      const b = project(points[i + 1]);
+      const tx = b[0] - a[0];
+      const ty = b[1] - a[1];
+      const len = Math.hypot(tx, ty);
+      if (!len) continue;
+      const c = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      const nx = -ty / len;
+      const ny = tx / len;
+      const left = unproject(c[0] + nx * offsetKm, c[1] + ny * offsetKm);
+      const right = unproject(c[0] - nx * offsetKm, c[1] - ny * offsetKm);
+      const tl = OFData.sstCell(iso, left[0], left[1]);
+      const tr = OFData.sstCell(iso, right[0], right[1]);
+      if (!tl || !tr) continue;
+      if (tl.valueC == null || tr.valueC == null) continue;   // 缺测不参与，也不补 0
+      diffs.push(Math.abs(tl.valueC - tr.valueC));
+    }
+    if (!diffs.length) return null;
+    const mean = diffs.reduce(function (sum, v) { return sum + v; }, 0) / diffs.length;
+    const max = Math.max.apply(null, diffs);
+    return {
+      available: true,
+      metric: "cross_front_sst_difference",
+      offsetKm: offsetKm,
+      sampleCount: diffs.length,
+      meanRangeC: Math.round(mean * 100) / 100,
+      maxRangeC: Math.round(max * 100) / 100,
+      gradientCPerKm: Math.round((mean / (offsetKm * 2)) * 1000) / 1000,
+      note: "口径：锋面线两侧各 " + offsetKm + " km 的 SST 差（数据集 frontal_intensity 未接入）",
+    };
+  }
+
+  /** 强度分档（展示用；阈值写在界面上，避免被读成官方强度等级）。 */
+  function intensityLevel(meanRangeC) {
+    if (meanRangeC == null) return { label: "未知", tone: "plain" };
+    if (meanRangeC >= 2) return { label: "强", tone: "strong" };
+    if (meanRangeC >= 1) return { label: "中", tone: "medium" };
+    return { label: "弱", tone: "weak" };
+  }
+
   const OFData = {
     meta: META,
     basemap: BASE,
@@ -169,6 +267,15 @@
     serverAvailable: serverAvailable,
     initServerMode: initServerMode,
     ensureDay: ensureDay,
+
+    // ---- 渔场线索（GFW 表观捕捞活动；仅服务器模式可用）----
+    fishingAvailable: fishingAvailable,
+    fishingDay: fishingDay,
+    ensureFishing: ensureFishing,
+
+    // ---- 锋面强度（口径：跨锋面 SST 温差 / 梯度）----
+    frontIntensity: frontIntensity,
+    intensityLevel: intensityLevel,
 
     // ---- 日期与可用性 ----
     availableDates: function () { return mergedDates(); },

@@ -40,7 +40,7 @@ const state = {
   lon: 124.5, lat: 30.2,                   // ① 从哪出发
   range: 20,                               // ② 找多远（km）
   date: TODAY,                             // ③ 出海日（唯一时间控件）
-  layers: { sst: true, band: true, front: true, coldwarm: true, nodata: true, fishing: false },
+  layers: { sst: true, band: true, front: true, coldwarm: true, nodata: true, ground: false, fishing: false },
   select: null,                            // 被选中的对象 {type, id}
   probe: null,                             // 钉住的地图点 {lon, lat}
   tab: "now",
@@ -54,8 +54,9 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const SELECT_LABEL = { front: "锋面区", coldwarm: "冷侧 / 暖侧", fishing: "推荐水域（示例）" };
 const SELECT_LAYERS = { front: ["band", "front"], coldwarm: ["coldwarm"], fishing: ["fishing"] };
-const LAYER_META = [["sst", "水温（NOAA GHRSST）"], ["band", "锋面带"], ["front", "锋面区"],
-  ["coldwarm", "冷侧 / 暖侧"], ["nodata", "无观测"], ["fishing", "推荐水域（示例）"]];
+const LAYER_META = [["sst", "水温（NOAA GHRSST）"], ["band", "锋面带"], ["front", "锋面区 · 强度"],
+  ["coldwarm", "冷侧 / 暖侧"], ["nodata", "无观测"], ["ground", "渔场线索（表观捕捞活动）"],
+  ["fishing", "推荐水域（示例）"]];
 const DIRS16 = ["正北", "东北偏北", "东北", "东北偏东", "正东", "东南偏东", "东南", "东南偏南",
   "正南", "西南偏南", "西南", "西南偏西", "正西", "西北偏西", "西北", "西北偏北"];
 
@@ -167,6 +168,17 @@ function frontInfo(iso, lon, lat, rangeKm) {
       inRange: near.km <= range,
     };
   }).filter(Boolean).sort((a, b) => a.km - b.km);
+}
+
+// 锋面强度：口径＝跨锋面 SST 温差（数据集自带的 frontal_intensity 未接入）。
+// 当日没有海温或两侧取样落到缺测时返回 null —— 不猜、不用 0 顶替。
+function intensityOf(entry, iso) {
+  if (!entry || !entry.points || entry.points.length < 2) return null;
+  const raw = OFData.frontIntensity(iso || state.date, entry.points);
+  if (!raw) return null;
+  const level = OFData.intensityLevel(raw.meanRangeC);
+  return { label: level.label, meanRangeC: raw.meanRangeC, gradientCPerKm: raw.gradientCPerKm,
+    sampleCount: raw.sampleCount, note: raw.note };
 }
 
 // 「值得去的水域」：真实渔场数据还没到，这里是示例占位（见「依据」），不参与把握评分
@@ -487,6 +499,34 @@ function drawDataLayers(svg, snap, iso, grid, sel) {
     });
   }
 
+  // 渔场线索（GFW 表观捕捞活动，fishing hours）：暖色圆点，半径与浓度随 hours 递增。
+  // 刻意与 SST 的连续色带在形态上区分（点阵 vs 色带）；低于当日中位数的格子不画，避免糊成一片。
+  if (state.layers.ground) {
+    const fishing = OFData.fishingDay(iso);
+    const cells = fishing && Array.isArray(fishing.cells) ? fishing.cells : [];
+    if (cells.length) {
+      const values = cells.map((c) => c.hours).sort((a, b) => a - b);
+      const q = (f) => values[Math.min(values.length - 1, Math.max(0, Math.floor(values.length * f)))];
+      const t60 = q(0.6);
+      const t85 = q(0.85);
+      const t97 = q(0.97);
+      const maxHours = values[values.length - 1] || 1;
+      const drawn = cells
+        .filter((c) => Number.isFinite(c.hours) && c.hours >= t60)
+        .sort((a, b) => b.hours - a.hours)
+        .slice(0, 700);                                   // 上限兜底，防止极端日期卡顿
+      drawn.forEach((cell) => {
+        const p = xy(cell.lon, cell.lat);
+        const ratio = Math.min(1, cell.hours / maxHours);
+        const r = 2.2 + 6.4 * Math.sqrt(ratio);
+        const fill = cell.hours >= t97 ? "#ff7a3c" : cell.hours >= t85 ? "#ff9d4d" : "#ffc46b";
+        el("circle", { cx: p[0], cy: p[1], r, fill,
+          opacity: (0.26 + 0.44 * ratio) * dim("ground"),
+          "data-layer": "ground" }, svg);
+      });
+    }
+  }
+
   // 值得去的水域（示例，未接入真实渔场数据）
   if (state.layers.fishing) {
     (snap.spots || []).forEach((s) => {
@@ -670,10 +710,16 @@ function pickInfo() {
   if (s.type === "front") {
     const f = (snap.fronts || []).find((x) => x.isObject && x.id === s.id);
     if (!f) return null;
+    const inten = intensityOf(f);
     return { name: "锋面区 " + f.id,
       body: "长 <b>" + Math.round(f.lengthKm) + " km</b> · 离你 <b>" + f.km.toFixed(1) +
         " km</b> · " + f.bearing + "<br/>" + (f.inRange ? "在作业范围内" : "超出作业范围") +
-        " · 你在" + (snap.cell && snap.cell.side ? snap.cell.side : "锋区外") };
+        " · 你在" + (snap.cell && snap.cell.side ? snap.cell.side : "锋区外") +
+        "<br/>强度 <b>" + (inten ? inten.label : "未知") + "</b>" +
+        (inten
+          ? "（跨锋面温差 " + inten.meanRangeC.toFixed(1) + " °C · 梯度 " + inten.gradientCPerKm.toFixed(3) +
+            " °C/km，" + inten.sampleCount + " 个断面取样）"
+          : "（当日无海温或缺测，不计算）") };
   }
   if (s.type === "fishing") {
     const p = (snap.spots || []).find((x) => x.id === s.id);
@@ -765,8 +811,13 @@ function renderHero() {
   const inRangeCount = snap.inRange.filter((f) => f.isObject).length;
   let line = "作业范围 " + state.range + " km 内 <b>" +
     (inRangeCount ? inRangeCount + " 个锋面区" : "暂无锋面区") + "</b> · 把握度 <b>" + snap.score + "%</b>。";
-  if (t) line += "首选 <b>" + t.bearing + " " + t.km.toFixed(1) + " km</b> 的" + t.label + "。";
-  else line += "可扩大作业范围或换个日期。";
+  // 首选（或回退最近）锋面：把强度一并说明，找最近锋面时同样能给强度
+  if (t) {
+    const target = (snap.fronts || []).find((f) => f.isObject && f.id === t.id);
+    const ti = intensityOf(target);
+    line += "首选 <b>" + t.bearing + " " + t.km.toFixed(1) + " km</b> 的" + t.label +
+      (ti ? "（强度 <b>" + ti.label + "</b>）" : "") + "。";   // 温差/梯度等细节放在选中回执卡里，结论行保持简短
+  } else line += "可扩大作业范围或换个日期。";
   l.innerHTML = line;
 
   body.innerHTML =
@@ -1543,6 +1594,17 @@ function applyServerRange() {
   DATE_MAX = OFData.lastDate();
 }
 
+// 图层抽屉：默认收起，点右上角「☰」呼出，✕ 或 Esc 收起
+function setDrawer(open) {
+  const drawer = $("layerDrawer");
+  const btn = $("layerToggle");
+  if (!drawer || !btn) return;
+  drawer.classList.toggle("open", open);
+  drawer.setAttribute("aria-hidden", open ? "false" : "true");
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  state.drawerOpen = open;
+}
+
 function switchTab(name) {
   state.tab = name;
   document.querySelectorAll("#tabs button").forEach((b) => {
@@ -1803,6 +1865,10 @@ function bind() {
     });
   });
   $("toBasis").addEventListener("click", () => switchTab("basis"));
+
+  // 图层抽屉呼出 / 收起
+  $("layerToggle").addEventListener("click", () => setDrawer(!state.drawerOpen));
+  $("layerClose").addEventListener("click", () => setDrawer(false));
 }
 
 // ==================== 启动 ====================

@@ -92,7 +92,12 @@ const GEO = `var tb=document.getElementById("topbar"), concl=document.querySelec
     probeW: Math.round(parseFloat(getComputedStyle(document.getElementById("mapProbe")).width)),
     scaleW: Math.round(document.getElementById("mapScale").getBoundingClientRect().width),
     scaleRight: Math.round(document.getElementById("mapScale").getBoundingClientRect().right),
-    legendRight: Math.round(document.querySelector(".map-legend").getBoundingClientRect().right)
+    scaleTop: Math.round(document.getElementById("mapScale").getBoundingClientRect().top),
+    legendRight: Math.round(document.querySelector(".map-legend").getBoundingClientRect().right),
+    drawerOpen: document.querySelector(".map-legend").classList.contains("open"),
+    drawerOpacity: getComputedStyle(document.querySelector(".map-legend")).opacity,
+    drawerBottom: Math.round(document.querySelector(".map-legend").getBoundingClientRect().bottom),
+    drawerLeft: Math.round(document.querySelector(".map-legend").getBoundingClientRect().left)
   };`;
 
 const results = [];
@@ -110,19 +115,28 @@ check("卡片区可滚动高度充足（≥200）", g1.panesH >= 200, "panesH=" 
 // 注：AIS 响应换成真实 GFW 聚合后，小时数量级变大（如 16977.8 h），
 // 卡片整体比合成夹具时下移约 1px，可见高度从 90 降到 89；阈值放宽到 85，
 // 仍保留「1280 宽滚动前能看到卡片入口」这一意图。
+// 注：结论行加了「强度 中 · 温差 1.4 °C」后结论卡高约 18px，AIS 卡片随之下移，
+// 可见高度从 89 降到 ~78；阈值放宽到 70，仍保留「滚动前能看到卡片入口」这一意图。
 check("历史 AIS 响应卡片入口可见且文案不裁切",
-  g1.aisVisibleH >= 85 && g1.aisCardH >= 90 && g1.aisClipped === 0,
+  g1.aisVisibleH >= 70 && g1.aisCardH >= 90 && g1.aisClipped === 0,
   `h=${g1.aisCardH} · visible=${g1.aisVisibleH} · top=${g1.aisCardTop} · bottom=${g1.aisCardBottom} · clipped=${g1.aisClipped}`);
 check("侧栏未溢出视口", g1.sideBottom <= g1.vh + 1, `${g1.sideBottom} ≤ ${g1.vh}`);
 check("地图区域尺寸合理", g1.mapW > 1100 && g1.mapH > 600, `map=${g1.mapW}x${g1.mapH}`);
 check("无文字被裁切（scrollWidth 溢出计数=0）", g1.clipped === 0, "clipped=" + g1.clipped);
-check("图例含 6 个可切换图层（海温 / 锋面带 / 锋面线 / 冷暖侧 / 缺测 / 渔场示例）", g1.legendOk === 6, "rows=" + g1.legendOk);
+check("图层抽屉含 7 个可切换图层（海温 / 锋面带 / 锋面线 / 冷暖侧 / 缺测 / 渔场线索 / 渔场示例）",
+  g1.legendOk === 7, "rows=" + g1.legendOk);
 check("顶栏 3 个序号可见（顺序看得见）且已无时间族分段", g1.numBadges === 3 && g1.family === false, `badges=${g1.numBadges} family=${g1.family}`);
-check("图例卡片不占地图过多（高度 ≤ 240）", g1.legendH <= 240, "legendH=" + g1.legendH);
+// 图层开关已改成「按需呼出」的抽屉：默认收起时不得占地图；展开后高度合理即可（内容变多不再是问题）
+check("图层抽屉默认收起（不占地图）",
+  g1.drawerOpen === false && parseFloat(g1.drawerOpacity) === 0, "open=" + g1.drawerOpen + " · opacity=" + g1.drawerOpacity);
+check("图层抽屉展开后高度合理（≤ 340）", g1.legendH <= 340, "legendH=" + g1.legendH);
 check("选中回执卡与缩放按钮水平不重叠", g1.pickRight <= g1.ctrlLeft, `${g1.pickRight} ≤ ${g1.ctrlLeft}`);
 check("指针浮层宽度合理（200~300px）", g1.probeW >= 200 && g1.probeW <= 300, "probeW=" + g1.probeW);
 check("比例尺存在且长度合理（30~300px，按当前缩放实时换算）", g1.scaleW >= 30 && g1.scaleW <= 300, "scaleW=" + g1.scaleW);
-check("比例尺与图例不重叠（图例在左、比例尺在右）", g1.legendRight < g1.scaleRight, `${g1.legendRight} < ${g1.scaleRight}`);
+// 抽屉从右上角展开，与底部比例尺在垂直方向错开；改用「矩形不相交」判据，不再依赖左右位置
+check("图层抽屉与比例尺不重叠（矩形不相交）",
+  g1.drawerBottom <= g1.scaleTop || g1.drawerLeft >= g1.scaleRight,
+  `drawer bottom/left=${g1.drawerBottom}/${g1.drawerLeft} · scale top/right=${g1.scaleTop}/${g1.scaleRight}`);
 
 await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
 await sleep(400);
@@ -134,7 +148,7 @@ check("1280 宽：结论卡仍在「当前」页且可见（高度 ≥ 150）",
   `${g2.conclH} · ${g2.conclTop} ≥ ${g2.tabsTop}`);
 check("1280 宽：无文字裁切", g2.clipped === 0, "clipped=" + g2.clipped);
 check("1280 宽：历史 AIS 响应卡片入口仍可见且文案不裁切",
-  g2.aisVisibleH >= 85 && g2.aisCardH >= 90 && g2.aisClipped === 0,
+  g2.aisVisibleH >= 70 && g2.aisCardH >= 90 && g2.aisClipped === 0,
   `h=${g2.aisCardH} · visible=${g2.aisVisibleH} · top=${g2.aisCardTop} · bottom=${g2.aisCardBottom} · clipped=${g2.aisClipped}`);
 check("1280 宽：卡片区可滚动", g2.panesH >= 150, "panesH=" + g2.panesH);
 check("1280 宽：3 个序号仍可见（顺序不因窄屏丢失）", g2.numBadges === 3, "badges=" + g2.numBadges);

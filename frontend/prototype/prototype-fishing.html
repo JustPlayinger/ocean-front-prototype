@@ -115,6 +115,17 @@
     border-radius: 9px; padding: 8px 10px; font-size: 12px; color: var(--text-dim);
   }
   .map-legend h4 { color: var(--text); margin-bottom: 6px; font-size: 12px; }
+  /* 图层抽屉：默认收起在右侧，点右上角「☰」呼出；保留 .map-legend 类以便复用行样式 */
+  .layer-drawer {
+    left: auto; right: 14px; top: 62px; bottom: auto; width: 236px;
+    max-height: calc(100% - 96px); overflow: auto;
+    background: rgba(12,26,41,.95);
+    transform: translateX(calc(100% + 22px)); opacity: 0; pointer-events: none;
+    transition: transform .2s ease, opacity .2s ease;
+  }
+  .layer-drawer.open { transform: none; opacity: 1; pointer-events: auto; }
+  .layer-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .layer-head h4 { margin: 0; }
   .legend-row { display: flex; align-items: center; gap: 7px; margin: 3px 0; cursor: pointer; }
   .swatch { width: 15px; height: 15px; border-radius: 4px; flex: none; border: 1px solid transparent; }
   .swatch.sst { background: linear-gradient(90deg,#2f7fc1,#37b3b8,#7ecb6a,#e8d75a,#f0a341,#e2694a); }
@@ -124,6 +135,8 @@
   .swatch.warm { background: rgba(190,90,45,.85); }
   .swatch.nodata { background: repeating-linear-gradient(45deg, rgba(206,222,238,.65) 0 3px, rgba(120,142,166,.25) 3px 6px); border-color: rgba(200,215,230,.5); }
   .swatch.fishing { background: rgba(255,180,84,.75); }
+  /* 渔场线索：暖色实心点，与 SST 的连续色带刻意区分（点阵 vs 色带） */
+  .swatch.ground { background: radial-gradient(circle at 50% 50%, #ffdf9a 0 32%, rgba(255,126,58,.85) 34% 100%); }
   /* 比例尺：长度按当前缩放实时换算，标"图上 50 km" */
   .map-scale {
     position: absolute; right: 14px; bottom: 16px; z-index: 7; height: 7px; width: 90px;
@@ -404,20 +417,29 @@
         <button class="ctrl" title="放大地图" id="zoomIn">＋</button>
         <button class="ctrl" title="缩小地图" id="zoomOut">－</button>
         <button class="ctrl" title="回到定位点" id="recenter">◎</button>
+        <button class="ctrl" title="图层开关" id="layerToggle" aria-controls="layerDrawer" aria-expanded="false">☰</button>
       </div>
-      <div class="map-legend">
-        <h4>图层</h4>
+      <!-- 图层抽屉：默认收起，点右上角「图层」呼出 -->
+      <aside class="map-legend layer-drawer" id="layerDrawer" aria-hidden="true">
+        <div class="layer-head">
+          <h4>图层</h4>
+          <button class="link" id="layerClose" type="button" title="收起">✕</button>
+        </div>
         <div class="legend-row" data-layer="sst"><span class="swatch sst"></span> 水温（NOAA GHRSST）</div>
         <div class="legend-row" data-layer="band"><span class="swatch band"></span> 锋面带（原始数据）</div>
-        <div class="legend-row" data-layer="front"><span class="swatch front"></span> 锋面区 · 编号</div>
+        <div class="legend-row" data-layer="front"><span class="swatch front"></span> 锋面区 · 编号 · 强度</div>
         <div class="legend-row sub" data-layer="coldwarm"><span class="swatch cold"></span><span class="swatch warm"></span> 冷侧 / 暖侧</div>
         <div class="legend-row" data-layer="nodata"><span class="swatch nodata"></span> 无观测（云 / 未覆盖）</div>
+        <div class="legend-row" data-layer="ground"><span class="swatch ground"></span> 渔场线索（表观捕捞活动）</div>
         <div class="legend-row" data-layer="fishing"><span class="swatch fishing"></span> 推荐水域（示例，默认关）</div>
         <div class="legend-band">
           <span class="kbd">陆地</span><span class="kbd">自然地球 1:10m（公有领域）</span>
         </div>
-        <div class="legend-note">悬停地图任意位置可查看该点数据；陆地＝浅色实色块，斜线＝无观测</div>
-      </div>
+        <div class="legend-note">
+          悬停地图任意位置可查看该点数据；陆地＝浅色实色块，斜线＝无观测。<br>
+          渔场线索＝GFW 表观捕捞活动（fishing hours），<b>不等于渔获量 / 产量</b>；无覆盖的日期不按 0 处理。
+        </div>
+      </aside>
       <div class="map-scale-label" id="mapScaleText">50 km</div>
       <div class="map-scale" id="mapScale"></div>
       <div class="map-empty" id="mapEmpty" hidden>
