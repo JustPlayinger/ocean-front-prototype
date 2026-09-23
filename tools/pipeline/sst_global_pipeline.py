@@ -97,6 +97,8 @@ def main() -> int:
         subprocess.Popen(
             [str(PYTHON), str(FETCHER), "--output-root", str(SST_ROOT), "--continue-on-error",
              "--bbox=-180,-90,180,90", "--stride", str(args.stride),
+             # 粗格层只需要 analysed_sst：mask 不参与出数（后端按有限值 + −5~45°C 过滤），少要一半字节
+             "--variables", "analysed_sst",
              "--retries", str(args.retries), *chunk],
             stdout=handle, stderr=subprocess.STDOUT,
         )

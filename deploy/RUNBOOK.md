@@ -184,6 +184,14 @@ Remove-Item Env:\PAGE
   ```
   后端 `GET /api/frontend/day` 会同时给 `sst`（东海明细）与 `sst_coarse`（全球粗格），前端粗格垫底、明细压上。
 - 单日全球子集在 ERDDAP 侧要现裁 1–3 分钟，**必须 nohup/setsid**（前台 ssh 一断就被杀）。
+- **查看进度**（两年 731 天 · 1° · 3 路，实测约 40 秒/天/路 → 全部约 2.6 小时）：
+  ```bash
+  find /srv/ocean/data/raw/sst_global -name '*.nc' | wc -l   # 已落盘天数（目标 731）
+  tail -3 /var/log/ocean-sst-global.log                      # 队列日志
+  tail -2 /tmp/sst-global-w0.log                             # 单路进度
+  du -sh /srv/ocean/data/raw/sst_global                      # 单日 268KB
+  ```
+  脚本跳过已存在的日期，**中断后重跑即续跑**；磁盘低于 `--min-free-gb`（默认 4G）会自动停。
 - ⚠️ ERDDAP 偶发 `Currently unknown datasetID=...`（上游在重载数据集，不是我们的错）：
   脚本带 `--retries` 会自己重试；大面积 404 时先等上游恢复（见 §6 排障表）。
 - ⚠️ **发布后核对前端版本**：改完前端用**公网 URL** 核对内容指纹，别用 `curl 127.0.0.1` + `Host:` 头
