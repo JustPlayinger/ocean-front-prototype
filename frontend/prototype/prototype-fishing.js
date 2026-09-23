@@ -143,7 +143,6 @@ function timeLabel() {
   const tail = state.date === DATE_MAX ? "（最新数据）" : "";
   return base + (n > 0 ? "（+" + n + " 天）" : "（" + n + " 天）") + "· 实况观测" + tail;
 }
-function dayObjects() { return OFData.objects(state.date); }
 function originCell() { return OFData.cellInfo(state.date, state.lon, state.lat); }
 function qualityOf() { return OFData.quality(state.date); }
 
@@ -450,20 +449,21 @@ function sstColor(c) {
 }
 
 // 真实海表温度场（NOAA GHRSST）：按档位分组后画，档位内相邻行会合并，看起来是连续温度场
-function drawSst(svg, iso) {
-  if (!state.layers.sst) return;
-  const day = OFData.sst(iso);
-  if (!day) return;
-  const binC = day.bin_c;
+// v1.9：按「数据片」画 —— 一天可能有多片（作业海域明细 + 按视野取的概览/明细），每片自带 grid 与分辨率
+function drawSstPatch(svg, patch, sel) {
+  if (!state.layers.sst || !patch.sst) return;
+  const day = patch.sst;
+  const binC = day.bin_c || OFData.sstBinC();
   const byBin = new Map();
   (day.runs || []).forEach((run) => {
     if (!byBin.has(run[3])) byBin.set(run[3], []);
     byBin.get(run[3]).push(run);
   });
+  const base = patch.overview ? 0.34 : 0.52;          // 概览淡一点，避免和 0.05° 明细混淆
   byBin.forEach((runs, bin) => {
     el("path", { d: rlePath(runs, day.grid), "data-layer": "sst", fill: sstColor(bin * binC),
       stroke: "none", "shape-rendering": "crispEdges",
-      opacity: 0.52 * (state.select && state.select.type !== "sst" ? 0.35 : 1) }, svg);
+      opacity: base * (sel && sel.type !== "sst" ? 0.35 : 1) }, svg);
   });
 }
 
@@ -490,48 +490,52 @@ function drawLand(svg) {
 }
 
 // 海上没有观测的像元（云 / 未观测；数据里 -128 与陆地共用编码）
-function drawNodata(svg, iso, grid) {
-  const day = OFData.day(iso);
-  if (!day || !state.layers.nodata) return;
-  el("path", { d: rlePath(day.nodata_rle || [], grid), "data-layer": "nodata",
-    fill: "url(#nodataHatch)", stroke: "none", "shape-rendering": "crispEdges", opacity: 0.5 }, svg);
+function drawNodataPatch(svg, patch) {
+  if (!state.layers.nodata || !patch.front) return;
+  el("path", { d: rlePath(patch.front.nodata_rle || [], patch.grid), "data-layer": "nodata",
+    fill: "url(#nodataHatch)", stroke: "none", "shape-rendering": "crispEdges",
+    opacity: patch.overview ? 0.3 : 0.5 }, svg);
 }
 
 
-// 数据图层：一切按数据原样画，不做外推（锋面线只在显示层平滑，几何与距离仍用原始点）
-function drawDataLayers(svg, snap, iso, grid, sel) {
+// 一片数据里的锋面图层（栅格 + 对象线）。概览片只画栅格：1° 的聚合格不是锋面对象
+function drawFrontPatch(svg, patch, sel) {
+  const day = patch.front;
+  if (!day) return;
   const dim = (k) => (sel && sel.type !== k ? 0.16 : 1);
-  const entries = frontEntries();
-  const selected = sel && sel.type === "front" && sel.id ? entries.find((e) => e.id === sel.id) : null;
+  const grid = patch.grid;
+  const alpha = patch.overview ? 0.7 : 1;          // 概览整体压一点，和明细区分
 
   // 冷侧 / 暖侧：数据里的 -20 / 20 编码，一格不改
   if (state.layers.coldwarm) {
     const on = !!sel && sel.type === "coldwarm";
-    el("path", { d: rlePath(OFData.bandRuns(iso, "cold"), grid), "data-layer": "cold",
+    el("path", { d: rlePath(day.cold_side_rle || [], grid), "data-layer": "cold",
       fill: "rgba(38,104,178,0.42)", stroke: "none", "shape-rendering": "crispEdges",
-      opacity: dim("coldwarm") }, svg);
-    el("path", { d: rlePath(OFData.bandRuns(iso, "warm"), grid), "data-layer": "warm",
+      opacity: dim("coldwarm") * alpha }, svg);
+    el("path", { d: rlePath(day.warm_side_rle || [], grid), "data-layer": "warm",
       fill: "rgba(198,88,58,0.40)", stroke: "none", "shape-rendering": "crispEdges",
-      opacity: dim("coldwarm") }, svg);
+      opacity: dim("coldwarm") * alpha }, svg);
     if (on) {
-      el("path", { d: rlePath(OFData.bandRuns(iso, "cold"), grid), fill: "none",
+      el("path", { d: rlePath(day.cold_side_rle || [], grid), fill: "none",
         stroke: "#5cb4ff", "stroke-width": 1.6 }, svg);
-      el("path", { d: rlePath(OFData.bandRuns(iso, "warm"), grid), fill: "none",
+      el("path", { d: rlePath(day.warm_side_rle || [], grid), fill: "none",
         stroke: "#ffab5c", "stroke-width": 1.6 }, svg);
     }
   }
 
   // 锋面带：数据里的 -10 / 10 / 30 像元原样画；编码含义有歧义，图上不解释
   if (state.layers.band) {
-    el("path", { d: rlePath(OFData.bandRuns(iso, "front"), grid), "data-layer": "band",
+    el("path", { d: rlePath(day.front_band_rle || [], grid), "data-layer": "band",
       fill: "rgba(255,236,170,0.5)", stroke: "none", "shape-rendering": "crispEdges",
-      opacity: 0.9 * dim("front") }, svg);
+      opacity: 0.9 * dim("front") * alpha }, svg);
   }
 
-  // 锋面线：对象中心线 + 未编号短段
-  if (state.layers.front) {
-    entries.forEach((entry) => {
-      const isSel = !!(selected && entry.isObject && entry.id === selected.id);
+  // 锋面线：只有明细片才有对象中心线与未编号短段（概览片后端不返回对象清单）
+  if (!state.layers.front || patch.overview) return;
+  const entries = patchEntries(patch);
+  const selected = sel && sel.type === "front" && sel.id ? sel.id : null;
+  entries.forEach((entry) => {
+    const isSel = !!(selected && entry.isObject && entry.id === selected);
       const stroke = isSel ? "#4dd4c6" : entry.isObject ? "#ffffff" : "rgba(255,255,255,0.55)";
       const width = isSel ? 3.4 : entry.isObject ? 2.3 : 1.3;
       const d = smoothPathOf(entry.points);
@@ -549,7 +553,7 @@ function drawDataLayers(svg, snap, iso, grid, sel) {
     entries.filter((e) => e.isObject).forEach((entry) => {
       const mid = entry.points[Math.floor(entry.points.length / 2)];
       const p = xy(mid[0], mid[1]);
-      const isSel = !!(selected && entry.id === selected.id);
+      const isSel = !!(selected && entry.id === selected);
       const text = entry.id + " · " + Math.round(entry.lengthKm) + " km";
       const box = { x: p[0] + 5, y: p[1] - 20, w: text.length * 6.4, h: 14 };
       const clash = placed.some((q) => !(box.x + box.w < q.x || q.x + q.w < box.x ||
@@ -560,9 +564,24 @@ function drawDataLayers(svg, snap, iso, grid, sel) {
         fill: isSel ? "#8ff2e4" : "rgba(255,255,255,0.78)", "font-size": 10.5,
         "paint-order": "stroke", stroke: "rgba(8,16,26,0.9)", "stroke-width": 3,
         opacity: isSel ? 1 : dim("front") }, svg).textContent = text;
-    });
-  }
+  });
+}
 
+// 取一片里的锋面线段：主片沿用既有对象口径（ID / 长度来自 OFData），窗口片直接用自带的清单
+function patchEntries(patch) {
+  if (patch.primary) return frontEntries();
+  const day = patch.front;
+  const objects = (day.objects || []).map((o) => ({
+    id: o.front_id, points: o.line, lengthKm: o.length_km, isObject: true,
+  }));
+  const shortLines = (day.front_line || []).slice(day.object_line_count || 0)
+    .map((pts) => ({ id: null, points: pts, lengthKm: 0, isObject: false }));
+  return objects.concat(shortLines);
+}
+
+// 与数据片无关的图层（渔场线索 / 推荐水域示例）
+function drawExtras(svg, snap, iso, sel) {
+  const dim = (k) => (sel && sel.type !== k ? 0.16 : 1);
   // 渔场线索（GFW 表观捕捞活动，fishing hours）：暖色圆点，半径与浓度随 hours 递增。
   // 刻意与 SST 的连续色带在形态上区分（点阵 vs 色带）；低于当日中位数的格子不画，避免糊成一片。
   if (state.layers.ground) {
@@ -637,37 +656,42 @@ function drawOriginLayer(svg) {
   }
 }
 
-// 球面档：数据覆盖框（服务器导出窗口 105–150°E / 3–45°N）+ 一句口径说明
+// 球面档的框：作业海域（卡片结论用的窗口）+ 当前已取的那一片（按视野出数的窗口）
 function drawGlobeCoverage(svg) {
-  const d = OFMap.boxPath(OFMap.DATA_BBOX, _view);
-  if (!d) return;
-  el("path", { d, fill: "rgba(77,212,198,0.07)", stroke: "rgba(77,212,198,0.65)",
-    "stroke-width": 1.2, "stroke-dasharray": "6 4", "data-layer": "coverage" }, svg);
-  const box = OFMap.DATA_BBOX;
-  const label = xy((box[0] + box[2]) / 2, box[3]);
-  el("text", { x: label[0], y: label[1] - 8, "text-anchor": "middle", fill: "rgba(165,242,230,0.95)",
-    "font-size": 12, "paint-order": "stroke", stroke: "rgba(6,14,24,0.9)", "stroke-width": 3 }, svg)
-    .textContent = "数据覆盖 105–150°E / 3–45°N";
+  const area = OFMap.DATA_BBOX;
+  const d = OFMap.boxPath(area, _view);
+  if (d) {
+    el("path", { d, fill: "rgba(77,212,198,0.06)", stroke: "rgba(77,212,198,0.65)",
+      "stroke-width": 1.2, "stroke-dasharray": "6 4", "data-layer": "coverage" }, svg);
+    const label = xy((area[0] + area[2]) / 2, area[3]);
+    el("text", { x: label[0], y: label[1] - 8, "text-anchor": "middle", fill: "rgba(165,242,230,0.95)",
+      "font-size": 12, "paint-order": "stroke", stroke: "rgba(6,14,24,0.9)", "stroke-width": 3 }, svg)
+      .textContent = "作业海域 105–150°E / 3–45°N";
+  }
+  const win = OFData.viewWindow();
+  if (win && win.bbox && !(win.bbox[0] <= -180 && win.bbox[1] <= -90)) {
+    const box = OFMap.boxPath(win.bbox, _view);
+    if (box) {
+      el("path", { d: box, fill: "none", stroke: "rgba(226,240,255,0.42)",
+        "stroke-width": 1, "stroke-dasharray": "3 5", "data-layer": "window" }, svg);
+      const mid = xy((win.bbox[0] + win.bbox[2]) / 2, win.bbox[1]);
+      const step = 0.05 * (win.step || 1);
+      el("text", { x: mid[0], y: mid[1] + 14, "text-anchor": "middle", fill: "rgba(226,240,255,0.7)",
+        "font-size": 11, "paint-order": "stroke", stroke: "rgba(6,14,24,0.9)", "stroke-width": 3 }, svg)
+        .textContent = "已取 " + Math.round(win.bbox[0]) + "–" + Math.round(win.bbox[2]) + "°E / " +
+          Math.round(win.bbox[1]) + "–" + Math.round(win.bbox[3]) + "°N · " + step.toFixed(2) + "°";
+    }
+  }
 }
 
-// 球面档：当天锋面对象中心线（真实几何，淡显；球面上按可见性切段，不造假连续）
-function drawGlobeFrontObjects(svg, iso) {
-  const objs = dayObjects();
-  if (!objs || !objs.length) return;
-  const d = objs.map((obj) => OFMap.path(obj.points || [], _view)).filter(Boolean).join(" ");
-  if (!d) return;
-  el("path", { d, fill: "none", stroke: "rgba(255,176,124,0.55)", "stroke-width": 0.9,
-    "data-layer": "front-globe" }, svg);
-}
-
-function drawMap() {
+function drawMap(opts) {
+  const skipData = !!(opts && opts.skipData);   // 球面档拖动中：只画底图与框，松手再补数据
   const svg = $("mapSvg");
   svg.innerHTML = "";
   const defs = el("defs", {}, svg);
   const snap = snapshot();
   const ok = snap.ok;
   const iso = state.date;
-  const grid = ok ? OFData.grid(iso) : null;
   const globe = globeMode();
 
   // 没数据就盖一层说明，不让地图假装有东西
@@ -688,15 +712,21 @@ function drawMap() {
   drawBackground(stage);
   const gratHost = el("g", { id: "gratHost" }, stage);
   drawGraticule(gratHost);
-  if (globe) {
-    // 球面档只画低分辨率信息：世界轮廓 + 覆盖框 + 当天锋面对象线（0.05° 栅格留给平面档）
-    drawGlobeCoverage(stage);
-    if (ok) drawGlobeFrontObjects(stage, iso);
-  } else if (ok) {
-    drawSst(stage, iso);
-    drawNodata(stage, iso, grid);
-    drawDataLayers(stage, snap, iso, grid, state.select);
+  if (ok && !skipData) {
+    // 一天可能有多片（作业海域明细 + 按视野取的概览/明细）：概览先画，明细压在上面。
+    // 球面档：0.05° 锋面栅格在球面上≈0.3 像素、却要重投影上万条游程 → 跳过（概览片已覆盖全球）；
+    // 海温子集只有下载过的那块，能画就画出来（也是"哪块有海温"的直观提示）。
+    OFData.patches(iso).forEach(function (patch) {
+      const fine = patch.resolutionDeg <= 0.1;
+      if (!globe || !fine) {
+        drawNodataPatch(stage, patch);
+        drawFrontPatch(stage, patch, patch.primary ? state.select : null);
+      }
+      drawSstPatch(stage, patch, state.select);
+    });
+    drawExtras(stage, snap, iso, state.select);
   }
+  if (globe) drawGlobeCoverage(stage);          // 作业海域 + 已取窗口（很便宜，拖动中也画）
   drawLand(stage);                     // 陆地压在数据层之上：海上缺测用纹理，陆地保持实色
   drawOriginLayer(stage);
   drawProbeMark(stage);
@@ -1688,6 +1718,7 @@ function refresh() {
   $("timeDate").max = DATE_MAX;
   renderTimeRail();
   syncOriginPicker();
+  requestViewportPatch(true);        // 换日期后这一片也要跟着换（窗口没变则命中缓存，不重复取）
 }
 
 // 服务器增强模式启用后刷新日期范围与视野（AVAILABLE_DATES / DATE_MIN / DATE_MAX 用 let 的原因）
@@ -1753,7 +1784,7 @@ function nudgeView(dxUnits, dyUnits, atLat) {
   state.view.lat0 = clamp(state.view.lat0, -89, 89);
 }
 
-function applyZoom(smooth) {
+function applyZoom(smooth, opts) {
   const aspect = mapAspect();
   state.zoom = clampZoom(state.zoom);
   const before = _view.mode;
@@ -1771,12 +1802,13 @@ function applyZoom(smooth) {
     drawMap();                                          // 平面↔球面：几何全变，必须整档重画
     fadeInStage();
   } else if (globeMode()) {
-    drawMap();                                          // 球面档：转动的是球面，几何必须重投影
+    drawMap(opts);                                      // 球面档：转动的是球面，几何必须重投影
   } else {
     refreshGraticule();                                 // 平面档：只动视窗，经纬网节流重画
   }
   updateScaleBar();
   saveViewSoon();
+  requestViewportPatch(true);                           // 视野变了 → 防抖后按需取这一片
 }
 // 投影切换：新档从半透明淡入，遮住"等距平面 ↔ 正射球面"那一下形变
 function fadeInStage() {
@@ -1825,15 +1857,66 @@ function updateScaleBar() {
   bar.style.width = Math.round(want / kmPerPx) + "px";
   text.textContent = want + " km";
 }
-// 球面档的口径提示：球上只画轮廓与锋面对象线，栅格数据要放大才显示（无数据不编造）
-function syncViewHint(globe) {
+// 口径提示：球面档说明当前是几度概览；平面档在视野跑出作业海域时说实话（卡片结论仍用作业海域）
+function syncViewHint() {
   const hint = $("mapViewHint");
   if (!hint) return;
-  if (!globe) { hint.hidden = true; return; }
   const span = Math.round(_view.span);
-  hint.hidden = false;
-  hint.textContent = "球面视图（可见约 " + span + "° 经度）：全球轮廓 + 数据覆盖框 + 锋面对象线；"
-    + "放大到 40° 以内显示 0.05° 栅格（海温 / 锋面带 / 冷暖侧）";
+  const ready = OFData.hasDay(state.date) || OFData.serverAvailable(state.date);
+  const list = ready ? OFData.patches(state.date) : [];
+  const coarse = list.filter((item) => item.overview)
+    .sort((a, b) => b.resolutionDeg - a.resolutionDeg)[0] || null;
+  const detailed = list.some((item) => item.resolutionDeg <= 0.05);
+
+  if (globeMode()) {
+    hint.hidden = false;
+    hint.textContent = coarse
+      ? "球面视图（可见约 " + span + "° 经度）：" + coarse.resolutionDeg.toFixed(1) +
+        "° 概览（真实数据按块聚合，不做对象识别）＋世界轮廓；放大到 40° 以内自动换 0.05° 明细"
+      : "球面视图（可见约 " + span + "° 经度）：正在取这一片的概览数据…（先画世界轮廓，不编数据）";
+    return;
+  }
+  const win = ready ? OFData.workingWindow(state.date) : null;
+  if (win && win.bbox) {
+    const cx = state.view.lon0, cy = state.view.lat0;
+    const outside = cx < win.bbox[0] || cx > win.bbox[2] || cy < win.bbox[1] || cy > win.bbox[3];
+    if (outside) {
+      hint.hidden = false;
+      hint.textContent = "当前视野在作业海域之外：图上数据是按这个窗口取的真实数据" +
+        (detailed ? "（0.05°）" : "（概览）") + "；右侧结论与统计仍基于作业海域 " +
+        Math.round(win.bbox[0]) + "–" + Math.round(win.bbox[2]) + "°E / " +
+        Math.round(win.bbox[1]) + "–" + Math.round(win.bbox[3]) + "°N" +
+        (OFData.serverEnabled() ? "" : "（离线模式只带了这一片数据，不会自动取别处）");
+      return;
+    }
+  }
+  hint.hidden = true;
+}
+
+// 视野变了就去问服务器要这一片（防抖：拖动/缩放停稳后再发请求；同样的窗口不重复要）
+let viewportTimer = 0, viewportLoading = false;
+function requestViewportPatch(soon) {
+  if (!OFData.serverEnabled()) return;
+  if (viewportTimer) clearTimeout(viewportTimer);
+  const delay = soon === false ? 0 : 420;
+  viewportTimer = setTimeout(() => {
+    viewportTimer = 0;
+    const iso = state.date;
+    if (!OFData.hasDay(iso) && !OFData.serverAvailable(iso)) return;
+    const bounds = OFMap.visibleBounds(_view, mapAspect());
+    if (!OFData.setViewWindow(bounds)) { syncViewHint(); return; }   // 窗口没变：不用取
+    viewportLoading = true;
+    if (globeMode()) syncViewHint();
+    showToast("正在取这一片的数据（按当前视野取数，窗口很大时给概览）…");
+    OFData.ensureViewport(iso).then((ok) => {
+      viewportLoading = false;
+      if (ok) showToast("这一片数据已到位");
+      invalidate();
+      drawMap();
+      syncViewHint();
+      renderLegend(); renderPick(); renderProbe();
+    });
+  }, delay);
 }
 
 // 一键在「整颗地球」与「数据窗口」之间切换
@@ -1981,11 +2064,12 @@ function bind() {
     const wasGlobe = globeMode();
     syncView();
     if (wasGlobe || globeMode()) {
-      // 球面档：转动的是球面，必须重投影（rAF 节流，一帧最多重画一次）
+      // 球面档：转动的是球面，必须重投影（rAF 节流，一帧最多重画一次）；
+      // 拖动中先跳过数据片（概览层也要重投影几千条游程），松手时再补上
       if (!drag.raf) {
         drag.raf = requestAnimationFrame(() => {
           if (drag) drag.raf = 0;
-          drawMap();
+          drawMap({ skipData: true });
         });
       }
     } else {
@@ -1996,7 +2080,9 @@ function bind() {
   };
   const dragEnd = () => {
     if (drag && drag.moved > 4) suppressClick = true;  // 拖动结束那一下不算点击
+    const moved = !!(drag && drag.moved > 4);
     if (drag) { drag = null; saveViewSoon(); }
+    if (moved && globeMode()) drawMap();               // 松手：把数据片补回来
     const host = $("gratHost");
     if (host && !globeMode()) refreshGraticule();
     if (globeMode()) updateScaleBar();

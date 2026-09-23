@@ -150,6 +150,7 @@
         if (!payload || !payload.front) throw new Error("payload 缺少 front");
         DAYS[iso] = payload.front;
         if (payload.sst) SST[iso] = payload.sst;
+        if (payload.window) addPatch(iso, payload, true);   // 注册成「主片」（作业海域，永远是 0.05°）
         return true;
       })
       .catch(function () { SERVER.failed[iso] = true; return false; })
@@ -158,7 +159,143 @@
     return task;
   }
 
-  // ---- 渔场线索（GFW apparent fishing effort；目前只有服务器模式提供）----
+  // ---- 视野窗口片：服务器按「当前视野」出数（bbox + 降采样）----
+  // 目的：球面 / 大洲尺度也能看到真实数据 —— 后端按窗口取原始全球网格，
+  // 窗口很大时自动降采样成概览（front.overview 标明口径，概览不做对象识别）；
+  // 放大到 40° 以内自动换 0.05° 明细。离线（file://）没有服务器，只有本地那一片，行为不变。
+  const PATCHES = {};              // iso -> [patch]（patch = 一片数据 + 自己的 grid）
+  const MAX_PATCHES_PER_DATE = 4;
+  const VIEW_WINDOW = { key: null, bbox: null, step: 1, inflight: {}, failed: {} };
+
+  /** 视野跨度 → 降采样档（与后端 STEPS 对齐：1=0.05°、4=0.2°、20=1°、40=2°） */
+  function stepForWindow(widthDeg) {
+    if (!(widthDeg > 0)) return 1;
+    if (widthDeg <= 12) return 1;
+    if (widthDeg <= 40) return 4;
+    if (widthDeg <= 90) return 20;
+    return 40;
+  }
+
+  function bboxKey(bbox, step) {
+    return bbox.map(function (value) { return Math.round(value * 100) / 100; }).join(",") + "@" + step;
+  }
+
+  /** 可见范围 → 「5° 对齐 + 2° 余量」的窗口（拖一点就重新取数会很浪费） */
+  function snapViewBbox(bounds) {
+    if (!bounds) return { bbox: [-180, -90, 180, 90], step: 40 };     // 球面档：整颗地球（2° 概览）
+    const margin = 2;
+    const floor5 = function (value) { return Math.max(-180, Math.floor((value - margin) / 5) * 5); };
+    const ceil5 = function (value) { return Math.min(180, Math.ceil((value + margin) / 5) * 5); };
+    const floor5lat = function (value) { return Math.max(-90, Math.floor((value - margin) / 5) * 5); };
+    const ceil5lat = function (value) { return Math.min(90, Math.ceil((value + margin) / 5) * 5); };
+    let minLon = floor5(bounds.lonMin), maxLon = ceil5(bounds.lonMax);
+    let minLat = floor5lat(bounds.latMin), maxLat = ceil5lat(bounds.latMax);
+    if (maxLon - minLon < 5) { const mid = (maxLon + minLon) / 2; minLon = mid - 2.5; maxLon = mid + 2.5; }
+    if (maxLat - minLat < 5) { const mid = (maxLat + minLat) / 2; minLat = mid - 2.5; maxLat = mid + 2.5; }
+    minLon = Math.max(-180, minLon); maxLon = Math.min(180, maxLon);
+    minLat = Math.max(-90, minLat); maxLat = Math.min(90, maxLat);
+    const step = stepForWindow(maxLon - minLon);
+    return { bbox: [minLon, minLat, maxLon, maxLat], step: step };
+  }
+
+  /** 页面在视野变化后调用；返回 true 表示窗口变了（需要重新取数） */
+  function setViewWindow(bounds) {
+    const next = snapViewBbox(bounds);
+    const key = bboxKey(next.bbox, next.step);
+    const changed = key !== VIEW_WINDOW.key;
+    VIEW_WINDOW.key = key;
+    VIEW_WINDOW.bbox = next.bbox;
+    VIEW_WINDOW.step = next.step;
+    return changed;
+  }
+
+  function viewWindow() {
+    return { key: VIEW_WINDOW.key, bbox: VIEW_WINDOW.bbox, step: VIEW_WINDOW.step };
+  }
+
+  function addPatch(iso, payload, isPrimary) {
+    const window = payload.window || {};
+    const bbox = Array.isArray(window.bbox) ? window.bbox.slice(0, 4) : null;
+    if (!payload.front || !payload.front.grid || !bbox) return null;
+    const entry = {
+      key: bboxKey(bbox, Number(window.step) || 1),
+      bbox: bbox,
+      step: Number(window.step) || 1,
+      resolutionDeg: Number(window.resolution_deg) || payload.front.grid.dlon || 0.05,
+      mode: window.mode || "detail",
+      overview: !!payload.front.overview,
+      grid: payload.front.grid,
+      front: payload.front,
+      sst: payload.sst || null,
+      primary: !!isPrimary,
+    };
+    const list = PATCHES[iso] || (PATCHES[iso] = []);
+    const at = list.findIndex(function (item) { return item.key === entry.key; });
+    if (at >= 0) list[at] = entry; else list.push(entry);
+    while (list.length > MAX_PATCHES_PER_DATE) {
+      const victim = list.findIndex(function (item) { return !item.primary; });
+      if (victim < 0) break;
+      list.splice(victim, 1);
+    }
+    return entry;
+  }
+
+  /** 取某天当前视野的窗口片；已经取过/正在取/取不到都不重复打服务器 */
+  function ensureViewport(iso) {
+    if (!SERVER.enabled || !VIEW_WINDOW.bbox) return Promise.resolve(false);
+    const key = VIEW_WINDOW.key;
+    const list = PATCHES[iso] || [];
+    if (list.some(function (item) { return item.key === key; })) return Promise.resolve(true);
+    if (VIEW_WINDOW.failed[key]) return Promise.resolve(false);
+    if (VIEW_WINDOW.inflight[key]) return VIEW_WINDOW.inflight[key];
+    const url = SERVER.base + "/frontend/day/" + iso +
+      "?bbox=" + VIEW_WINDOW.bbox.join(",") + "&step=" + VIEW_WINDOW.step;
+    const task = fetch(url, { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) throw new Error("frontend/day window HTTP " + response.status);
+        return response.json();
+      })
+      .then(function (payload) {
+        return !!addPatch(iso, payload, false);
+      })
+      .catch(function () { VIEW_WINDOW.failed[key] = true; return false; })
+      .then(function (ok) { delete VIEW_WINDOW.inflight[key]; return ok; });
+    VIEW_WINDOW.inflight[key] = task;
+    return task;
+  }
+
+  /** 渲染用：该日所有数据片，按「粗 → 细」排（概览先画，明细压在上面） */
+  function patches(iso) {
+    const list = (PATCHES[iso] || []).slice();
+    const local = DAYS[iso];
+    if (local && !list.some(function (item) { return item.primary; })) {
+      list.push({
+        key: "local", bbox: null, step: 1,
+        resolutionDeg: local.grid && local.grid.dlon ? local.grid.dlon : 0.05,
+        mode: "detail", overview: false,
+        grid: local.grid, front: local, sst: SST[iso] || null, primary: true,
+      });
+    }
+    return list.sort(function (a, b) {
+      if (a.resolutionDeg !== b.resolutionDeg) return b.resolutionDeg - a.resolutionDeg;
+      return (a.primary ? 1 : 0) - (b.primary ? 1 : 0);
+    });
+  }
+
+  /** 作业海域（永远取「主片」：服务器模式下是按 bbox 取数时的默认窗口，离线时是本地那一片） */
+  function workingWindow(iso) {
+    const list = patches(iso);
+    const primary = list.find(function (item) { return item.primary; });
+    const pick = primary || list[list.length - 1];
+    if (!pick || !pick.grid) return null;
+    const g = pick.grid;
+    return {
+      bbox: [g.lon0, g.lat0, g.lon0 + g.dlon * g.nx, g.lat0 + g.dlat * g.ny],
+      resolutionDeg: pick.resolutionDeg,
+      source: primary ? "primary" : "finest",
+    };
+  }
+
   // 注意口径：这是基于 AIS 行为估计的「表观捕捞活动」（fishing hours），
   // 不是渔获量/产量/鱼群密度，界面必须照实标注（见 docs/data-governance-gfw-ais.md）。
   const FISHING = { days: {}, inflight: {}, failed: {} };
@@ -256,6 +393,62 @@
     return { label: "弱", tone: "weak" };
   }
 
+  /** 单片内的「这一格是什么」（原来的 cellInfo 主体，改成按片查询） */
+  function cellInfoInPatch(patch, lon, lat) {
+    const day = patch.front;
+    const grid = patch.grid;
+    if (!day || !grid) return null;
+    const col = Math.round((lon - grid.lon0) / grid.dlon);
+    const row = Math.round((lat - grid.lat0) / grid.dlat);
+    if (col < 0 || col >= grid.nx || row < 0 || row >= grid.ny) {
+      return { inGrid: false, row: row, col: col, cellLon: null, cellLat: null,
+        nodata: false, line: false, code: null, side: null };
+    }
+    const hit = function (runs) {
+      for (let i = 0; i < runs.length; i++) {
+        const run = runs[i];
+        if (run[0] === row && col >= run[1] && col < run[1] + run[2]) return run;
+      }
+      return null;
+    };
+    const band = hit(day.front_band_rle || []);
+    const nodata = hit(day.nodata_rle || []);
+    const cold = hit(day.cold_side_rle || []);
+    const warm = hit(day.warm_side_rle || []);
+    return {
+      inGrid: true,
+      row: row,
+      col: col,
+      cellLon: Math.round((grid.lon0 + col * grid.dlon) * 1000) / 1000,
+      cellLat: Math.round((grid.lat0 + row * grid.dlat) * 1000) / 1000,
+      nodata: !!nodata,
+      line: !!band,
+      code: band && band.length > 3 ? band[3] : null,
+      cold: !!cold,
+      warm: !!warm,
+      side: cold ? "冷侧" : warm ? "暖侧" : null,
+    };
+  }
+
+  /** 单片内的海温档位（原来的 sstCell 主体） */
+  function sstCellInPatch(patch, lon, lat) {
+    const day = patch.sst;
+    if (!day || !day.grid) return null;
+    const g = day.grid;
+    const col = Math.round((lon - g.lon0) / g.dlon);
+    const row = Math.round((lat - g.lat0) / g.dlat);
+    if (col < 0 || col >= g.nx || row < 0 || row >= g.ny) return { inGrid: false, valueC: null, bin: null };
+    const runs = day.runs || [];
+    for (let i = 0; i < runs.length; i++) {
+      const run = runs[i];
+      if (run[0] === row && col >= run[1] && col < run[1] + run[2]) {
+        return { inGrid: true, valueC: Math.round(run[3] * day.bin_c * 10) / 10, bin: run[3],
+          resolutionDeg: g.dlon || 0.05 };
+      }
+    }
+    return { inGrid: true, valueC: null, bin: null, resolutionDeg: g.dlon || 0.05 };
+  }
+
   const OFData = {
     meta: META,
     basemap: BASE,                                  // 1:10m 东海细节（离线兜底档）
@@ -270,6 +463,15 @@
     serverAvailable: serverAvailable,
     initServerMode: initServerMode,
     ensureDay: ensureDay,
+
+    // ---- 视野窗口片（v1.9：服务器按当前视野出数，球面/大洲尺度也有真实数据）----
+    patches: patches,
+    patchCount: function (iso) { return patches(iso).length; },
+    setViewWindow: setViewWindow,
+    viewWindow: viewWindow,
+    ensureViewport: ensureViewport,
+    workingWindow: workingWindow,
+    stepForWindow: stepForWindow,
 
     // ---- 渔场线索（GFW 表观捕捞活动；仅服务器模式可用）----
     fishingAvailable: fishingAvailable,
@@ -334,40 +536,22 @@
     quality: function (iso) { return DAYS[iso] ? DAYS[iso].quality : null; },
 
     // 某个经纬度落在哪一种像元里（真实掩码，原样返回，不做任何推测）
+    // v1.9：一天可能有多片数据（概览 + 明细），从**最细的一片**开始找；返回里带该片的分辨率，
+    // 界面据此说明「这是概览格（1°）」，不会把 1° 的聚合格说成 0.05° 的观测。
     cellInfo: function (iso, lon, lat) {
-      const day = DAYS[iso];
-      if (!day) return null;
-      const grid = day.grid;
-      const col = Math.round((lon - grid.lon0) / grid.dlon);
-      const row = Math.round((lat - grid.lat0) / grid.dlat);
-      if (col < 0 || col >= grid.nx || row < 0 || row >= grid.ny) {
-        return { inGrid: false, row: row, col: col, cellLon: null, cellLat: null,
-          nodata: false, line: false, code: null, side: null };
+      const list = patches(iso);
+      if (!list.length) return null;
+      const ordered = list.slice().sort(function (a, b) { return a.resolutionDeg - b.resolutionDeg; });
+      let outside = null;
+      for (let i = 0; i < ordered.length; i++) {
+        const info = cellInfoInPatch(ordered[i], lon, lat);
+        if (!info) continue;
+        info.resolutionDeg = ordered[i].resolutionDeg;
+        info.overview = ordered[i].overview;
+        if (info.inGrid) return info;
+        if (!outside) outside = info;
       }
-      const hit = function (runs) {
-        for (let i = 0; i < runs.length; i++) {
-          const run = runs[i];
-          if (run[0] === row && col >= run[1] && col < run[1] + run[2]) return run;
-        }
-        return null;
-      };
-      const band = hit(day.front_band_rle || []);
-      const nodata = hit(day.nodata_rle || []);
-      const cold = hit(day.cold_side_rle || []);
-      const warm = hit(day.warm_side_rle || []);
-      return {
-        inGrid: true,
-        row: row,
-        col: col,
-        cellLon: Math.round((grid.lon0 + col * grid.dlon) * 1000) / 1000,
-        cellLat: Math.round((grid.lat0 + row * grid.dlat) * 1000) / 1000,
-        nodata: !!nodata,
-        line: !!band,
-        code: band && band.length > 3 ? band[3] : null,
-        cold: !!cold,
-        warm: !!warm,
-        side: cold ? "冷侧" : warm ? "暖侧" : null,
-      };
+      return outside;
     },
 
     // ---- 海表温度（NOAA GHRSST，0.5 °C 分箱游程；没有导出的日期返回 null） ----
@@ -379,21 +563,19 @@
       return (META && META.availability && META.availability.sst && META.availability.sst.bin_c) || 0.5;
     },
     // 某个经纬度落在哪一档海温：直接在真实游程里查，不做插值
+    // v1.9：海温可能来自不同的片（东海子集 + 按视野取的子集），从最细的一片开始找
     sstCell: function (iso, lon, lat) {
-      const day = SST[iso];
-      if (!day) return null;
-      const g = day.grid;
-      const col = Math.round((lon - g.lon0) / g.dlon);
-      const row = Math.round((lat - g.lat0) / g.dlat);
-      if (col < 0 || col >= g.nx || row < 0 || row >= g.ny) return { inGrid: false, valueC: null, bin: null };
-      const runs = day.runs || [];
-      for (let i = 0; i < runs.length; i++) {
-        const run = runs[i];
-        if (run[0] === row && col >= run[1] && col < run[1] + run[2]) {
-          return { inGrid: true, valueC: Math.round(run[3] * day.bin_c * 10) / 10, bin: run[3] };
-        }
+      const list = patches(iso).filter(function (item) { return !!item.sst; });
+      if (!list.length) return null;
+      const ordered = list.slice().sort(function (a, b) { return (a.sst.grid.dlon || 0.05) - (b.sst.grid.dlon || 0.05); });
+      let outside = null;
+      for (let i = 0; i < ordered.length; i++) {
+        const info = sstCellInPatch(ordered[i], lon, lat);
+        if (!info) continue;
+        if (info.inGrid) return info;
+        if (!outside) outside = info;
       }
-      return { inGrid: true, valueC: null, bin: null };  // 这一格没有有效海温
+      return outside;   // 都不在网格里：明说"不在已下载的海温范围内"
     },
 
     // ---- 明确「还没有」的东西：一律返回 false，让界面说清楚 ----

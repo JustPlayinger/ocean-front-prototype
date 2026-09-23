@@ -25,7 +25,12 @@ from .data_index import build_sqlite_data_index, get_or_build_sqlite_data_index,
 from .data_inventory import build_data_manifest
 from .data_preparation import build_data_preparation_plan
 from .front_objects import compute_front_object_response, compute_front_tracking_response
-from .frontend_payload import FrontendPayloadUnavailable, build_frontend_payload
+from .frontend_payload import (
+    FrontendPayloadUnavailable,
+    WindowError,
+    build_frontend_payload,
+    parse_bbox,
+)
 from .history import (
     compute_history_local_response,
     compute_history_monthly_response,
@@ -310,17 +315,44 @@ def fishing_day(observation_date: date_type) -> FishingDayResponse:
 
 
 @app.get(f"{settings.api_prefix}/frontend/day/{{observation_date}}")
-def frontend_day(observation_date: date_type) -> dict[str, object]:
-    """单日的「前端离线格式」数据（逐行 RLE）。
+def frontend_day(
+    observation_date: date_type,
+    response: Response,
+    bbox: str | None = Query(
+        None,
+        description="minLon,minLat,maxLon,maxLat；省略=默认作业窗口 105–150°E / 3–45°N",
+        examples=["105,3,150,45"],
+    ),
+    step: int | None = Query(
+        None,
+        ge=1,
+        le=40,
+        description="降采样步长（0.05°×step）；省略=按窗口自动升档（大窗口给概览）",
+    ),
+) -> dict[str, object]:
+    """单日的「前端离线格式」数据（逐行 RLE），可按窗口取数。
 
     前端「服务器增强模式」按需调用它，把结果注入 OFData 缓存后沿用现有渲染路径绘制，
     因此返回结构必须与 ``frontend/prototype/data/day|sst/<date>.js`` 保持一致。
-    锋面原始文件缺失时返回 404（前端据此回退本地数据，不给空图）。
+
+    - 省略 bbox/step：默认作业窗口（105–150°E / 3–45°N）的 0.05° 明细；
+    - 带 bbox：返回**该窗口**的数据（原始锋面文件本身是全球 0.05°，所以任意海域都有真实数据）；
+      窗口很大时按窗口像元数自动降采样成概览，返回里带 ``front.overview`` 标明口径，
+      概览**不做对象识别**（避免把 1° 的块当成锋面对象）；
+    - 锋面原始文件缺失 → 404（前端据此回退本地数据，不给空图）；bbox/step 不合法 → 422。
     """
     try:
-        return build_frontend_payload(observation_date.isoformat())
+        window = parse_bbox(bbox)
+    except WindowError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    try:
+        payload = build_frontend_payload(observation_date.isoformat(), bbox=window, step=step)
+    except WindowError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     except FrontendPayloadUnavailable as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    response.headers["X-Payload-Cache"] = "hit" if payload.get("cached") else "miss"
+    return payload
 
 
 @app.get(f"{settings.api_prefix}/fishing/{{observation_date}}/point", response_model=FishingPointResponse)

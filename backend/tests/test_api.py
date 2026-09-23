@@ -497,3 +497,89 @@ def test_ai_agent_extracts_task_invokes_tools_and_links_evidence(
     fallback_payload = fallback_response.json()
     assert "本地模型不可用或返回无效 JSON，已回退到本地规则解析器。" in fallback_payload["structured_task"]["assumptions"]
     assert fallback_payload["structured_task"]["parameters"]["date"] == "2024-08-05"
+def _write_window_front_file(path: Path, observation_date: str) -> None:
+    """写一份「全球风格」的小窗口测试文件：lon 100–110 / lat 20–30，0.05° 网格。
+
+    内容：中间一条东西向锋面线（10，纬度 25.0），其北侧冷侧（-20）、南侧暖侧（20），
+    西南角一块缺测（-128）；其余为 0（数据里 0 = 无锋面）。
+    """
+    lon = np.round(np.arange(100.0, 110.0 + 0.001, 0.05), 3)
+    lat = np.round(np.arange(20.0, 30.0 + 0.001, 0.05), 3)
+    values = np.zeros((lat.size, lon.size), dtype=np.int16)
+    row = int(round((25.0 - lat[0]) / 0.05))     # 纬度 25.0 那一行
+    values[row, 40:140] = 10                      # 锋面线（5° ≈ 500 km，够长，会被编号）
+    values[row + 20:row + 80, 40:140] = -20       # 冷侧（北，约 1–4°）
+    values[row - 80:row - 20, 40:140] = 20        # 暖侧（南，约 1–4°）
+    values[0:20, 0:20] = -128                     # 西南角缺测块
+    dataset = xr.Dataset(
+        data_vars={"front": (("lat", "lon", "time"), values[:, :, np.newaxis].astype(np.int8))},
+        coords={
+            "lat": lat.astype(np.float32),
+            "lon": lon.astype(np.float32),
+            "time": np.array([np.datetime64(observation_date)], dtype="datetime64[ns]"),
+        },
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dataset.to_netcdf(path, engine="h5netcdf")
+
+
+def test_frontend_payload_window_bbox_and_lod(tmp_path: Path, monkeypatch) -> None:
+    """按窗口取数（bbox）+ 大窗口自动降采样概览（step）—— 「数据铺满」的后端契约。"""
+    raw_root = tmp_path / "raw"
+    monkeypatch.setattr(settings, "raw_data_dir", raw_root)
+    monkeypatch.setattr(settings, "cache_dir", tmp_path / "cache")
+    _write_window_front_file(raw_root / "front" / "2024" / "front_location20240805.nc", "2024-08-05")
+    _write_sst_file(raw_root / "sst" / "2024" / "sst_20240805.nc")   # 海温在 120–121°E：与下面的窗口无交集
+
+    # ① 默认窗口（作业海域）：仍是 0.05° 明细；海温文件（120–121°E）落在窗口内 → 一起返回
+    default = client.get("/api/frontend/day/2024-08-05")
+    assert default.status_code == 200
+    body = default.json()
+    assert body["window"]["default"] is True
+    assert body["window"]["step"] == 1 and body["window"]["mode"] == "detail"
+    assert "overview" not in body["front"]
+    assert body["front"]["grid"]["dlon"] == 0.05
+    assert body["sst"] is not None and body["front"]["has_sst"] is True
+    assert body["sst"]["grid"]["lon0"] == 120.0
+
+    # ② 显式窗口：0.05° 明细，对象识别照常；该窗口与海温文件无交集 → 明说没有，不编
+    detail = client.get("/api/frontend/day/2024-08-05", params={"bbox": "100,20,110,30"})
+    assert detail.status_code == 200
+    detail_body = detail.json()
+    assert detail_body["window"]["bbox"] == [100.0, 20.0, 110.0, 30.0]
+    assert detail_body["window"]["step"] == 1
+    assert detail_body["front"]["object_line_count"] == 1
+    assert detail_body["front"]["objects"][0]["front_id"] == "F001"
+    assert detail_body["sst"] is None and detail_body["front"]["has_sst"] is False
+
+    # ③ 同窗口 + step=20：降采样概览——不做对象识别，但带/冷/暖/缺测都要在
+    coarse = client.get("/api/frontend/day/2024-08-05", params={"bbox": "100,20,110,30", "step": 20})
+    assert coarse.status_code == 200
+    coarse_body = coarse.json()
+    assert coarse_body["window"]["step"] == 20 and coarse_body["window"]["resolution_deg"] == 1.0
+    assert coarse_body["window"]["mode"] == "overview"
+    assert coarse_body["front"]["overview"]["step"] == 20
+    assert "统计与对象清单仍用 0.05°" in coarse_body["front"]["overview"]["note"]
+    assert coarse_body["front"]["grid"]["dlon"] == 1.0
+    assert coarse_body["front"]["objects"] == [] and coarse_body["front"]["front_line"] == []
+    assert coarse_body["front"]["object_line_count"] == 0
+    # 25.0°N 的锋面线在第 100 行 → 1° 概览落在第 5 行（块内有线就记线，不会被邻居抹掉）
+    assert any(run[0] == 5 for run in coarse_body["front"]["front_band_rle"])
+    assert coarse_body["front"]["cold_side_rle"], "冷侧应聚合成概览格"
+    assert coarse_body["front"]["warm_side_rle"], "暖侧应聚合成概览格"
+    assert coarse_body["front"]["nodata_rle"], "整块缺测才记缺测"
+
+    # ④ 同参数第二次：命中磁盘缓存
+    again = client.get("/api/frontend/day/2024-08-05", params={"bbox": "100,20,110,30", "step": 20})
+    assert again.headers["X-Payload-Cache"] == "hit"
+    assert again.json()["cached"] is True
+
+    # ⑤ 参数不合法：bbox 顺序/个数、step 档位
+    assert client.get("/api/frontend/day/2024-08-05", params={"bbox": "110,20,100,30"}).status_code == 422
+    assert client.get("/api/frontend/day/2024-08-05", params={"bbox": "1,2,3"}).status_code == 422
+    assert client.get("/api/frontend/day/2024-08-05", params={"bbox": "100,20,110,30", "step": 3}).status_code == 422
+    assert client.get("/api/frontend/day/2024-08-05", params={"bbox": "100,20,110,30", "step": 41}).status_code == 422
+
+    # ⑥ 没有原始文件的那天：404（前端据此回退本地数据，不给空图）
+    assert client.get("/api/frontend/day/2024-08-06").status_code == 404
+
