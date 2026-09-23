@@ -27,11 +27,12 @@ const KM2PX = PX_LON / (KM_PER_DEG * Math.cos((ANCHOR.lat * Math.PI) / 180));
 const PX_LAT = KM2PX * KM_PER_DEG;
 
 // 时间范围直接来自数据（有几天就只让选几天）
-const AVAILABLE_DATES = OFData.availableDates();
+// 「服务器增强模式」启用后这三个值会被 applyServerRange() 重新计算，故用 let。
+let AVAILABLE_DATES = OFData.availableDates();
 const DEMO_TODAY = "2024-08-05";      // 项目演示用的「今天」（与需求文档、样例数据一致）
 const TODAY = AVAILABLE_DATES.indexOf(DEMO_TODAY) >= 0 ? DEMO_TODAY : OFData.firstDate();
-const DATE_MIN = OFData.firstDate();
-const DATE_MAX = OFData.lastDate();
+let DATE_MIN = OFData.firstDate();
+let DATE_MAX = OFData.lastDate();
 const DEFAULT_ZOOM = 0.8;              // 默认视野：略微拉远，海岸线/陆地能进画面
 
 // ==================== 状态（唯一真源） ====================
@@ -1460,13 +1461,28 @@ function clampDate(iso) {
   if (iso > DATE_MAX) return DATE_MAX;
   return iso;
 }
+// 服务器增强模式：本地没有这一天时先按需拉取再渲染。
+// 离线（file://）下 serverAvailable() 恒为 false，等价于原来的「直接 refresh」，行为不变。
+function loadThenRefresh(iso) {
+  if (OFData.hasDay(iso) || !OFData.serverAvailable(iso)) {
+    refresh();
+    return;
+  }
+  refresh();                              // 先渲染空态；dateInfo 会说明「正在从服务器取这一天」
+  OFData.ensureDay(iso).then(function (ok) {
+    if (state.date !== iso) return;       // 期间用户又换了日期，丢弃这次结果
+    if (!ok && !OFData.hasDay(iso)) showToast(mdText(iso) + " 没取到，请换个日期");
+    refresh();
+  });
+}
+
 function setDate(iso) {
   const d = clampDate(iso);
   if (!d) return;
   if (d !== iso) showToast("可选日期为 " + mdText(DATE_MIN) + " ~ " + mdText(DATE_MAX));
   if (d === state.date) return;
   state.date = d;
-  refresh();
+  loadThenRefresh(d);
 }
 
 let playTimer = null;
@@ -1518,6 +1534,13 @@ function refresh() {
   $("timeDate").max = DATE_MAX;
   renderTimeRail();
   syncOriginPicker();
+}
+
+// 服务器增强模式启用后刷新日期范围（AVAILABLE_DATES / DATE_MIN / DATE_MAX 用 let 的原因）
+function applyServerRange() {
+  AVAILABLE_DATES = OFData.availableDates();
+  DATE_MIN = OFData.firstDate();
+  DATE_MAX = OFData.lastDate();
 }
 
 function switchTab(name) {
@@ -1787,3 +1810,11 @@ bind();
 refresh();
 applyZoom(false);      // 按 state.zoom 设定初始视野（默认略微拉远，海岸线在画面内）
 switchTab("now");
+
+// 服务器增强模式（可选）：成功则把日期范围扩到服务器上的全量日期并重渲染；
+// file:// 打开或 API 不可达时静默跳过，页面保持纯离线行为。
+OFData.initServerMode().then(function (enabled) {
+  if (!enabled) return;
+  applyServerRange();
+  refresh();
+});

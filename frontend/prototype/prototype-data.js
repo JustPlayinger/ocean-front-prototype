@@ -22,6 +22,34 @@
   const SORTED_DATES = Object.keys(DAYS).sort();
   const SST_DATES = Object.keys(SST).sort();
 
+  // ---- 服务器增强模式（可选）----
+  // 后端 /api/frontend/day/<date> 会按需产出与离线 data/day|sst/<date>.js 完全一致的结构，
+  // 这里把它注入 DAYS/SST 缓存，下游渲染函数无需任何改动即可绘制服务器上的全量日期。
+  // 重要：file:// 打开或未配置 API 时本模式整体关闭，离线行为与断言保持原样。
+  const SERVER = {
+    base: null,
+    enabled: false,
+    sortedDates: [],
+    dateSet: {},
+    inflight: {},
+    failed: {},
+  };
+
+  function serverBase() {
+    if (typeof window.OF_API_BASE === "string" && window.OF_API_BASE) {
+      return window.OF_API_BASE.replace(/\/+$/, "");
+    }
+    // 同源部署（nginx 已把 /api 反代到后端）时用相对路径；file:// 下没有同源 API
+    if (typeof location !== "undefined" && /^https?:$/.test(location.protocol)) return "/api";
+    return null;
+  }
+
+  function mergedDates() {
+    if (!SERVER.enabled || !SERVER.sortedDates.length) return SORTED_DATES;
+    const merged = SORTED_DATES.slice().concat(SERVER.sortedDates).sort();
+    return merged.filter(function (iso, index) { return index === 0 || merged[index - 1] !== iso; });
+  }
+
   const BAND_KIND = { front: "front_band_rle", coldwarm: "cold_side_rle", cold: "cold_side_rle", warm: "warm_side_rle" };
 
   function toObject(raw) {
@@ -78,15 +106,75 @@
     };
   }
 
+  // ---- 服务器增强模式：探测 / 按需加载（不改变离线行为）----
+
+  /** 拉 /api/catalog 拿到服务器上的全量可用日期；任何失败都静默退回离线模式。 */
+  function initServerMode() {
+    const base = serverBase();
+    if (!base || SERVER.enabled) return Promise.resolve(false);
+    SERVER.base = base;
+    return fetch(base + "/catalog", { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) throw new Error("catalog HTTP " + response.status);
+        return response.json();
+      })
+      .then(function (data) {
+        const dates = Array.isArray(data.available_dates) ? data.available_dates.slice().sort() : [];
+        if (!dates.length) return false;
+        SERVER.sortedDates = dates;
+        dates.forEach(function (iso) { SERVER.dateSet[iso] = true; });
+        SERVER.enabled = true;
+        return true;
+      })
+      .catch(function () { SERVER.enabled = false; return false; });
+  }
+
+  function serverEnabled() { return SERVER.enabled === true; }
+
+  /** 服务器上是否存在该日期（不代表已加载）。 */
+  function serverAvailable(iso) { return !!(SERVER.enabled && SERVER.dateSet[iso]); }
+
+  /** 按需把服务器单日数据注入 DAYS/SST；并发同一天只发一次，失败记住不重试。 */
+  function ensureDay(iso) {
+    if (Object.prototype.hasOwnProperty.call(DAYS, iso)) return Promise.resolve(true);
+    if (!serverAvailable(iso) || SERVER.failed[iso]) return Promise.resolve(false);
+    if (SERVER.inflight[iso]) return SERVER.inflight[iso];
+    const url = SERVER.base + "/frontend/day/" + iso;
+    const task = fetch(url, { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) throw new Error("frontend/day HTTP " + response.status);
+        return response.json();
+      })
+      .then(function (payload) {
+        if (!payload || !payload.front) throw new Error("payload 缺少 front");
+        DAYS[iso] = payload.front;
+        if (payload.sst) SST[iso] = payload.sst;
+        return true;
+      })
+      .catch(function () { SERVER.failed[iso] = true; return false; })
+      .then(function (ok) { delete SERVER.inflight[iso]; return ok; });
+    SERVER.inflight[iso] = task;
+    return task;
+  }
+
   const OFData = {
     meta: META,
     basemap: BASE,
     clim: CLIM,
 
+    // ---- 服务器增强模式（可选）----
+    // 未启用时 serverEnabled() 恒为 false、serverAvailable() 恒为 false、ensureDay() 立即返回 false，
+    // 因此离线（file://）行为与既有断言不受影响。
+    serverEnabled: serverEnabled,
+    serverAvailable: serverAvailable,
+    initServerMode: initServerMode,
+    ensureDay: ensureDay,
+
     // ---- 日期与可用性 ----
-    availableDates: function () { return SORTED_DATES.slice(); },
-    firstDate: function () { return SORTED_DATES[0] || null; },
-    lastDate: function () { return SORTED_DATES[SORTED_DATES.length - 1] || null; },
+    availableDates: function () { return mergedDates(); },
+    firstDate: function () { const all = mergedDates(); return all[0] || null; },
+    lastDate: function () { const all = mergedDates(); return all[all.length - 1] || null; },
+    // 注意：hasDay 的语义仍是「本地数据已就绪」，服务器上存在但未加载的日期不算 —— 渲染前必须先 ensureDay。
     hasDay: function (iso) { return Object.prototype.hasOwnProperty.call(DAYS, iso); },
     day: function (iso) { return DAYS[iso] || null; },
 
@@ -99,6 +187,13 @@
         return { ok: false, title: "没有导出的日期", desc: "data/day/ 下没有文件，先跑 export_prototype_data.py" };
       }
       if (!DAYS[iso]) {
+        if (serverAvailable(iso)) {
+          return {
+            ok: false,
+            title: "正在从服务器取这一天",
+            desc: "该日期在服务器上有数据，页面会按需加载（加载完成前不给结论）。",
+          };
+        }
         return {
           ok: false,
           title: "这天没有数据",

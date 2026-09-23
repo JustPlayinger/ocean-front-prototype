@@ -25,6 +25,7 @@ from .data_index import build_sqlite_data_index, get_or_build_sqlite_data_index,
 from .data_inventory import build_data_manifest
 from .data_preparation import build_data_preparation_plan
 from .front_objects import compute_front_object_response, compute_front_tracking_response
+from .frontend_payload import FrontendPayloadUnavailable, build_frontend_payload
 from .history import (
     compute_history_local_response,
     compute_history_monthly_response,
@@ -306,6 +307,20 @@ def fishing_day(observation_date: date_type) -> FishingDayResponse:
         raster_bounds=bounds,
         source=FishingSource(**fishing_effort.SOURCE),
     )
+
+
+@app.get(f"{settings.api_prefix}/frontend/day/{{observation_date}}")
+def frontend_day(observation_date: date_type) -> dict[str, object]:
+    """单日的「前端离线格式」数据（逐行 RLE）。
+
+    前端「服务器增强模式」按需调用它，把结果注入 OFData 缓存后沿用现有渲染路径绘制，
+    因此返回结构必须与 ``frontend/prototype/data/day|sst/<date>.js`` 保持一致。
+    锋面原始文件缺失时返回 404（前端据此回退本地数据，不给空图）。
+    """
+    try:
+        return build_frontend_payload(observation_date.isoformat())
+    except FrontendPayloadUnavailable as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @app.get(f"{settings.api_prefix}/fishing/{{observation_date}}/point", response_model=FishingPointResponse)
