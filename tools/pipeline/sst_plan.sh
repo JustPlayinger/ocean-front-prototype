@@ -60,10 +60,9 @@ run_phase "B 全球粗格 1°：2024+2023" tools/pipeline/sst_global_pipeline.py
 # C：全球粗格 1°，2021 + 2022
 run_phase "C 全球粗格 1°：2022+2021" tools/pipeline/sst_global_pipeline.py --stride 20 --years 2022 2021 --workers 3
 
-# D：全球高分辨率（默认不跑；选一种再取消注释）
-#   0.25° 两年 ≈ 5GB（盘内可行，比 1° 细 4 倍）
-# run_phase "D 全球 0.25°：2024+2023" tools/pipeline/sst_global_pipeline.py --stride 4 --years 2024 2023 --workers 3
-#   0.05° 全分辨率两年 ≈ 80–100GB（必须先把盘扩到 200GB 级）
+# D：全球高分辨率（0.25° 两年 ≈ 5GB，盘内可行；比 1° 粗格细 4 倍）
+run_phase "D 全球 0.25°：2024+2023" tools/pipeline/sst_global_pipeline.py --stride 4 --years 2024 2023 --workers 3
+#   0.05° 全分辨率两年 ≈ 80–100GB（必须先把盘扩到 200GB 级）——决定扩盘后再取消下面这行
 # run_phase "D 全球 0.05° 全分辨率：2024+2023" tools/pipeline/sst_global_pipeline.py --stride 1 --years 2024 2023 --workers 2
 
 log "=== 计划结束（东海 $(count_regional) 天 · 全球粗格 $(count_global) 天 · 磁盘可用 $(free_gb)GB）==="

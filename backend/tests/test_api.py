@@ -583,3 +583,50 @@ def test_frontend_payload_window_bbox_and_lod(tmp_path: Path, monkeypatch) -> No
     # ⑥ 没有原始文件的那天：404（前端据此回退本地数据，不给空图）
     assert client.get("/api/frontend/day/2024-08-06").status_code == 404
 
+
+
+def _write_global_sst_file(path: Path, cells: int = 40) -> None:
+    """写一份「全球粗格」合成海温（cells×cells，覆盖 -180..180 / -90..90），用于验证隔格取样。"""
+    lon = np.linspace(-180.0, 180.0, cells, dtype=np.float32)
+    lat = np.linspace(-90.0, 90.0, cells, dtype=np.float32)
+    values = np.full((cells, cells), 20.0, dtype=np.float32)
+    dataset = xr.Dataset(
+        data_vars={"analysed_sst": (("time", "latitude", "longitude"), values[np.newaxis, :, :])},
+        coords={
+            "time": np.array([np.datetime64("2024-08-05")], dtype="datetime64[ns]"),
+            "latitude": lat,
+            "longitude": lon,
+        },
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dataset.to_netcdf(path, engine="h5netcdf")
+
+
+def test_frontend_payload_thins_dense_global_sst(tmp_path: Path, monkeypatch) -> None:
+    """全球粗格升到 0.25° 后，整球窗口必须被隔格取样（否则 payload 会有几十万条游程）。"""
+    from app import frontend_payload as payload_module
+
+    raw_root = tmp_path / "raw"
+    monkeypatch.setattr(settings, "raw_data_dir", raw_root)
+    monkeypatch.setattr(settings, "cache_dir", tmp_path / "cache")
+    monkeypatch.setattr(payload_module, "SST_MAX_CELLS", 500)        # 40×40 = 1600 格 → 必须隔格
+    _write_window_front_file(raw_root / "front" / "2024" / "front_location20240805.nc", "2024-08-05")
+    _write_global_sst_file(raw_root / "sst_global" / "2024" / "sst_20240805.nc", cells=40)
+
+    body = client.get("/api/frontend/day/2024-08-05",
+                      params={"bbox": "-180,-90,180,90", "step": 40}).json()
+    coarse = body["sst_coarse"]
+    assert coarse is not None, "整球窗口应带全球粗格海温"
+    grid = coarse["grid"]
+    # 40×40 且上限 500 → 隔 2 格 → 20×20、步长翻倍、起点不变
+    assert (grid["nx"], grid["ny"]) == (20, 20)
+    assert grid["lon0"] == -180.0 and grid["lat0"] == -90.0
+    assert grid["dlon"] == round(360.0 / 39 * 2, 3) and grid["dlat"] == round(180.0 / 39 * 2, 3)
+    assert body["front"]["has_sst"] is True
+
+    # 小窗口不该被隔格：同一份文件裁到很小一块时步长保持原样（起点/步长仍由坐标数组给出）
+    small = client.get("/api/frontend/day/2024-08-05",
+                       params={"bbox": "100,20,110,30", "step": 20}).json()["sst_coarse"]
+    # 合成文件是 40×40（步长 9.23°），10°×10° 的窗口取不到 2 个点 → 明说没有，而不是给个错的格子
+    assert small is None or small["grid"]["dlon"] == round(360.0 / 39, 3)
+

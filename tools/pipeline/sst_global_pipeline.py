@@ -40,6 +40,13 @@ if not DEFAULT_LOG.parent.is_dir():
     DEFAULT_LOG = REPO / "data" / "cache" / "sst-global.log"
 
 
+def res_label(stride: int) -> str:
+    """按 stride 给分辨率一个稳定目录名：20 → 1deg、4 → 0p25、2 → 0p1、1 → 0p05。"""
+    res = 0.05 * stride
+    text = f"{res:.2f}".rstrip("0").rstrip(".")
+    return text.replace(".", "p") + "deg"
+
+
 def dates_between(start: str, end: str) -> list[str]:
     cursor = date.fromisoformat(start)
     last = date.fromisoformat(end)
@@ -84,7 +91,9 @@ def main() -> int:
     days = sorted(set(days))
 
     res = round(0.05 * args.stride, 2)
-    log_line(args.log, f"全球粗格海温：{len(days)} 天（{days[0]} ~ {days[-1]}）· {res}° · 并发 {args.workers}")
+    label = res_label(args.stride)
+    out_root = SST_ROOT / label                     # 按分辨率分目录：1deg / 0p25 …（同名日期不互相顶掉）
+    log_line(args.log, f"全球海温：{len(days)} 天（{days[0]} ~ {days[-1]}）· {res}° · 输出 {out_root} · 并发 {args.workers}")
     free = shutil.disk_usage(RAW_ROOT).free / (1024 ** 3)
     if free < args.min_free_gb:
         log_line(args.log, f"磁盘可用 {free:.1f} GB 低于 {args.min_free_gb} GB，停止")
@@ -95,7 +104,7 @@ def main() -> int:
     handles = [open(f"/tmp/sst-global-w{i}.log", "ab", buffering=0) for i in range(len(per_worker))]
     processes = [
         subprocess.Popen(
-            [str(PYTHON), str(FETCHER), "--output-root", str(SST_ROOT), "--continue-on-error",
+            [str(PYTHON), str(FETCHER), "--output-root", str(out_root), "--continue-on-error",
              "--bbox=-180,-90,180,90", "--stride", str(args.stride),
              # 粗格层只需要 analysed_sst：mask 不参与出数（后端按有限值 + −5~45°C 过滤），少要一半字节
              "--variables", "analysed_sst",
@@ -110,8 +119,8 @@ def main() -> int:
         log_line(args.log, f"   worker {index} exit={process.wait()}")
     for handle in handles:
         handle.close()
-    done = len(list(SST_ROOT.glob("*/*.nc")))
-    log_line(args.log, f"结束：raw/sst_global 已落盘 {done} 天")
+    done = len(list(out_root.glob("*/*.nc")))
+    log_line(args.log, f"结束：{out_root} 已落盘 {done} 天")
     return 0
 
 

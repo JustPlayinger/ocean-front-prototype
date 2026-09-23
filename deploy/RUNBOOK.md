@@ -175,14 +175,20 @@ Remove-Item Env:\PAGE
 
 - `raw/sst/`（东海 120.03–128.02°E / 27.02–34.03°N，0.05°，5,300+ 天，≈640MB）：**作业海域的明细**，
   由 `tools/pipeline/sst_pipeline.py` 逐年补（后台常驻，2022 → 2002）。
-- `raw/sst_global/`（全球，1° = `--stride 20`，单日 ≈0.3MB；全量 2002–2024 ≈2.5GB）：**别处的粗格概览**，
-  由 `tools/pipeline/sst_global_pipeline.py` 抓（同样后台常驻、可续跑）：
+- `raw/sst_global/<分辨率>/`（全球，按分辨率分目录：`1deg` = `--stride 20` ≈0.27MB/天、`0p25deg` = `--stride 4` ≈6.7MB/天）：
+  **别处的海温**。后端**每种分辨率各自一个子目录**，取「最细的可用档」（有 0.25° 就用它，没有就退回 1°），
+  所以两种分辨率可以并存、互不顶掉同名日期。抓取（同样后台常驻、可续跑、跳过已存在）：
   ```bash
   cd /opt/ocean && OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw \
     setsid nohup /opt/ocean/venv/bin/python tools/pipeline/sst_global_pipeline.py \
-      --stride 20 --years 2024 > /var/log/ocean-sst-global.log 2>&1 &
+      --stride 20 --years 2024 2023 > /var/log/ocean-sst-global.log 2>&1 &
   ```
-  后端 `GET /api/frontend/day` 会同时给 `sst`（东海明细）与 `sst_coarse`（全球粗格），前端粗格垫底、明细压上。
+  后端 `GET /api/frontend/day` 会同时给 `sst`（东海明细）与 `sst_coarse`（全球，取最细可用档），
+  前端粗格垫底、明细压上；**粗格也做显示层 LOD**：窗口像元数超过 20 万就隔格取样
+  （0.25° 整球 1440×720 → 隔 3 格 0.75°），否则球面档一个 payload 会有几十万条游程。
+- **当前排期（`tools/pipeline/sst_plan.sh`，含上游探测）**：A 东海明细续跑 → B 全球 1°：2024+2023 →
+  C 全球 1°：2022+2021 → **D 全球 0.25°：2024+2023（已启用，≈5GB）**；
+  0.05° 全分辨率那行仍注释着（两年≈80–100GB，需先扩盘到 200GB 级）。
 - 单日全球子集在 ERDDAP 侧要现裁 1–3 分钟，**必须 nohup/setsid**（前台 ssh 一断就被杀）。
 - **查看进度**（两年 731 天 · 1° · 3 路，实测约 40 秒/天/路 → 全部约 2.6 小时）：
   ```bash

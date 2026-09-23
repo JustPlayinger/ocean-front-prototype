@@ -162,13 +162,65 @@ def coarsen(
     return out, lons[::step][:nx], lats[::step][:ny]
 
 
+# 粗格海温的显示上限（像元数）：超过就隔格取样。
+# 为什么必须有：sst_global 升到 0.25° 后，球面档请求的是**整球窗口**（1440×720 ≈ 104 万格），
+# 原样出 payload 会有几十万条游程（几 MB）——和锋面 LOD 一个道理，显示层该粗就粗。
+# 取值 20 万格：0.25° 整球 → 隔 3 格（0.75°，约 11.6 万格）；东海 0.05°（161×141=2.3 万格）不受影响。
+SST_MAX_CELLS = 200_000
+
+
+def _resolution_of(name: str) -> float:
+    """从目录名解析分辨率：0p25deg → 0.25、1deg → 1.0、0p05deg → 0.05（解析不出按 99 排最后）。"""
+    text = name.lower().replace("deg", "").replace("p", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return 99.0
+
+
+def _coarse_roots(raw_root: Path) -> list[Path]:
+    """全球海温的候选目录，**从细到粗**（0p25deg 先于 1deg）。
+
+    - 新布局：`raw/sst_global/<res>deg/<年>/<日期>.nc`（每个分辨率一个子目录，同名日期不互相顶掉）
+    - 旧布局：`raw/sst_global/<年>/<日期>.nc`（子目录名不是 *deg 就按旧布局处理）
+    """
+    root = raw_root / "sst_global"
+    if not root.is_dir():
+        return []
+    dirs = [child for child in root.iterdir() if child.is_dir() and child.name.lower().endswith("deg")]
+    if not dirs:
+        return [root]
+    return sorted(dirs, key=lambda child: (_resolution_of(child.name), child.name))
+
+
+
+def _thin_window(
+    values: np.ndarray,
+    lons: np.ndarray,
+    lats: np.ndarray,
+    max_cells: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """隔格取样到像元上限以内（保持起点与步长整齐 → 前端按自己的 grid 画，不会错位）。
+
+    max_cells 不给就取模块常量 SST_MAX_CELLS（**运行时读**，方便测试里 monkeypatch）。
+    """
+    limit = SST_MAX_CELLS if max_cells is None else max_cells
+    height, width = values.shape
+    factor = 1
+    while (height // factor) * (width // factor) > limit:
+        factor += 1
+    if factor == 1:
+        return values, lons, lats
+    return values[::factor, ::factor], lons[::factor], lats[::factor]
+
+
 def _sst_window(
     path: Path,
     bbox: tuple[float, float, float, float],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """读海温并裁到「窗口 ∩ 该文件实际范围」；无交集返回 None。
+    """读海温并裁到「窗口 ∩ 该文件实际范围」；无交集返回 None；过密则隔格取样。
 
-    原因：海温是按需下载的**子集**（当前只有东海/西太平洋那块），不能因为用户把视野拖到别处
+    原因：海温是按需下载的**子集**（东海 0.05° 明细 + 全球粗格两套），不能因为用户把视野拖到别处
     就假装那里有海温；同时上游 ``load_sst_window`` 在空选择上会抛 IndexError，
     所以这里先用文件自身的坐标算交集，再交给它读。
     """
@@ -193,7 +245,7 @@ def _sst_window(
     values, lons, lats = exporter.load_sst_window(path, (min_lon, min_lat, max_lon, max_lat))
     if values.size == 0 or lons.size < 2 or lats.size < 2:
         return None
-    return values, lons, lats
+    return _thin_window(values, lons, lats)
 
 
 def _cache_path(day: str, bbox: tuple[float, float, float, float], step: int) -> Path:
@@ -264,9 +316,13 @@ def build_frontend_payload(
     except FileNotFoundError as exc:
         raise FrontendPayloadUnavailable(str(exc)) from exc
 
-    values, lons, lats = exporter.load_window(front_path, window)
+    try:
+        values, lons, lats = exporter.load_window(front_path, window)
+    except IndexError:
+        # 锋面原始文件是全球的，正常不会空；但万一某天换成区域文件，
+        # load_window 会在空选择上抛 IndexError —— 统一成「无交集」的可读错误（404），别 500。
+        values, lons, lats = np.empty((0, 0), dtype=np.int16), np.empty(0), np.empty(0)
     if values.size == 0 or lons.size < 2 or lats.size < 2:
-        # 锋面原始文件是全球的，正常不会走到这里；真走到就明说，不给空图
         raise FrontendPayloadUnavailable(f"{day} 的锋面文件与窗口 {window} 无交集")
 
     coarse_values, coarse_lons, coarse_lats = coarsen(values, lats, lons, chosen)
@@ -304,23 +360,26 @@ def build_frontend_payload(
             )
             front["has_sst"] = True
 
-    # 全球粗格海温（可选）：生产上按 --stride 抓的全球概览（1°≈0.3MB/天），
-    # 单独放 raw/sst_global/，与东海 0.05° 明细**并存**：前端粗格垫底、明细压在上面，
-    # 于是"作业海域很细、别处也有海温"，不是二选一。
+    # 全球海温（可选）：按分辨率分目录（sst_global/0p25、sst_global/1deg…），取**最细的可用档**。
+    # 与东海 0.05° 明细**并存**：前端粗格垫底、明细压在上面，于是"作业海域很细、别处也有海温"。
     sst_coarse: dict[str, object] | None = None
-    coarse_path = exporter.find_sst_file(raw_root / "sst_global", day)
-    if coarse_path is not None:
+    for coarse_root in _coarse_roots(raw_root):
+        coarse_path = exporter.find_sst_file(coarse_root, day)
+        if coarse_path is None:
+            continue
         window_coarse = _sst_window(coarse_path, window)
-        if window_coarse is not None:
-            sst_coarse = exporter.build_sst_payload(
-                day,
-                window_coarse[0],
-                window_coarse[1],
-                window_coarse[2],
-                source_file=coarse_path.name,
-            )
-            if sst is None:
-                front["has_sst"] = True
+        if window_coarse is None:
+            continue
+        sst_coarse = exporter.build_sst_payload(
+            day,
+            window_coarse[0],
+            window_coarse[1],
+            window_coarse[2],
+            source_file=coarse_path.name,
+        )
+        if sst is None:
+            front["has_sst"] = True
+        break
 
     payload: dict[str, object] = {
         "date": day,
