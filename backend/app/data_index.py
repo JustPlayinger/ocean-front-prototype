@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -44,7 +45,10 @@ def build_sqlite_data_index(raw_data_dir: Path, processed_dir: Path) -> DataInde
 
     index_path = data_index_path(processed_dir)
     processed_dir.mkdir(parents=True, exist_ok=True)
-    temp_path = index_path.with_suffix(".sqlite.tmp")
+    # 临时文件名带上 pid：两个重建撞在一起时（例如抓数管线按年触发 + 人手动 POST）会互相
+    # 抢同一个 .tmp，先完成的把文件 rename 走，后一个就 FileNotFoundError → 500。
+    # （2026-09-24 线上真撞到过一次。）os.replace 仍是原子的，读者不会看到半成品。
+    temp_path = index_path.with_name(f"{index_path.name}.{os.getpid()}.tmp")
     if temp_path.exists():
         temp_path.unlink()
 
