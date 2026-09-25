@@ -51,28 +51,49 @@ wait_upstream_for() {   # $1 = 该阶段的目标目录（看它有没有新文�
 
 count_global() { find "$SST_ROOT/sst_global" -name '*.nc' 2>/dev/null | wc -l; }
 count_regional() { find "$SST_ROOT/sst" -name '*.nc' 2>/dev/null | wc -l; }
-count_nc() { find "$1" -name '*.nc' 2>/dev/null | wc -l; }
 free_gb() { df -P "$SST_ROOT" | tail -1 | awk '{printf "%.0f", $4/1048576}'; }
 
-# 自愈执行：阶段跑完若**一天新数据都没有**，判定为上游抖动 → 等 10 分钟重跑该阶段（最多 MAX_ATTEMPTS 次）
+# 数「目标目录 + 指定年份」的文件数：多个阶段共用同一个分辨率目录时（B/C 都写 1deg），
+# 只看目录总数会把"已完成"当成"没产出"或反之，所以按年份过滤。
+count_target() {   # count_target <目录> [ "2024 2023" | "" ]
+  local dir="$1" years="${2:-}"
+  if [ -n "$years" ]; then
+    find "$dir" -name '*.nc' 2>/dev/null | grep -E "/(${years// /|})/" | wc -l
+  else
+    find "$dir" -name '*.nc' 2>/dev/null | wc -l
+  fi
+}
+
+# 自愈执行：跑够 expected 天为止；某一轮没进展就等 10 分钟重试（最多 MAX_ATTEMPTS 次）。
+# 已经满足 expected 的阶段直接跳过 —— 重跑整个计划是幂等的，不会把已完成的阶段又跑一遍。
 MAX_ATTEMPTS=24
-run_phase_guarded() {   # run_phase_guarded <描述> <目标目录> <脚本> <参数...>
-  local desc="$1" target="$2" script="$3"; shift 3
+run_phase_guarded() {   # run_phase_guarded <描述> <目录> <年份串|""> <期望天数> <脚本> <参数...>
+  local desc="$1" target="$2" years="$3" expected="$4" script="$5"; shift 5
   local attempt=0 before after
+  before=$(count_target "$target" "$years")
+  if [ "$before" -ge "$expected" ]; then
+    log "跳过：$desc（已有 $before/$expected 天）"
+    return 0
+  fi
   while :; do
     attempt=$((attempt + 1))
     wait_upstream_for "$target"
-    before=$(count_nc "$target")
-    log "开始（第 $attempt 次）：$desc · 目标已有 $before 天 · 磁盘可用 $(free_gb)GB"
+    before=$(count_target "$target" "$years")
+    log "开始（第 $attempt 次）：$desc · 已有 $before/$expected 天 · 磁盘可用 $(free_gb)GB"
     "$PY" "$script" "$@" >> "$LOG" 2>&1
-    after=$(count_nc "$target")
-    if [ "$after" -gt "$before" ]; then
-      log "完成：$desc（+$((after - before)) 天，现共 $after 天）"
+    after=$(count_target "$target" "$years")
+    if [ "$after" -ge "$expected" ]; then
+      log "完成：$desc（$after/$expected 天）"
       return 0
     fi
-    log "本轮没有新数据（$before → $after，多半是上游重载/抖动）"
+    if [ "$after" -gt "$before" ]; then
+      log "本轮新增 $((after - before)) 天（$after/$expected），继续跑"
+      attempt=0                     # 有进展就重置重试计数
+      continue
+    fi
+    log "本轮没有新数据（$after/$expected，多半是上游重载/抖动）"
     if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
-      log "达到重试上限 $MAX_ATTEMPTS 次，跳过 $desc（重跑本脚本会继续）"
+      log "达到重试上限 $MAX_ATTEMPTS 次，暂缓 $desc（重跑本脚本会继续）"
       return 1
     fi
     sleep 600
@@ -82,24 +103,26 @@ run_phase_guarded() {   # run_phase_guarded <描述> <目标目录> <脚本> <�
 log "=== 海温自动计划启动（东海 $(count_regional) 天 · 全球 $(count_global) 天 · 磁盘可用 $(free_gb)GB）==="
 
 # 顺序说明（2026-09-24 调整）：**先全球（用户优先），东海续跑放最后**。
-# 原先把东海续跑放第一位，结果它要跑一两天，全球粗格一直排不上（实测 14 小时没动一天）。
-# B：全球粗格 1°，2024 + 2023
-run_phase_guarded "B 全球粗格 1°：2024+2023" "$SST_ROOT/sst_global/1deg" \
+# 参数：<描述> <目录> <年份串> <期望天数> <脚本> <参数...>
+#   B/C 共用 sst_global/1deg，所以按年份过滤计数；D 用 sst_global/0p2deg。
+# B：全球粗格 1°，2024 + 2023（366 + 365 = 731 天）
+run_phase_guarded "B 全球粗格 1°：2024+2023" "$SST_ROOT/sst_global/1deg" "2024 2023" 731 \
   tools/pipeline/sst_global_pipeline.py --stride 20 --years 2024 2023 --workers 3
 
-# C：全球粗格 1°，2021 + 2022
-run_phase_guarded "C 全球粗格 1°：2022+2021" "$SST_ROOT/sst_global/1deg" \
+# C：全球粗格 1°，2022 + 2021（365 + 365 = 730 天）
+run_phase_guarded "C 全球粗格 1°：2022+2021" "$SST_ROOT/sst_global/1deg" "2022 2021" 730 \
   tools/pipeline/sst_global_pipeline.py --stride 20 --years 2022 2021 --workers 3
 
-# D：全球 0.25°（两年 ≈ 5GB，盘内可行；比 1° 细 4 倍）
-run_phase_guarded "D 全球 0.25°：2024+2023" "$SST_ROOT/sst_global/0p25deg" \
+# D：全球 0.2°（stride 4 → 0.05°×4 = 0.2°，比 0.25° 还细一点；两年 ≈ 4.5GB）
+# 注意目录名来自 pipeline 的 res_label(stride) = 0.05×stride 去小数点 → stride 4 → 0p2deg
+run_phase_guarded "D 全球 0.2°：2024+2023" "$SST_ROOT/sst_global/0p2deg" "2024 2023" 731 \
   tools/pipeline/sst_global_pipeline.py --stride 4 --years 2024 2023 --workers 3
 #   0.05° 全分辨率两年 ≈ 80–100GB（必须先把盘扩到 200GB 级）——决定扩盘后再取消下面两行
-# run_phase_guarded "D2 全球 0.05°：2024+2023" "$SST_ROOT/sst_global/0p05deg" \
+# run_phase_guarded "D2 全球 0.05°：2024+2023" "$SST_ROOT/sst_global/0p05deg" "2024 2023" 731 \
 #   tools/pipeline/sst_global_pipeline.py --stride 1 --years 2024 2023 --workers 2
 
-# A：东海 0.05° 明细续跑（默认年份序列 2022→2002，跳过已存在的；放最后，因为它要跑更久）
-run_phase_guarded "A 东海明细 0.05°（续跑）" "$SST_ROOT/sst" \
+# A：东海 0.05° 明细续跑（2002–2024 共 8,401 天；跳过已存在的，放最后因为它要跑更久）
+run_phase_guarded "A 东海明细 0.05°（续跑）" "$SST_ROOT/sst" "" 8401 \
   tools/pipeline/sst_pipeline.py --workers 4
 
 log "=== 计划结束（东海 $(count_regional) 天 · 全球粗格 $(count_global) 天 · 磁盘可用 $(free_gb)GB）==="
