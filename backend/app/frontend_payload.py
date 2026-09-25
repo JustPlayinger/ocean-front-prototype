@@ -227,7 +227,14 @@ def _sst_window(
     import xarray as xr
 
     with exporter.readable_path(path) as src, xr.open_dataset(src) as ds:
-        name = "analysed_sst" if "analysed_sst" in ds else next(iter(ds.data_vars))
+        # 变量名：CW 的 blended 产品叫 analysed_sst；NCEI 的 OISST v2.1 叫 sst（且 sst/anom/err/ice 里排第一）
+        # —— 显式识别，别依赖字典顺序。
+        if "analysed_sst" in ds:
+            name = "analysed_sst"
+        elif "sst" in ds:
+            name = "sst"
+        else:
+            name = next(iter(ds.data_vars))
         da = ds[name]
         lat_name = "latitude" if "latitude" in da.coords else "lat"
         lon_name = "longitude" if "longitude" in da.coords else "lon"

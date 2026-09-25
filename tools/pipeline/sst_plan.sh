@@ -23,28 +23,41 @@ cd /opt/ocean
 
 log() { echo "[$(date '+%m-%d %H:%M:%S')] $*"; }
 
-upstream_code() {
-  # 用一个"小范围真实取数"探活：和实际抓取同一形状。
-  # 不要用 .dds / 单点带时间戳的采样——ERDDAP 在这两种请求上经常超时或 404，
-  # 会造成"上游明明好着、脚本却一直等"的假信号（2026-09-24 踩过）。
+# 上游探活：两种源各用各的探测（ERDDAP 挂掉时不该挡住 NCEI 那条链路）
+OISST_PROBE="https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr/202401/oisst-avhrr-v02r01.20240101.nc"
+
+upstream_code() {   # ERDDAP：与真实抓取同形状的小范围取数
   curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
     "https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDCsstDaily.nc?analysed_sst%5B(2024-01-01T00:00:00Z):1:(2024-01-01T00:00:00Z)%5D%5B(0):20:(60)%5D%5B(100):20:(160)%5D"
+}
+
+probe_ok() {   # $1 = erddap | ncei
+  local code
+  if [ "${1:-erddap}" = "ncei" ]; then
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -r 0-100 "$OISST_PROBE")
+    [ "$code" = "200" ] || [ "$code" = "206" ]
+  else
+    code=$(upstream_code)
+    [ "$code" = "200" ]
+  fi
 }
 
 recent_in() {   # 该目录最近 5 分钟是否有新文件落盘
   find "$1" -name '*.nc' -newermt '-5 minutes' 2>/dev/null | wc -l
 }
 
-wait_upstream_for() {   # $1 = 该阶段的目标目录（看它有没有新文件落盘）
-  local dir="$1" code
+wait_upstream_for() {   # wait_upstream_for <目录> <erddap|ncei>
+  local dir="$1" kind="${2:-erddap}" code
   while :; do
     if [ "$(recent_in "$dir")" -gt 0 ]; then
       log "上游可用（$dir 最近 5 分钟有新文件落盘，跳过探测）"
       return 0
     fi
-    code=$(upstream_code)
-    [ "$code" = "200" ] && return 0
-    log "上游未就绪（探测 HTTP $code，$dir 5 分钟无新文件）→ 10 分钟后再试"
+    if probe_ok "$kind"; then
+      return 0
+    fi
+    code=$([ "$kind" = "ncei" ] && echo "NCEI" || echo "ERDDAP")
+    log "上游未就绪（$code 探测失败，$dir 5 分钟无新文件）→ 10 分钟后再试"
     sleep 600
   done
 }
@@ -67,8 +80,8 @@ count_target() {   # count_target <目录> [ "2024 2023" | "" ]
 # 自愈执行：跑够 expected 天为止；某一轮没进展就等 10 分钟重试（最多 MAX_ATTEMPTS 次）。
 # 已经满足 expected 的阶段直接跳过 —— 重跑整个计划是幂等的，不会把已完成的阶段又跑一遍。
 MAX_ATTEMPTS=24
-run_phase_guarded() {   # run_phase_guarded <描述> <目录> <年份串|""> <期望天数> <脚本> <参数...>
-  local desc="$1" target="$2" years="$3" expected="$4" script="$5"; shift 5
+run_phase_guarded() {   # run_phase_guarded <描述> <目录> <年份串|""> <期望天数> <erddap|ncei> <脚本> <参数...>
+  local desc="$1" target="$2" years="$3" expected="$4" probe="$5" script="$6"; shift 6
   local attempt=0 before after
   before=$(count_target "$target" "$years")
   if [ "$before" -ge "$expected" ]; then
@@ -77,7 +90,7 @@ run_phase_guarded() {   # run_phase_guarded <描述> <目录> <年份串|""> <�
   fi
   while :; do
     attempt=$((attempt + 1))
-    wait_upstream_for "$target"
+    wait_upstream_for "$target" "$probe"
     before=$(count_target "$target" "$years")
     log "开始（第 $attempt 次）：$desc · 已有 $before/$expected 天 · 磁盘可用 $(free_gb)GB"
     "$PY" "$script" "$@" >> "$LOG" 2>&1
@@ -103,26 +116,33 @@ run_phase_guarded() {   # run_phase_guarded <描述> <目录> <年份串|""> <�
 log "=== 海温自动计划启动（东海 $(count_regional) 天 · 全球 $(count_global) 天 · 磁盘可用 $(free_gb)GB）==="
 
 # 顺序说明（2026-09-24 调整）：**先全球（用户优先），东海续跑放最后**。
-# 参数：<描述> <目录> <年份串> <期望天数> <脚本> <参数...>
-#   B/C 共用 sst_global/1deg，所以按年份过滤计数；D 用 sst_global/0p2deg。
-# B：全球粗格 1°，2024 + 2023（366 + 365 = 731 天）
-run_phase_guarded "B 全球粗格 1°：2024+2023" "$SST_ROOT/sst_global/1deg" "2024 2023" 731 \
+# 参数：<描述> <目录> <年份串> <期望天数> <erddap|ncei> <脚本> <参数...>
+#   B/C 共用 sst_global/1deg，所以按年份过滤计数；D 用 0p2deg；E 用 0p25deg（NCEI 直连）。
+
+# 顺序（2026-09-25 再调）：**E 最前** —— ERDDAP 系列阶段现在被上游故障堵住，
+# 而 E 走 NCEI 直连、当下就能跑，先把你要的"全球 0.25° 两年"拿下来；
+# ERDDAP 恢复后 B/C/D 会自动接力（守卫会一直等，但不空烧）。
+# E：全球 0.25°：2024+2023 —— **NCEI OISST v2.1 直连**（单日 1.5MB，绕开 ERDDAP）
+run_phase_guarded "E 全球 0.25°（OISST 直连）：2024+2023" "$SST_ROOT/sst_global/0p25deg" "2024 2023" 731 ncei \
+  tools/pipeline/fetch_oisst_ncei.py --years 2024 2023 --workers 3
+
+# B：全球粗格 1°，2024 + 2023（366 + 365 = 731 天）——ERDDAP 源
+run_phase_guarded "B 全球粗格 1°：2024+2023" "$SST_ROOT/sst_global/1deg" "2024 2023" 731 erddap \
   tools/pipeline/sst_global_pipeline.py --stride 20 --years 2024 2023 --workers 3
 
-# C：全球粗格 1°，2022 + 2021（365 + 365 = 730 天）
-run_phase_guarded "C 全球粗格 1°：2022+2021" "$SST_ROOT/sst_global/1deg" "2022 2021" 730 \
+# C：全球粗格 1°，2022 + 2021（365 + 365 = 730 天）——ERDDAP 源
+run_phase_guarded "C 全球粗格 1°：2022+2021" "$SST_ROOT/sst_global/1deg" "2022 2021" 730 erddap \
   tools/pipeline/sst_global_pipeline.py --stride 20 --years 2022 2021 --workers 3
 
-# D：全球 0.2°（stride 4 → 0.05°×4 = 0.2°，比 0.25° 还细一点；两年 ≈ 4.5GB）
-# 注意目录名来自 pipeline 的 res_label(stride) = 0.05×stride 去小数点 → stride 4 → 0p2deg
-run_phase_guarded "D 全球 0.2°：2024+2023" "$SST_ROOT/sst_global/0p2deg" "2024 2023" 731 \
+# D：全球 0.2°：2024+2023（ERDDAP 源；比 0.25° 略细，作为 1° 之上的备份档）
+run_phase_guarded "D 全球 0.2°：2024+2023" "$SST_ROOT/sst_global/0p2deg" "2024 2023" 731 erddap \
   tools/pipeline/sst_global_pipeline.py --stride 4 --years 2024 2023 --workers 3
 #   0.05° 全分辨率两年 ≈ 80–100GB（必须先把盘扩到 200GB 级）——决定扩盘后再取消下面两行
-# run_phase_guarded "D2 全球 0.05°：2024+2023" "$SST_ROOT/sst_global/0p05deg" "2024 2023" 731 \
+# run_phase_guarded "D2 全球 0.05°：2024+2023" "$SST_ROOT/sst_global/0p05deg" "2024 2023" 731 erddap \
 #   tools/pipeline/sst_global_pipeline.py --stride 1 --years 2024 2023 --workers 2
 
 # A：东海 0.05° 明细续跑（2002–2024 共 8,401 天；跳过已存在的，放最后因为它要跑更久）
-run_phase_guarded "A 东海明细 0.05°（续跑）" "$SST_ROOT/sst" "" 8401 \
+run_phase_guarded "A 东海明细 0.05°（续跑）" "$SST_ROOT/sst" "" 8401 erddap \
   tools/pipeline/sst_pipeline.py --workers 4
 
 log "=== 计划结束（东海 $(count_regional) 天 · 全球粗格 $(count_global) 天 · 磁盘可用 $(free_gb)GB）==="

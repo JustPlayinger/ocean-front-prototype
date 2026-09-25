@@ -350,7 +350,7 @@ def load_sst_window(path: Path, bbox: tuple[float, float, float, float]) -> tupl
     """读取单日 analysed_sst（度 C）并裁到 bbox，返回 (float 数组[lat,lon], lons, lats)。"""
     min_lon, min_lat, max_lon, max_lat = bbox
     with readable_path(path) as src, xr.open_dataset(src) as ds:
-        name = "analysed_sst" if "analysed_sst" in ds else next(iter(ds.data_vars))
+        name = "analysed_sst" if "analysed_sst" in ds else ("sst" if "sst" in ds else next(iter(ds.data_vars)))
         da = ds[name]
         if "time" in da.dims:
             da = da.isel(time=0)

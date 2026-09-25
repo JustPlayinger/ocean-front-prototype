@@ -191,7 +191,29 @@ ufw status; iptables -S | head   # 本机应为 inactive / ACCEPT
 - **流量特征**：页面启动/换日期时前端会**预热一次全球 2° 概览**（`bbox=-180,-90,180,90&step=40`，≈89 KB），
   之后每个新视野窗口再各一次；同一窗口不重复取，失败 20 s 后才重试。日常演示每天的请求数是个位数。
 
-### 海温两级（v1.11）：东海明细 + 全球粗格
+### 上游不可用时的换源（2026-09-25 实战）
+
+**症状**：`coastwatch.noaa.gov/erddap` 的 `/` 正常返 200，但 `/erddap/*` 一律 **40s 超时**；
+镜像 `coastwatch.pifsc.noaa.gov` / `erddap.aoml.noaa.gov` 上数据集在索引里（`.dds` 能出维度）
+却**取数 404 / info 404 / 索引式请求 500** —— 同族数据集共用后端，一坏一起坏。
+结论：**这是 NOAA 服务侧的故障，我们改不了，也没必要等** —— 换一条独立链路即可。
+
+**换源方案（已落地）**：NCEI 的 **OISST v2.1 0.25° 全球逐日直连文件**（1981-09 至今）：
+```
+https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr/{YYYYMM}/oisst-avhrr-v02r01.{YYYYMMDD}.nc
+```
+- ⚠️ 目录是 **年月**（`202401`），不是年（`2024` 会 404）；变量名是 **`sst`**（不是 `analysed_sst`）；
+  实测单日 1.55MB、0.25°（1440×720）、国内链路单流 40–85s。
+- 取数脚本：`tools/pipeline/fetch_oisst_ncei.py`（`--years/--dates`、并发线程 `--workers`、
+  跳过已存在、`.part` 原子写入），落到 `raw/sst_global/0p25deg/<年>/`，后端自动当"最细可用档"之一。
+- 执行入口：`tools/pipeline/sst_plan.sh` 的 **E 阶段**（放在最前，因为它当下就能跑）；
+  ERDDAP 恢复后 B/C/D 会自动接力（守卫会等，但不空烧）。
+- 用这套跑两年（731 天）：约 **1.1GB / 5–6 小时**（3 线程实测 ~2.2 天/分钟）。
+
+**教训**：探活与取数要用同一链路（ERDDAP 阶段探 ERDDAP、NCEI 阶段探 NCEI）；
+一种源挂了不该挡住另一种源（`sst_plan.sh` 里 `probe_ok erddap|ncei` 就是干这个的）。
+
+
 
 - `raw/sst/`（东海 120.03–128.02°E / 27.02–34.03°N，0.05°，5,300+ 天，≈640MB）：**作业海域的明细**，
   由 `tools/pipeline/sst_pipeline.py` 逐年补（后台常驻，2022 → 2002）。
