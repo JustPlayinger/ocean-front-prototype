@@ -158,7 +158,7 @@ Remove-Item Env:\PAGE
 | 入口 | 可用性 | 说明 |
 |---|---|---|
 | `http://116.62.54.140/` | ✅ 公网可达（外部实测 200） | 主入口。本机无 ufw/iptables 拦截，nginx 监听 0.0.0.0:80；对外可达说明 **ECS 安全组已放行 80（0.0.0.0/0）** |
-| `http://haifeng.116-62-54-140.sslip.io/`<br>`http://ocean-front.116-62-54-140.sslip.io/` | ✅ 已配置并实测 200 | **免注册别名**：sslip.io / nip.io 是公共通配 DNS，`任意前缀.<IP 连字符形式>.sslip.io` 直接解析到该 IP。nginx 里已加精确名 + `~^.+\.116-62-54-140\.sslip\.io$` / `~^.+\.116\.62\.54\.140\.nip\.io$` 通配（改前请读 `deploy/nginx/ocean.conf` 顶部四条决策）。代价：名字里仍带着 IP；依赖第三方 DNS，国内解析可能不稳 |
+| `http://haifeng.116-62-54-140.sslip.io/`<br>`http://ocean-front.116-62-54-140.sslip.io/` | ⚠️ **外部不可用（2026-09-26 实测）**：阿里云按**域名**拦截未备案站点（HTTP 403，响应头 `Server: Beaver`、页面标题 `Non-compliance ICP Filing`）——**与我们的 nginx 无关**（服务器本机带同一个 Host 头是 200，`Server: nginx`） | **免注册别名**：sslip.io / nip.io 是公共通配 DNS，`任意前缀.<IP 连字符形式>.sslip.io` 直接解析到该 IP。nginx 里已加精确名 + `~^.+\.116-62-54-140\.sslip\.io$` / `~^.+\.116\.62\.54\.140\.nip\.io$` 通配（改前请读 `deploy/nginx/ocean.conf` 顶部四条决策）。代价：名字里仍带着 IP；依赖第三方 DNS，国内解析可能不稳。**结论：对外只用 `http://116.62.54.140/`**；别名/正式域名要等 ICP 备案（备案后证书与 443 才有意义——当前 nginx **只监听 80**，未开 HTTPS） |
 | 团队本机 hosts 别名 | ✅ 只影响自己机器 | Windows：`Add-Content $env:windir\System32\drivers\etc\hosts "116.62.54.140 haifeng.demo"`（需管理员）；macOS/Linux：`echo "116.62.54.140 haifeng.demo" | sudo tee -a /etc/hosts`。之后浏览器直接敲 `http://haifeng.demo/` |
 | **正式域名**（如 `haifeng.example.com`） | ⚠️ 暂不建议 | 国内 ECS 用域名对外提供 Web 服务**必须 ICP 备案**（未备案域名指向本机会被阿里云拦 80 端口）；地图类内容对外发布还需**审图号 + 合规底图**。备案与审图号办好之前，请用上面的 IP / 别名 / hosts |
 | 免费子域（duckdns.org / freedns.afraid.org） | 需你注册 | 给我「域名 + 更新 token」，我把解析更新脚本挂到服务器（cron）并加进 nginx server_name；同样受"未备案域名"这条约束 |
@@ -170,8 +170,12 @@ ss -ltnp | grep ':80 '           # 应看到 0.0.0.0:80
 ufw status; iptables -S | head   # 本机应为 inactive / ACCEPT
 # 外部侧：用第三方抓取服务或手机热点打开 http://116.62.54.140/（能看到地图即达标）
 ```
-> 注意：部分云端抓取服务的出口策略会拦 `*.sslip.io` 这类生僻域名（返回 403），那不代表服务器有问题——
-> 判断服务器是否正常请用 IP 或 nginx 日志（`tail -f /var/log/nginx/access.log`）。
+> 注意（2026-09-26 更正）：此前把「别名从外部访问 403」归因于云端抓取服务的出口策略，**是错的**——
+> 真正原因是**阿里云对未备案域名的 ICP 拦截**（响应头 `Server: Beaver`，页面 `Non-compliance ICP Filing`）。
+> 判断服务器是否正常请用 **IP 直连**或 nginx 日志（`tail -f /var/log/nginx/access.log`）；本机自测要带 Host 头：
+> `curl -H 'Host: haifeng.116-62-54-140.sslip.io' http://127.0.0.1/`（本机会 200，不代表外部可达）。
+> 另：`sites-enabled` 里**别留 `*.bak` 文件**——`include /etc/nginx/sites-enabled/*` 会把备份也加载成生效配置，
+> 造成重复 `server` 块（conflicting server name），排查时极易看错（2026-09-26 踩过，已移到 `/etc/nginx/backup/`）。
 
 ### 数据铺满：按视野取数（2026-09-23 上线，v1.10）
 
@@ -210,7 +214,14 @@ https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.
   ERDDAP 恢复后 B/C/D 会自动接力（守卫会等，但不空烧）。
 - 用这套跑两年（731 天）：约 **1.1GB / 5–6 小时**（3 线程实测 ~2.2 天/分钟）。
 
-**教训**：探活与取数要用同一链路（ERDDAP 阶段探 ERDDAP、NCEI 阶段探 NCEI）；
+**已知状态（2026-09-26 检查）**：0p25deg/0p2deg/1deg 三档在 2023+2024 都已 **731/731 天**；
+东海明细 6,362/8,401（A 阶段）。**A 阶段被磁盘阈值挡住**：`sst_pipeline.py` 在可用空间 < 6GB 时直接停队列
+（日志 `磁盘可用 4.9 GB 低于 6.0 GB，停止队列`），守卫重试 24 次无进展后整个计划退出。**磁盘是唯一瓶颈**
+（盘 40G、已用 33G、剩 5.0G，其中 `raw/front` 19G、`raw/sst_global` 5.9G、`raw/sst` 0.75G）。
+要续跑 A 只有两条路：**扩盘**，或**腾空间**（例如删 `sst_global/0p2deg`——它被 0p25deg 覆盖同两年，
+删掉只会让显示档从 0.2° 降到 0.25°，换来 4.5GB）。
+
+
 一种源挂了不该挡住另一种源（`sst_plan.sh` 里 `probe_ok erddap|ncei` 就是干这个的）。
 
 
