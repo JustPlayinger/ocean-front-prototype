@@ -18,6 +18,9 @@ URL：
 所以后端与前端无需任何改动。注意：这是**另一个产品**（CoralTemp v3.1 ≠ Geo-Polar Blended Night），
 同屏混用时页面要标明来源；东海明细的产品标签仍按 ERDDAP 版标注，换源期间要在台账里写明。
 
+窗口对齐：CRW 的格点在 27.025 / 34.025 / 120.025 / 128.025 上，所以想切出与 ERDDAP 版**逐格一致**的
+141×161，bbox 要给 `119.9,26.9,128.1,34.1`（默认值仍是 `120,27,128,34`，切出来是 140×160：少最东与最北各一格）。
+
 用法（服务器上，可中断续跑；跳过已存在）：
   OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw /opt/ocean/venv/bin/python \
     tools/pipeline/fetch_coraltemp_crw.py --dates 2005-01-01 2005-01-31 --workers 2
@@ -103,7 +106,16 @@ def download(day: str, temp: Path, timeout: tuple[float, float], attempts: int =
             with session() as client, client.get(url, headers=headers, stream=True, timeout=timeout) as response:
                 if response.status_code == 404:
                     return "MISSING 上游没有这一天"
-                if response.status_code not in (200, 206):
+                if response.status_code == 416:
+                    # Range 起点越界 = 本地长度已 ≥ 服务器文件长度，说明**其实已经下完**。
+                    # （实测 2001-06-15 就是这么"假失败"的：本地 10,242,720B = 服务器全长，
+                    #   再发 Range 请求必然 416；不认这一条会把下好的文件白白重来。）
+                    with temp.open("rb") as handle:
+                        if handle.read(8).startswith(NETCDF_MAGIC):   # 必须读满 8 字节：HDF5 魔数就是 8 字节
+                            return ""
+                    temp.unlink(missing_ok=True)              # 越界又不是 NetCDF：清掉重下
+                    last = "FAILED HTTP 416（本地残留无效，已清空重来）"
+                elif response.status_code not in (200, 206):
                     last = f"FAILED HTTP {response.status_code}"
                 else:
                     if response.status_code == 200 and done:
@@ -117,7 +129,7 @@ def download(day: str, temp: Path, timeout: tuple[float, float], attempts: int =
                     size = temp.stat().st_size
                     if total.isdigit() and size == int(total):
                         with temp.open("rb") as handle:
-                            if handle.read(4).startswith(NETCDF_MAGIC):
+                            if handle.read(8).startswith(NETCDF_MAGIC):
                                 return ""
                         last = "FAILED 不是 NetCDF"
                     else:

@@ -153,11 +153,14 @@ run_phase_guarded "D 全球 0.2°：2024+2023" "$SST_ROOT/sst_global/0p2deg" "20
 run_phase_guarded "A 东海明细 0.05°（续跑）" "$SST_ROOT/sst" "" 8158 erddap \
   tools/pipeline/sst_pipeline.py --workers 4 --min-free-gb 4
 
-# 应急（ERDDAP 再挂时）：把上面 A 那两行注释掉，启用下面这两行 —— 走 CRW CoralTemp v3.1 独立链路。
-# 代价：整球单日 11.5MB、国内单流约 20KB/s（一天约 10 分钟），本地裁到东海窗口后只落 120KB。
+# 应急（ERDDAP 再挂时）：把上面 A 那两行注释掉，启用下面这几行 —— 走 CRW CoralTemp v3.1 独立链路。
+# 代价：整球单日 11.5MB、国内单流约 20KB/s 且会断流（脚本带 Range 续传重试），本地裁到东海窗口后只落 ~120KB。
+# bbox 用 119.9,26.9,128.1,34.1（而不是 120,27,128,34）：CRW 格点在 27.025/34.025/120.025/128.025 上，
+# 这样切出来的才是 141×161，与 ERDDAP 版历史文件逐格对齐（否则会少最东/最北各一格）。
 # 候选源对比与踩坑见 deploy/RUNBOOK.md「东海明细（0.05°）的备用源调研（2026-09-27）」。
 # run_phase_guarded "A' 东海明细 0.05°（CRW 备用源）" "$SST_ROOT/sst" "" 8158 crw \
-#   tools/pipeline/fetch_coraltemp_crw.py --years 2022 2021 2020 2019 2018 2017 2016 2015 2014 2013 \
-#     2012 2011 2010 2009 2008 2007 2006 2005 2004 2003 2002 --workers 2 --min-free-gb 4
+#   tools/pipeline/fetch_coraltemp_crw.py --bbox 119.9,26.9,128.1,34.1 \
+#     --years 2022 2021 2020 2019 2018 2017 2016 2015 2014 2013 2012 2011 2010 2009 2008 2007 2006 2005 2004 2003 2002 \
+#     --workers 2 --min-free-gb 4
 
 log "=== 计划结束（东海 $(count_regional) 天 · 全球粗格 $(count_global) 天 · 磁盘可用 $(free_gb)GB）==="
