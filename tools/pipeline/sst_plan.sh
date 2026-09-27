@@ -23,23 +23,23 @@ cd /opt/ocean
 
 log() { echo "[$(date '+%m-%d %H:%M:%S')] $*"; }
 
-# 上游探活：两种源各用各的探测（ERDDAP 挂掉时不该挡住 NCEI 那条链路）
+# 上游探活：三种源各用各的探测（某个源挂掉时不该挡住别的链路）
 OISST_PROBE="https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr/202401/oisst-avhrr-v02r01.20240101.nc"
+# CRW CoralTemp v3.1 5km（东海明细的独立备用源；整球单日 11.5MB，只在 ERDDAP 挂时用）
+CRW_PROBE="https://www.star.nesdis.noaa.gov/pub/socd/mecb/crw/data/5km/v3.1_op/nc/v1.0/daily/sst/2024/coraltemp_v3.1_20240805.nc"
 
 upstream_code() {   # ERDDAP：与真实抓取同形状的小范围取数
   curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
     "https://coastwatch.noaa.gov/erddap/griddap/noaacwBLENDEDCsstDaily.nc?analysed_sst%5B(2024-01-01T00:00:00Z):1:(2024-01-01T00:00:00Z)%5D%5B(0):20:(60)%5D%5B(100):20:(160)%5D"
 }
 
-probe_ok() {   # $1 = erddap | ncei
-  local code
-  if [ "${1:-erddap}" = "ncei" ]; then
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -r 0-100 "$OISST_PROBE")
-    [ "$code" = "200" ] || [ "$code" = "206" ]
-  else
-    code=$(upstream_code)
-    [ "$code" = "200" ]
-  fi
+probe_ok() {   # $1 = erddap | ncei | crw
+  local kind="${1:-erddap}" code
+  case "$kind" in
+    ncei) code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -r 0-100 "$OISST_PROBE"); [ "$code" = "200" ] || [ "$code" = "206" ] ;;
+    crw)  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -r 0-100 "$CRW_PROBE");  [ "$code" = "200" ] || [ "$code" = "206" ] ;;
+    *)    code=$(upstream_code); [ "$code" = "200" ] ;;
+  esac
 }
 
 recent_in() {   # 该目录最近 5 分钟是否有新文件落盘
@@ -56,7 +56,11 @@ wait_upstream_for() {   # wait_upstream_for <目录> <erddap|ncei>
     if probe_ok "$kind"; then
       return 0
     fi
-    code=$([ "$kind" = "ncei" ] && echo "NCEI" || echo "ERDDAP")
+    case "$kind" in
+      ncei) code="NCEI OISST" ;;
+      crw)  code="CRW CoralTemp" ;;
+      *)    code="ERDDAP" ;;
+    esac
     log "上游未就绪（$code 探测失败，$dir 5 分钟无新文件）→ 10 分钟后再试"
     sleep 600
   done
@@ -148,5 +152,12 @@ run_phase_guarded "D 全球 0.2°：2024+2023" "$SST_ROOT/sst_global/0p2deg" "20
 #    （2026-09-26 就是被它挡在门外，日志："磁盘可用 4.9 GB 低于 6.0 GB，停止队列"）。
 run_phase_guarded "A 东海明细 0.05°（续跑）" "$SST_ROOT/sst" "" 8158 erddap \
   tools/pipeline/sst_pipeline.py --workers 4 --min-free-gb 4
+
+# 应急（ERDDAP 再挂时）：把上面 A 那两行注释掉，启用下面这两行 —— 走 CRW CoralTemp v3.1 独立链路。
+# 代价：整球单日 11.5MB、国内单流约 20KB/s（一天约 10 分钟），本地裁到东海窗口后只落 120KB。
+# 候选源对比与踩坑见 deploy/RUNBOOK.md「东海明细（0.05°）的备用源调研（2026-09-27）」。
+# run_phase_guarded "A' 东海明细 0.05°（CRW 备用源）" "$SST_ROOT/sst" "" 8158 crw \
+#   tools/pipeline/fetch_coraltemp_crw.py --years 2022 2021 2020 2019 2018 2017 2016 2015 2014 2013 \
+#     2012 2011 2010 2009 2008 2007 2006 2005 2004 2003 2002 --workers 2 --min-free-gb 4
 
 log "=== 计划结束（东海 $(count_regional) 天 · 全球粗格 $(count_global) 天 · 磁盘可用 $(free_gb)GB）==="

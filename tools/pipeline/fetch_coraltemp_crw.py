@@ -157,8 +157,11 @@ def grab(day: str, root: Path, temp_dir: Path, bbox, stride: int, timeout, keep_
     except Exception as exc:                                  # noqa: BLE001 —— 逐日兜住，别拖垮整片
         return day, f"FAILED {type(exc).__name__}: {str(exc)[:100]}"
     finally:
-        if temp.exists() and not keep_global:
-            temp.unlink(missing_ok=True)                      # 整球 11.5MB：裁完即删（失败时留着下次续传）
+        # 只有"当天确实产出成功"才删整球临时文件；失败/中断时**留着**，下次带 Range 从断点续传
+        if temp.exists() and not keep_global and target.exists() and target.stat().st_size > 0:
+            temp.unlink(missing_ok=True)
+
+
 def fetch(days: list[str], root: Path, *, temp_dir: Path, bbox, stride: int, timeout,
           workers: int, min_free_gb: float, keep_global: bool) -> int:
     root.mkdir(parents=True, exist_ok=True)
