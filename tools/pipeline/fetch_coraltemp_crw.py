@@ -88,29 +88,46 @@ def session() -> requests.Session:
     return client
 
 
-def download(day: str, temp: Path, timeout: tuple[float, float]) -> str:
-    """整球文件下载到临时路径，支持断点续传；返回错误描述（空串 = 成功）。"""
+def download(day: str, temp: Path, timeout: tuple[float, float], attempts: int = 6) -> str:
+    """整球文件下载到临时路径：**每次重试都带 Range 从断点续传**；返回错误描述（空串 = 成功）。
+
+    为什么必须自愈：这条链路实测会下到一半断流（`ChunkedEncodingError: IncompleteRead`，
+    11.5MB 只拿到 3.3MB），单次请求不可靠 —— 所以「断点续传 + 运行内重试」是主路径，不是兜底。
+    """
     url = crw_url(day)
-    done = temp.stat().st_size if temp.exists() else 0
-    headers = {"Range": f"bytes={done}-"} if done else {}
-    with session() as client, client.get(url, headers=headers, stream=True, timeout=timeout) as response:
-        if response.status_code == 404:
-            return "MISSING 上游没有这一天"
-        if response.status_code not in (200, 206):
-            return f"FAILED HTTP {response.status_code}"
-        if response.status_code == 200 and done:
-            done = 0                                          # 服务器忽略 Range：只能从头写
-        total = response.headers.get("Content-Range", "").split("/")[-1] or response.headers.get("Content-Length", "")
-        temp.parent.mkdir(parents=True, exist_ok=True)
-        with temp.open("ab" if done else "wb") as handle:
-            for block in response.iter_content(CHUNK):
-                handle.write(block)
-    if total.isdigit() and temp.stat().st_size != int(total):
-        return f"INCOMPLETE {temp.stat().st_size}/{total}（重跑会续传）"
-    with temp.open("rb") as handle:
-        if not handle.read(4).startswith(NETCDF_MAGIC):
-            return "FAILED 不是 NetCDF"
-    return ""
+    last = "FAILED 未知"
+    for attempt in range(1, attempts + 1):
+        done = temp.stat().st_size if temp.exists() else 0
+        try:
+            headers = {"Range": f"bytes={done}-"} if done else {}
+            with session() as client, client.get(url, headers=headers, stream=True, timeout=timeout) as response:
+                if response.status_code == 404:
+                    return "MISSING 上游没有这一天"
+                if response.status_code not in (200, 206):
+                    last = f"FAILED HTTP {response.status_code}"
+                else:
+                    if response.status_code == 200 and done:
+                        done = 0                              # 服务器忽略 Range：只能从头写
+                    total = (response.headers.get("Content-Range", "").split("/")[-1]
+                             or response.headers.get("Content-Length", ""))
+                    temp.parent.mkdir(parents=True, exist_ok=True)
+                    with temp.open("ab" if done else "wb") as handle:
+                        for block in response.iter_content(CHUNK):
+                            handle.write(block)
+                    size = temp.stat().st_size
+                    if total.isdigit() and size == int(total):
+                        with temp.open("rb") as handle:
+                            if handle.read(4).startswith(NETCDF_MAGIC):
+                                return ""
+                        last = "FAILED 不是 NetCDF"
+                    else:
+                        last = f"INCOMPLETE {size}/{total or '?'}"
+        except Exception as exc:                              # noqa: BLE001 —— 断流/超时都靠续传重试吃掉
+            last = f"{type(exc).__name__}: {str(exc)[:60]}"
+        got = temp.stat().st_size if temp.exists() else 0
+        print(f"    {day} 第 {attempt}/{attempts} 次未完成（已下 {got / 1e6:.2f}MB · {last}），续传重试", flush=True)
+        time.sleep(min(30.0, 3.0 * attempt))
+    return last
 
 
 def crop(source: Path, target: Path, bbox: tuple[float, float, float, float], stride: int) -> str:
