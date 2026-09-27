@@ -91,11 +91,12 @@ def session() -> requests.Session:
     return client
 
 
-def download(day: str, temp: Path, timeout: tuple[float, float], attempts: int = 6) -> str:
+def download(day: str, temp: Path, timeout: tuple[float, float], attempts: int = 20) -> str:
     """整球文件下载到临时路径：**每次重试都带 Range 从断点续传**；返回错误描述（空串 = 成功）。
 
     为什么必须自愈：这条链路实测会下到一半断流（`ChunkedEncodingError: IncompleteRead`，
-    11.5MB 只拿到 3.3MB），单次请求不可靠 —— 所以「断点续传 + 运行内重试」是主路径，不是兜底。
+    11.5MB 只拿到 3.3MB / 0.66MB），平均每 1MB 就断一次 —— 所以「断点续传 + 运行内重试」是主路径，
+    不是兜底；重试次数给到 20 次就是为了让**一次调用**能撑完 11.5MB（退避上限 30s，不会空烧）。
     """
     url = crw_url(day)
     last = "FAILED 未知"
