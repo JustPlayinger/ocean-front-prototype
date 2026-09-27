@@ -7,7 +7,7 @@
 #   B 全球粗格 1°：2024 + 2023
 #   C 全球粗格 1°：2022 + 2021
 #   D 全球 0.25°：2024 + 2023（≈5GB；比 1° 细 4 倍）
-#   A 东海明细 0.05° 续跑（2002–2024，跳过已存在）
+#   A 东海明细 0.05° 续跑（2002-09–2024，跳过已存在；产品 2002 年 1–8 月无数据）
 #   D2 全球 0.05° 全分辨率：默认注释（两年 ≈80–100GB，需先扩盘到 200GB 级）
 #
 # 用法（服务器上，后台常驻）：
@@ -141,8 +141,12 @@ run_phase_guarded "D 全球 0.2°：2024+2023" "$SST_ROOT/sst_global/0p2deg" "20
 # run_phase_guarded "D2 全球 0.05°：2024+2023" "$SST_ROOT/sst_global/0p05deg" "2024 2023" 731 erddap \
 #   tools/pipeline/sst_global_pipeline.py --stride 1 --years 2024 2023 --workers 2
 
-# A：东海 0.05° 明细续跑（2002–2024 共 8,401 天；跳过已存在的，放最后因为它要跑更久）
-run_phase_guarded "A 东海明细 0.05°（续跑）" "$SST_ROOT/sst" "" 8401 erddap \
-  tools/pipeline/sst_pipeline.py --workers 4
+# A：东海 0.05° 明细续跑（**产品实际起点是 2002-09-01**：noaacwBLENDEDCsstDaily 对 2002 年 1–8 月返回
+#    "Your query produced no matching results"，所以期望天数是 8,158 天而不是 8,401 —— 写死 8,401 会让守卫
+#    "永远追不满"，白等 24 轮后放弃（2026-09-27 核实）。跳过已存在的，放最后因为它要跑更久）
+#    --min-free-gb 4：剩余约 1,800 天 × 0.12MB ≈ 0.22GB，而默认 6GB 门槛会把"完全够跑"误判成"没空间"
+#    （2026-09-26 就是被它挡在门外，日志："磁盘可用 4.9 GB 低于 6.0 GB，停止队列"）。
+run_phase_guarded "A 东海明细 0.05°（续跑）" "$SST_ROOT/sst" "" 8158 erddap \
+  tools/pipeline/sst_pipeline.py --workers 4 --min-free-gb 4
 
 log "=== 计划结束（东海 $(count_regional) 天 · 全球粗格 $(count_global) 天 · 磁盘可用 $(free_gb)GB）==="

@@ -214,15 +214,41 @@ https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.
   ERDDAP 恢复后 B/C/D 会自动接力（守卫会等，但不空烧）。
 - 用这套跑两年（731 天）：约 **1.1GB / 5–6 小时**（3 线程实测 ~2.2 天/分钟）。
 
-**已知状态（2026-09-26 检查）**：0p25deg/0p2deg/1deg 三档在 2023+2024 都已 **731/731 天**；
-东海明细 6,362/8,401（A 阶段）。**A 阶段被磁盘阈值挡住**：`sst_pipeline.py` 在可用空间 < 6GB 时直接停队列
-（日志 `磁盘可用 4.9 GB 低于 6.0 GB，停止队列`），守卫重试 24 次无进展后整个计划退出。**磁盘是唯一瓶颈**
-（盘 40G、已用 33G、剩 5.0G，其中 `raw/front` 19G、`raw/sst_global` 5.9G、`raw/sst` 0.75G）。
-要续跑 A 只有两条路：**扩盘**，或**腾空间**（例如删 `sst_global/0p2deg`——它被 0p25deg 覆盖同两年，
-删掉只会让显示档从 0.2° 降到 0.25°，换来 4.5GB）。
+**已知状态（2026-09-27 检查）**：全球三档（`1deg` / `0p2deg` / `0p25deg`）在 2023+2024 都已 **731/731 天**；
+东海明细 **6,362/8,158**，缺口 1,796 天集中在 2002-09–2006、2007（119 天）、2009（91 天）、2010（3 天）。
+2026-09-26 那次 A 阶段被两个原因一起挡下：磁盘可用 4.9GB < `sst_pipeline.py` 默认的 6GB 门槛
+（日志 `磁盘可用 4.9 GB 低于 6.0 GB，停止队列`），守卫重试 24 轮无进展后整个计划退出。
+**2026-09-27 已恢复**：ERDDAP 自愈（`status.html` 与取数都是 200），计划重跑后 A 用
+`--min-free-gb 4` 续跑——A 只剩 1,796 天 × 0.12MB ≈ 0.22GB，6GB 门槛属于误伤（盘 40G／已用 33G／剩 5.2G）。
+真要再腾空间，最划算的仍是删 `sst_global/0p2deg`（4.5GB；它被 0p25deg 覆盖同两年，代价只是显示档 0.2°→0.25°）。
 
-
+**教训**：探活与取数要用同一链路（ERDDAP 阶段探 ERDDAP、NCEI 阶段探 NCEI）；
 一种源挂了不该挡住另一种源（`sst_plan.sh` 里 `probe_ok erddap|ncei` 就是干这个的）。
+
+**东海明细（0.05°）的备用源调研（2026-09-27）**：ERDDAP 挂掉的那两天，东海明细**完全没有第二来源**，
+所以把候选逐一实测了一遍，结论照抄可省一次排查：
+
+| 候选 | 实测结果 | 结论 |
+|---|---|---|
+| `coastwatch.noaa.gov/thredds` | catalog 首页 200，但 SST → `Blended and Coastwatch Cogridded (Level-4)` 下 4 个数据集**没有 urlPath**、无 NCSS | ❌ 空壳（数据后端与 ERDDAP 同源） |
+| `www.star.nesdis.noaa.gov/pub/`（STAR 文件服务） | 可列目录、可下载、**支持 `Range`** | ✅ **CRW CoralTemp v3.1 在这里**，见下 |
+| `coralreefwatch.noaa.gov/erddap`、`/thredds` | 404 | ❌ 不存在 |
+| `cwcgom.aoml.noaa.gov`、`erddap.aoml.noaa.gov`、`oceanwatch.pifsc.noaa.gov` | 站点活着，但没有 `noaacwBLENDEDCsstDaily` 的可取数据（404） | ❌ 镜像不解决 |
+| `podaac-opendap.jpl.nasa.gov`、AWS `noaa-crw-pds` / `noaa-geopolar-blended-pds` | 连不上 / 404 | ❌ |
+| `erddap.emodnet.eu`（欧洲） | 可达，但只有欧洲产品 | ❌ 覆盖不到东海 |
+| `mds.nmdis.org.cn`（国家海洋科学数据中心） | 可达 | ⚠️ 需网页端申请/登录，无法脚本化 |
+
+**可用的备用源**：CRW **CoralTemp v3.1**（5km ≈ 0.05°、全球逐日、**1985–至今**、GHRSST L4）
+```
+https://www.star.nesdis.noaa.gov/pub/socd/mecb/crw/data/5km/v3.1_op/nc/v1.0/daily/sst/{YYYY}/coraltemp_v3.1_{YYYYMMDD}.nc
+```
+- 脚本：`tools/pipeline/fetch_coraltemp_crw.py`——整球下载（**带 `Range` 断点续传**）→ 裁到东海窗口（落盘 ~120KB）
+  → 删整球文件；输出与 ERDDAP 版**同目录、同命名、同变量**（`raw/sst/<年>/sst_<yyyymmdd>.nc`、`analysed_sst`），后端/前端零改动。
+- 代价：整球单日 **11.5MB**、国内单流约 20KB/s（一天约 10 分钟）→ **只在 ERDDAP 不可用时用**（ERDDAP 一天 0.1MB）。
+  全历史（2002–2024，约 1,800 天缺口）全量换源 ≈ 21GB 流量、数十小时，应急补几十天可以，别当日常方案。
+- ⚠️ **产品不同源**（CoralTemp ≠ Geo-Polar Blended Night）：换源期间页面与台账必须标注，不能与 ERDDAP 版混为一谈。
+
+
 
 
 
