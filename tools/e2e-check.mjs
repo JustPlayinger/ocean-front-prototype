@@ -730,6 +730,47 @@ check("锋面带 / 缺测图层开关都真实重绘",
   layer.bandOff === 0 && layer.bandOn === 1 && layer.nodOff === 0 && layer.nodOn === 1,
   JSON.stringify(layer));
 
+// ===== 11.1) 图层抽屉：默认收在左侧 · 靠近左边缘自动呼出 · 移开自动收起 · ☰ 三态 =====
+// 抽屉是从「地图左边缘」呼出的，所以鼠标坐标按 #map 的 rect 现算；收起判据是「左边界 < 0（滑出屏幕）」。
+const drawerState = () => evalJS(`var d = document.getElementById("layerDrawer"); var r = d.getBoundingClientRect();
+  return { left: Math.round(r.left), open: d.classList.contains("open"), aria: d.getAttribute("aria-hidden") };`);
+const moveMouseAt = (dx) => evalJS(`var m = document.getElementById("map"), r = m.getBoundingClientRect();
+  m.dispatchEvent(new MouseEvent("mousemove", { clientX: r.left + ${dx}, clientY: r.top + Math.round(r.height / 2), bubbles: true })); return 1;`);
+const drawerMapW = await evalJS(`return Math.round(document.getElementById("map").getBoundingClientRect().width);`);
+
+const dInit = await drawerState();
+check("图层抽屉默认收起且停在左侧（不占地图）",
+  dInit.open === false && dInit.left < 0 && dInit.aria === "true", JSON.stringify(dInit));
+
+await moveMouseAt(4);
+await sleep(350);
+const dHover = await drawerState();
+check("鼠标靠近地图左边缘（4px）→ 抽屉自动呼出",
+  dHover.open === true && dHover.left >= 0 && dHover.aria === "false", JSON.stringify(dHover));
+
+await moveMouseAt(Math.round(drawerMapW * 0.7));
+await sleep(1000);
+const dAway = await drawerState();
+check("鼠标移开约 1s → 抽屉自动收起（滑回左侧屏幕外）",
+  dAway.open === false && dAway.left < 0, JSON.stringify(dAway));
+
+await moveMouseAt(4);
+await sleep(350);
+await click("#layerToggle");                       // 悬停展开态点 ☰ → 应转为固定，而不是直接收掉
+await sleep(300);
+const dPinned = await drawerState();
+await moveMouseAt(Math.round(drawerMapW * 0.7));
+await sleep(1000);
+const dPinnedAway = await drawerState();
+check("悬停展开后点 ☰ → 转为固定展开（移开鼠标也保持展开）",
+  dPinned.open === true && dPinnedAway.open === true,
+  JSON.stringify({ pinned: dPinned, away: dPinnedAway }));
+
+await click("#layerToggle");                       // 固定态再点 ☰ → 收起
+await sleep(300);
+const dClosed = await drawerState();
+check("固定展开时再点 ☰ → 收起", dClosed.open === false && dClosed.left < 0, JSON.stringify(dClosed));
+
 // ===== 11.5) 地图交互：缩放 / 平移 / 比例尺 / 经纬网标注（纯几何，不改数据） =====
 const zoom = await evalJS(`var r = document.getElementById("map").getBoundingClientRect();
   var c = [r.left + r.width / 2, r.top + r.height / 2];

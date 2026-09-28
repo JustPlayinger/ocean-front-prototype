@@ -2457,9 +2457,13 @@ function bind() {
     clearTimeout(drawerTimer);
     drawerTimer = setTimeout(() => { if (!drawerPinned) setDrawer(false); }, 600);
   });
+  // ☰ 三态：收起 → 固定展开 → 收起。悬停展开时点 ☰ 是「转为固定」而不是直接收掉，
+  // 这样「点 ☰ 可固定展开」在悬停入口下也成立（否则要「先收再点」才固定，很绕）。
   $("layerToggle").addEventListener("click", () => {
-    drawerPinned = !state.drawerOpen;               // 由「点开」进入固定态，再点则收起
-    setDrawer(!state.drawerOpen);
+    if (!state.drawerOpen) { drawerPinned = true; setDrawer(true); return; }
+    if (!drawerPinned) { drawerPinned = true; return; }
+    drawerPinned = false;
+    setDrawer(false);
   });
   $("layerClose").addEventListener("click", () => {
     drawerPinned = false;
