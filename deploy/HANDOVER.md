@@ -222,7 +222,7 @@ ssh ocean 'ocean-ops years'      # ① 先看服务器缺哪些年份
 | 部署打包失败 `could not chdir` | Windows 自带 bsdtar **打不开非 ASCII 路径**（本仓在中文目录下） | 先 robocopy 到 ASCII 临时目录再 tar（`deploy.ps1` 已这么做） |
 | SST/锋面突然全都读不了 | 装了 `netcdf4`（Windows 下打不开非 ASCII 路径，且被 xarray 优先选中） | 卸载它，靠 `scipy` + `h5netcdf`（见 §3.2） |
 | 取数脚本一启动就退出、无输出 | 一次把几千个日期当命令行参数（超过约 700 个） | 分批（`--batch-size`，队列脚本已默认分批） |
-| `ssh` 卡在等 banner、`curl` 一个字节都不回（**但** `ping` 通、`probe-ports` 显示 22/80 OPEN） | 服务器**用户态僵死**。最常见是**22 端口正被爆破**（sshd 来不及起子进程 → banner 发不出来），其次才是磁盘写满 / 内存耗尽 | 只能去控制台**重启**（别用「停止」：会丢公网 IP）；进去先看 `journalctl -b -1 \| grep -cE 'sshd\['` 有多少行、清盘，再按 `RUNBOOK.md` 末节 ⑤ 把 **22 收进安全组白名单** |
+| `ssh` 卡在等 banner、`curl` 一个字节都不回（**但** `ping` 通、`probe-ports` 显示 22/80 OPEN） | 服务器**用户态僵死**。2026-10-09 实测真凶是**无 swap 下的内存超售 + 进程/线程风暴**（`%commit` 154.73%、`plist-sz` 6833、磁盘读被打满 → 成片进程卡 D 状态）；**盘满 / OOM / 22 被爆破都不是本次死因**（三者计数都是 0 或极小，别被它们带偏） | 只能去控制台**重启**（别用「停止」：会丢公网 IP）；进去先跑 `RUNBOOK.md` 末节的取证命令（重点 `sar -r/-q -f /var/log/sysstat/sa<日>`），再按末节 ⑤① 加 swap + 限并发 |
 
 ---
 

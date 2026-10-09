@@ -418,7 +418,7 @@ ssh root@116.62.54.140 "curl -fsS -X POST http://127.0.0.1/api/data/index/rebuil
 | `deploy.ps1` 报一堆假语法错误 | `.ps1` 缺 BOM，PowerShell 5.1 按 GBK 解码中文 | 保持 **CRLF + UTF-8 带 BOM** |
 | 本机验证接口报 502 | `Invoke-WebRequest` 走了系统代理 | 一律用 `curl.exe` |
 | `tools/e2e-check.mjs` 在服务器上起不来 | 默认探测的是 Edge，且 Chromium **不能以 root 跑** | `export TEMP=/tmp EDGE=/usr/bin/chromium`，并用非 root 用户执行（脚本已自动加 `--no-sandbox`） |
-| ping 通、`probe-ports` 显示 22/80 **OPEN**，但 `ssh` 卡在等 banner、`curl` 一个字节都没有 | **服务器用户态僵死**：最常见是 **22 端口正被爆破**（sshd 被未认证连接占满 → banner 发不出），其次才是盘满 / OOM，与安全组、本机网络**无关** | 见文末「事故处置：服务器『假死』」；只能去控制台重启，进去先 `journalctl -b -1 \| grep -cE 'sshd\['` 看爆破规模，再按末节 ⑤ 把 **22 收进安全组白名单** |
+| ping 通、`probe-ports` 显示 22/80 **OPEN**，但 `ssh` 卡在等 banner、`curl` 一个字节都没有 | **服务器用户态僵死**。2026-10-09 实测死因是**无 swap 下的内存超售 + 进程/线程风暴**（`%commit` 154.73%、`plist-sz` 6833、磁盘读 194 MB/s → 成片进程卡 D 状态）；**盘满 / OOM / 22 被爆破都不是本次死因**，与安全组、本机网络也**无关** | 见文末「事故处置：服务器『假死』」；只能去控制台重启，进去立刻跑末节取证命令（重点 `sar -r/-q -f /var/log/sysstat/sa<日>`），再按末节 ⑤① 加 swap + 限并发 |
 
 ### 本机（Windows）侧三个坑（2026-09-21 实测）
 
@@ -707,29 +707,51 @@ Host ocean
 **口径**：前三层都通、banner/HTTP 全无 = **内核活着、用户态进程被卡死或被内核杀光**。
 先在本机 `curl.exe -m 5 http://223.5.5.5/` 做对照，正常就说明**不是你的网络** —— 此时**不要再翻安全组**。
 
-### 重启后取证：真凶是 **22 端口被爆破**，不是盘满、也不是 OOM（2026-10-09 23:40 核对）
+### 重启后取证：真凶是 **无 swap 下的内存超售 + 进程/线程风暴**（2026-10-10 逐帧核对；**推翻** 10-09 当晚「22 被爆破」与更早「盘满 / OOM」两个初判）
 
-重启（22:52）后把**上一轮启动**的日志翻出来逐条核对，**原推断（盘满/OOM）被推翻**：
+重启（10-09 22:52）后把**上一轮启动**（覆盖 09-29 10:00 → 10-09 20:58，约 10 天）的日志与 **sysstat 采样**逐条核对：
 
 ```bash
-journalctl -b -1 -k | grep -icE 'out of memory|killed process'   # → 0    ：不是 OOM（dmesg 已被重启清空，必须查 -b -1）
-journalctl -b -1 | grep -cE 'sshd\[[0-9]+\]'                      # → 29411：上一轮启动期间的 sshd 日志行数！
-journalctl -b --no-pager | grep -cE 'sshd\[[0-9]+\]'               # →    84：本次启动同期（对照组）
-journalctl -b -1 | grep -oE 'from [0-9.]+' | awk '{print $2}' | sort | uniq -c | sort -rn | head
-#   5250 223.99.13.153 · 4410 223.80.110.55 · 373 223.80.110.9 · 254 222.206.18.231 · 174 223.99.13.222
+# —— 排除项：全部为 0 或极小 ——
+journalctl -b -1 -k | grep -icE 'out of memory|killed process'   # → 0     ：不是 OOM（dmesg 重启后清空，必须查 -b -1）
+journalctl -b -1    | grep -c  'No space left on device'         # → 0     ：不是盘满（ENOSPC 一次都没出现）
+journalctl -b -1    | grep -cE 'sshd\['                          # → 1842  ：10 天累计（对照：本次启动 185 行），不是「上万行」
+journalctl -b -1    | grep -c  'beginning MaxStartups'           # → 1     ：整个启动只触发 1 次，且在 20:58:31（崩前最后一刻）
+journalctl -b -1    | grep -c  'banner exchange'                 # → 244   ：10 天累计，不是「一秒上百条」
+journalctl -b -1    | grep -ci 'under memory pressure'           # → 32    ：★ 真凶侧证据，集中在 20:06–20:58
+journalctl -b -1    | grep -c  'Connection reset by user root'   #         ：20:09 起我们自己的 ssh 就被 reset，
+                                                                 #           logind 同时报 'Transport endpoint is not connected'
+
+# —— ★ 最有用：sysstat 采样快照（不用控制台就能还原僵死前的资源曲线）——
+sar -r -f /var/log/sysstat/sa09 -s 19:50:00 -e 21:05:00   # 内存：%memused / kbdirty / kbcommit / %commit
+sar -q -f /var/log/sysstat/sa09 -s 19:50:00 -e 21:05:00   # 负载：ldavg / blocked / plist-sz（blocked>0 = 进程卡在 D 状态）
+sar -d -f /var/log/sysstat/sa09 -s 19:50:00 -e 21:05:00   # 磁盘：tps / await / %util
+sar -u -f /var/log/sysstat/sa09 -s 19:50:00 -e 21:05:00   # CPU：%iowait / %steal（%steal=0 → 不是云厂商偷算力）
 ```
 
-- 20:58:32 一秒内上百条 `sshd[…]: banner exchange: Connection from 115.120.234.30 …: invalid format` +
-  `Connection closed by 223.99.13.244 …`；**同一批 IP 也在扫 80 端口**（当日 nginx access.log 的 Top 就是 `115.120.234.30`，40 次）。
-  → **sshd 被大量未认证连接占满，来不及起子进程**：TCP 握手由**内核**完成（所以探测显示 OPEN），
-  但 banner 永远发不出来 —— 这就是我们看到的「假死」。
-- 同期事实：`systemd-resolved: Under memory pressure` 出现 4 次（20:56–20:58）、生产 uvicorn 的两个 worker
-  `Child process died`（20:58:31 / 20:58:36）、之后日志中断。→ **内存确实吃紧**（4 GiB 无 swap，
-  当时有队列 + 测试实例），但它只是**帮凶**；让用户态停止服务的直接原因是爆破把 sshd 打爆。
-- 现成条件（都在放大风险）：22 对全网开放、`permitrootlogin yes`、`passwordauthentication no`、
-  `maxstartups 10:30:100`、**没装 fail2ban**、本机 `ufw` 也是 **inactive**（安全组是唯一防线，而它对 22 没限源）。
-- **磁盘 91%（余 3.5 GB）是下一颗定时炸弹，但不是本次死因**（`raw` 26 GB + `/root/.vscode-server` 3.9 GB）。
-- 口径修正：**「内核活着、用户态不响应」不只有盘满/OOM 一种解释 —— 先看 sshd 日志量**（判读三层表照旧用）。
+**僵死前的资源曲线（sysstat 实录）**
+
+| 时刻 | `%memused` | `kbcommit / %commit` | load / blocked | 磁盘（vda） |
+|---|---|---|---|---|
+| 19:50:22 | 21.41 | 1.77 G / 47.75% | 正常 | 空闲 |
+| **20:00:22** | **40.69** | **3.10 G / 83.59%** | 1.00 / 0 | 4 tps |
+| 20:10 – 20:50 | **采样全部缺失**（连 10 分钟一次的定时采集都跑不动，与「20:15 起外部断联」吻合） | — | — | — |
+| **20:58:34** | **82.89**（`kbavail` 只剩 **58 MB**） | **5.75 G / 154.73%** | **84.29 / 90.49 / 89.38**；`blocked 10`；`plist-sz` **2162 → 6833** | **1413 tps / 读 194 MB/s / await 160 ms / %util 81.6%**；`kbcached` **1.34 G → 104 M** |
+| 20:58:46 | 最后一行日志；此后**一行都没有**，直到 22:52 重启（journal 索引也不一致 = 硬崩） | | | |
+
+**死因链（一句话）**：`commit` 冲到 **154.73%**（3.6 GB 内存、**0 swap**）＋进程数从 2162 暴涨到 **6833** →
+直接回收 / 换页风暴 → 磁盘读被打满（`await` 160 ms、队列深度 226）→ 2 vCPU 上负载 **84**、成片进程卡在 D 状态 →
+**用户态集体僵死**（连 `journald` 自己都写不出日志，所以最后 2 小时是空白）。磁盘 91% 满是**放大器**（页缓存没有周转余量），
+但**不是** ENOSPC（0 条）。
+
+**22 被扫描的真实定位（仍要加固，但不是根因）**：20:58:32 确有 `115.120.234.30` 一分钟内连开 12+ 连接、
+触发过 `beginning MaxStartups throttling`（整个启动仅此 1 次），10 天累计 244 条 `banner exchange … invalid format`
+—— 那是在机器**已经濒死**时又补的一脚（真实存在，但量级远不足以打死 sshd）。
+另外：`last -i` 里的 `223.99.13.*` / `223.80.110.*` 是**我们自己的出口 IP**，不是攻击源（早先把它们当成爆破源是 grep 口径错误）。
+**结论：先治内存，再收 22。**
+
+- 口径修正（重要）：**「内核活着、用户态不响应」按 ⑤ 的顺序查** —— 先看 `%commit` / `plist-sz` / `blocked`（内存与进程数），
+  再看 ENOSPC，最后才看 sshd 日志量。**盘满、OOM、被爆破都不是 10-09 的死因**；判读三层表照旧用。
 
 ### 这次实际怎么处置的（可照抄，含结果）
 
@@ -741,8 +763,10 @@ journalctl -b -1 | grep -oE 'from [0-9.]+' | awk '{print $2}' | sort | uniq -c |
 | ④ | 只补**唯一**数据缺口：单起渔场补缺队列（海温 8158 / 锋面 15706 已满，渔场 2019 缺 12 天） | 补齐后三口径全满 |
 | ⑤ | 真机复测 `tools/ops/start-test-instance.sh`（start→health→stop，含「接管道」场景） | 全通过；`start` 修前接管道 40 s 卡死 → 修后 4.4 s 返回，8001 每次干净释放 |
 
-> 取证结论一句话：**这是一台对全网开放 SSH 的 4 GiB 小机器，被国内几个 IP 持续爆破（峰值上百连接/秒）打到 sshd 不响应**；
-> 磁盘紧张与内存吃紧是背景条件，不是触发器。**对策的第一优先级是把 22 收进白名单（见 ⑤「被爆破」），而不是删数据。**
+> 取证结论一句话：**这是一台 3.6 GiB、0 swap 的小机器，被「队列 + 测试实例」把内存超额提交推到 154%、
+> 进程数推到 6833，触发回收/换页风暴并打满磁盘读，最终用户态集体僵死**。
+> 磁盘 91% 满是放大器、22 被扫描是噪声，都不是触发器。
+> **对策的第一优先级是给 ⑤①「内存超售」加 swap + 限并发，而不是删数据、也不是先收 22。**
 
 
 ### 处置（按顺序，别跳步）
@@ -778,13 +802,32 @@ apt-get clean
 df -h /                                 # 目标：≥ 7 GB（2026-10-09 实测 3.6 GB → 7.6 GB）
 ```
 
-**⑤ 对症下药**
-- **盘满**：清完仍紧就扩盘（控制台扩容后 `growpart /dev/vda 1 && resize2fs /dev/vda1`）。`raw`（26 GB）是正资产**别删**，要定期清的是 `cache`。
-- **OOM**：队列 `--workers` 降到 2；给 `ocean-api.service` 加 `MemoryMax=`；**队列在跑时不要起 8001 测试实例**（见 `deploy/COLLAB.md` §3.4）。
-- **被爆破（2026-10-09 的真凶，最高优先级）**：
+**⑤ 对症下药（按 2026-10-09 的实测死因排序）**
+
+- **① 内存超售 / 进程风暴 —— 10-09 的真凶，最高优先级：加 swap + 限并发**
+
+  ```bash
+  # 本机原本 0 swap —— 这是被拖死的根本前提。加 2 GB swap（治本，风险最低）：
+  fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  free -m; swapon --show
+
+  # 限并发：队列 --workers 2；给生产服务设内存上限
+  systemctl edit ocean-api        # 加 [Service] MemoryMax=800M
+  systemctl daemon-reload && systemctl restart ocean-api
+  ```
+
+  监控口径也要换：盯 **`%commit`（`sar -r`）+ `plist-sz` / `blocked`（`sar -q`）**，别只看 `free` ——
+  本次 `%memused` 只有 40% 时 `%commit` 就已 **83.59%**，10 分钟后的采样直接整段断档。
+  队列在跑时**不要**起 8001 测试实例（见 `deploy/COLLAB.md` §3.4）。
+- **② 盘满**：清完仍紧就扩盘（控制台扩容后 `growpart /dev/vda 1 && resize2fs /dev/vda1`）。`raw`（26 GB）是正资产**别删**，要定期清的是 `cache`。
+- **③ OOM**：这次**没有** OOM 记录（`Killed process` 0 条），别把它当默认答案；真出现时再降 `--workers`、加 `MemoryMax=`。
+- **④ 22 端口被全网扫描（加固项；**不是** 10-09 的死因）**：
   1. 控制台 → 安全组 → 入方向：**22 只放行你和同伴的出口 IP/32**（顺序：先加新规则 → 验证还能登 → 再删 `0.0.0.0/0`；否则把自己锁在门外）；
   2. 可选加固：`apt-get install -y fail2ban`（自动封爆破 IP）；
   3. 可选抗爆破：`/etc/ssh/sshd_config` 里 `MaxStartups 4:50:10`、`LoginGraceTime 20` → 先 `sshd -t` 校验 → `systemctl reload ssh`（**reload 不断已建连接，别 restart**）。
+     为什么降级：上一轮启动 10 天里 sshd 日志共 **1,842 行**、`MaxStartups` 只触发 **1 次**（20:58:31，机器已濒死）；
+     收白名单是为了**消除噪声、别让扫描流量在你下次急救时抢 banner**，不是治死机。
 
 **⑥ 恢复业务（顺序别反：先服务 → 健康检查 → 最后才拉队列）**
 
@@ -797,5 +840,7 @@ ocean-ops health     # 顺便看有没有 PPID=1 的孤儿 fetch_*
 
 **⑦ 复盘**：把控制台看到的峰值更新回 `deploy/COLLAB.md` §1.1 资源表（磁盘 / 内存两行）。
 
-> **预防线**：磁盘 85%、内存 80% 就停手清理；`journalctl -b | grep -cE 'sshd\['` 每小时上百行就说明 22 正在被爆破（本次事故上一轮启动累计 **29,411 行**）→ 立刻按 ⑤「被爆破」收紧安全组。
-> 僵死期间**全部**外部访问（ssh、页面、接口）同时不可用，只能靠控制台重启 —— 代价远高于提前清一次缓存、加一条安全组规则。
+> **预防线**：`%commit` 超 80%、`plist-sz` 超 3000、`ldavg` 超「vCPU 数 × 2」、磁盘 85% —— **任一条命中就停手**（退队列 / 清缓存 / 扩盘）。
+> 一键复查当天：`sar -r -f /var/log/sysstat/sa$(date +%d) | tail -3; sar -q -f /var/log/sysstat/sa$(date +%d) | tail -3`
+> （本次事故就是 `%memused` 只有 40%、看着很闲，而 `%commit` 已经 83.59% → 47 分钟后整机僵死。）
+> 僵死期间**全部**外部访问（ssh、页面、接口）同时不可用，只能靠控制台重启 —— 代价远高于提前加 swap、降一次并发。
