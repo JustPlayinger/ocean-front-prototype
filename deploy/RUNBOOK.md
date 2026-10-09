@@ -759,7 +759,7 @@ sar -u -f /var/log/sysstat/sa09 -s 19:50:00 -e 21:05:00   # CPU：%iowait / %ste
 |---|---|---|
 | ① | 控制台**重启**（**不要用「停止」**，会丢公网 IP） | 22:52 起来，`free -m` 内存回到 999 M / 3627 M |
 | ② | 先断后路：确认**没有队列在跑**（本轮两条服务器队列已于 06:06 / 12:26 `队列跑完`） | 没有惊群重跑，`load 0.01` |
-| ③ | 清盘：`rm -rf /root/.vscode-server/{cli,bin}`（VS Code Remote 可再生产物，**3.9 GB**）+ `journalctl --vacuum-size=50M`（45 MB）+ `rm -rf /srv/ocean/data/cache/*`（17 MB）+ `apt-get clean` | **91% → 80%，可用 3.6 GB → 7.6 GB** |
+| ③ | 清盘：`rm -rf /root/.vscode-server/{cli,bin}`（VS Code Remote 可再生产物，**3.9 GB**）+ `journalctl --vacuum-size=50M`（45 MB）+ `rm -rf /srv/ocean/data/cache/*`（17 MB）+ `apt-get clean` | **91% → 80%，可用 3.6 GB → 7.6 GB**（10-10 00:09 加 1 GB swap 后为 **83% / 6.6 GB**） |
 | ④ | 只补**唯一**数据缺口：单起渔场补缺队列（海温 8158 / 锋面 15706 已满，渔场 2019 缺 12 天） | 补齐后三口径全满 |
 | ⑤ | 真机复测 `tools/ops/start-test-instance.sh`（start→health→stop，含「接管道」场景） | 全通过；`start` 修前接管道 40 s 卡死 → 修后 4.4 s 返回，8001 每次干净释放 |
 
@@ -799,23 +799,28 @@ rm -rf /srv/ocean/data/cache/*          # raster / frontend_payload 缓存，安
 rm -rf /root/.vscode-server/{cli,bin}   # VS Code Remote 的运行时（可再生产物，2026-10-09 实测 3.9 GB），重连会自动重装
 apt-get clean
 : > /var/log/ocean-sst-pipeline.log; : > /var/log/ocean-gfw-pipeline.log; : > /var/log/ocean-api-test.log
-df -h /                                 # 目标：≥ 7 GB（2026-10-09 实测 3.6 GB → 7.6 GB）
+df -h /                                 # 目标：≥ 6 GB（2026-10-09 实测 3.6 GB → 7.6 GB；10-10 加 1 GB swap 后为 6.6 GB）
 ```
 
 **⑤ 对症下药（按 2026-10-09 的实测死因排序）**
 
 - **① 内存超售 / 进程风暴 —— 10-09 的真凶，最高优先级：加 swap + 限并发**
+  ✅ **2026-10-10 00:09 已在本机执行**（加了 1 GB swap + `swappiness=10`；盘 80% → **83%**、可用 6.6 GB）：
 
   ```bash
-  # 本机原本 0 swap —— 这是被拖死的根本前提。加 2 GB swap（治本，风险最低）：
-  fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-  free -m; swapon --show
+  # 本机原本 0 swap —— 这是被拖死的根本前提。加 1 GB swap（治本，风险最低；盘紧就 1 GB，宽裕再上 2 GB）
+  fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  grep -qE '^[^#]*[[:space:]]/swapfile[[:space:]]' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  printf 'vm.swappiness=10\n' > /etc/sysctl.d/99-ocean-swap.conf && sysctl -q -p /etc/sysctl.d/99-ocean-swap.conf
+  swapon --show; free -m; sysctl vm.swappiness
 
-  # 限并发：队列 --workers 2；给生产服务设内存上限
+  # 限并发：队列 --workers 2；给生产服务设内存上限（⚠️ 这一项【还没做】）
   systemctl edit ocean-api        # 加 [Service] MemoryMax=800M
   systemctl daemon-reload && systemctl restart ocean-api
   ```
+
+  实测：`/swapfile 1024M` 已启用、`vm.swappiness=10`、`/etc/fstab` 已追加（备份 `fstab.bak-20261010-000918`），重启会自动挂载。
+  ⚠️ swap 占盘后**扩盘优先级上升**（83%）：先清 `cache`，再按 ② 扩到 ≥ 60 GB。
 
   监控口径也要换：盯 **`%commit`（`sar -r`）+ `plist-sz` / `blocked`（`sar -q`）**，别只看 `free` ——
   本次 `%memused` 只有 40% 时 `%commit` 就已 **83.59%**，10 分钟后的采样直接整段断档。
