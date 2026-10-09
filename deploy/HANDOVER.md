@@ -222,6 +222,7 @@ ssh ocean 'ocean-ops years'      # ① 先看服务器缺哪些年份
 | 部署打包失败 `could not chdir` | Windows 自带 bsdtar **打不开非 ASCII 路径**（本仓在中文目录下） | 先 robocopy 到 ASCII 临时目录再 tar（`deploy.ps1` 已这么做） |
 | SST/锋面突然全都读不了 | 装了 `netcdf4`（Windows 下打不开非 ASCII 路径，且被 xarray 优先选中） | 卸载它，靠 `scipy` + `h5netcdf`（见 §3.2） |
 | 取数脚本一启动就退出、无输出 | 一次把几千个日期当命令行参数（超过约 700 个） | 分批（`--batch-size`，队列脚本已默认分批） |
+| `ssh` 卡在等 banner、`curl` 一个字节都不回（**但** `ping` 通、`probe-ports` 显示 22/80 OPEN） | 服务器**用户态僵死**（磁盘写满 / 内存耗尽，机器无 swap），与安全组、本机网络无关 | 只能去控制台**重启**（别用「停止」：会丢公网 IP），进去先清盘再看 `dmesg`；详见 `RUNBOOK.md` 末节「事故处置：服务器『假死』」 |
 
 ---
 

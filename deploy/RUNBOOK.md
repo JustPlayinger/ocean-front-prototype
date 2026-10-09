@@ -1,4 +1,4 @@
-﻿# 部署实施手册（RUNBOOK）
+# 部署实施手册（RUNBOOK）
 
 > **换电脑接手 / 新人上手，先看 `deploy/HANDOVER.md`**（三十秒速览 + [A]拿代码 [B]配SSH [C]续队列 三步清单 + 排错手册）。
 > 本文件是**细节手册**，很全很长，按需查即可，不必通读。
@@ -418,6 +418,7 @@ ssh root@116.62.54.140 "curl -fsS -X POST http://127.0.0.1/api/data/index/rebuil
 | `deploy.ps1` 报一堆假语法错误 | `.ps1` 缺 BOM，PowerShell 5.1 按 GBK 解码中文 | 保持 **CRLF + UTF-8 带 BOM** |
 | 本机验证接口报 502 | `Invoke-WebRequest` 走了系统代理 | 一律用 `curl.exe` |
 | `tools/e2e-check.mjs` 在服务器上起不来 | 默认探测的是 Edge，且 Chromium **不能以 root 跑** | `export TEMP=/tmp EDGE=/usr/bin/chromium`，并用非 root 用户执行（脚本已自动加 `--no-sandbox`） |
+| ping 通、`probe-ports` 显示 22/80 **OPEN**，但 `ssh` 卡在等 banner、`curl` 一个字节都没有 | **服务器用户态僵死**（盘满 / OOM），与安全组、本机网络**无关** | 见文末「事故处置：服务器『假死』」；只能去控制台重启 |
 
 ### 本机（Windows）侧三个坑（2026-09-21 实测）
 
@@ -691,3 +692,72 @@ Host ocean
 - **到期迁移（2026-12-21）**：`mysqldump db_prac > db_prac.sql` + `tar -czf ocean-data.tgz /srv/ocean/data` + `tar -czf ocean-app.tgz /opt/ocean`。
 - **成本提醒**：300 元抵扣额度**只含实例与系统盘**，不含流量；`data\raw` 约 118 MB 走公网流量，一次上传成本可忽略，但站点被反复访问要留意。
 - **合规提醒**：底图目前是 Natural Earth（公有领域），**仅限原型期**；对外发布前必须换成有审图号的合规底图。
+
+## 事故处置：服务器「假死」——TCP 能握手但没有响应（2026-10-09 实录）
+
+判读固定为**三层**，少测一层就会误判（第一反应通常是「安全组 / 网络」，实际是机器自己僵了）：
+
+| 探测 | 假死时 | 正常时 | 这层证明了什么 |
+|---|---|---|---|
+| `ping 116.62.54.140` | ✅ 通（约 35 ms，0% 丢包） | 通 | 只有主机网络层活着 |
+| `deploy\probe-ports.ps1 -ServerIp 116.62.54.140 -Ports "22,80"` | ✅ **OPEN** | OPEN | 三次握手由**内核**完成，只证明安全组放行 |
+| `ssh -o ConnectTimeout=10 root@116.62.54.140 "echo ok"` | ❌ 卡在等 banner（20 s 收不到 `SSH-2.0-OpenSSH…`） | 秒进 | banner 要 **sshd** 参与 → 用户态 |
+| `curl.exe -m 5 -o NUL -w "%{http_code}" http://116.62.54.140/` | ❌ 一个字节都没有 | 200 | HTTP 要 **nginx** 参与 → 用户态 |
+
+**口径**：前三层都通、banner/HTTP 全无 = **内核活着、用户态进程被卡死或被内核杀光**。
+先在本机 `curl.exe -m 5 http://223.5.5.5/` 做对照，正常就说明**不是你的网络** —— 此时**不要再翻安全组**。
+
+### 那次现场事实与推断
+
+- 19:53 实测 `df -h /` **只剩 3.5 GB（91% 已用）**，而补数 / 离线生成的写入还在继续；
+- 19:5x 的调试日志里，8001 测试实例**起来几秒即被回收**（内存被抢），随后 20:15 起外部彻底断联；
+- 机器 **2 vCPU / 4 GiB / 无 swap**，当时生产 2 worker + 三条队列 + 一个测试实例同时在跑；
+- 20:38、22:21 两次复测仍是「握手 OK、banner 无」。
+  → 高度怀疑 **磁盘写满** 或 **内存耗尽（OOM）**；测试实例可能是压垮的那一根稻草。
+
+### 处置（按顺序，别跳步）
+
+**① 控制台看监控（零风险，先做）**
+实例 → 监控：24 h 的 **磁盘使用率 / 内存 / CPU** 曲线一眼分病因。顺手确认有没有装**云助手**（有就能在控制台直接执行命令，最省事）。
+
+**② 只能从控制台救活：重启**
+用户态已僵死，外部无计可施。实例 → 更多 → 实例状态 → **重启**（严重时用强制重启）。
+⚠️ **不要用「停止」**：停机可能释放公网 IP（阶段 A2 的老坑），重启不会。
+（VNC / Workbench 若能登进去，就先按 ③ 留证据再重启；登不进就直接重启。）
+
+**③ 重启后先断后路、再看病因（先别让队列自己跑起来）**
+
+```bash
+df -h /; free -m; uptime
+dmesg -T | grep -iE 'out of memory|killed process' | tail -5   # OOM 会写 "Killed process ... python"
+journalctl -b -1 -n 40 --no-pager | tail -40                   # 上一次启动的最后遗言
+systemctl --no-pager status nginx ocean-api | head -20
+bash /opt/ocean/tools/ops/start-test-instance.sh status        # 8001 若有残留实例，先 stop
+du -sh /srv/ocean/data/* 2>/dev/null | sort -h | tail -8       # 谁把盘吃掉了
+```
+
+**④ 急救清理（都是可重建的，删了会自动重算）**
+
+```bash
+journalctl --vacuum-size=100M
+rm -rf /srv/ocean/data/cache/*    # raster / frontend_payload 缓存，安全（见「数据铺满」一节）
+: > /var/log/ocean-sst-pipeline.log; : > /var/log/ocean-gfw-pipeline.log; : > /var/log/ocean-api-test.log
+df -h /                           # 目标：回到 5 GB 以上
+```
+
+**⑤ 对症下药**
+- **盘满**：清完仍紧就扩盘（控制台扩容后 `growpart /dev/vda 1 && resize2fs /dev/vda1`）。`raw`（26 GB）是正资产**别删**，要定期清的是 `cache`。
+- **OOM**：队列 `--workers` 降到 2；给 `ocean-api.service` 加 `MemoryMax=`；**队列在跑时不要起 8001 测试实例**（见 `deploy/COLLAB.md` §3.4）。
+
+**⑥ 恢复业务（顺序别反：先服务 → 健康检查 → 最后才拉队列）**
+
+```bash
+systemctl restart nginx ocean-api
+curl -fsS http://127.0.0.1:8000/api/health && echo api-ok
+bash /opt/ocean/tools/ops/start-server-pipelines.sh
+ocean-ops health     # 顺便看有没有 PPID=1 的孤儿 fetch_*
+```
+
+**⑦ 复盘**：把控制台看到的峰值更新回 `deploy/COLLAB.md` §1.1 资源表（磁盘 / 内存两行）。
+
+> **预防线**：磁盘 85%、内存 80% 就停手清理。僵死期间**全部**外部访问（ssh、页面、接口）同时不可用，只能靠控制台重启 —— 代价远高于提前清一次缓存。
