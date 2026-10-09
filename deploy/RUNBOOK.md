@@ -418,7 +418,7 @@ ssh root@116.62.54.140 "curl -fsS -X POST http://127.0.0.1/api/data/index/rebuil
 | `deploy.ps1` 报一堆假语法错误 | `.ps1` 缺 BOM，PowerShell 5.1 按 GBK 解码中文 | 保持 **CRLF + UTF-8 带 BOM** |
 | 本机验证接口报 502 | `Invoke-WebRequest` 走了系统代理 | 一律用 `curl.exe` |
 | `tools/e2e-check.mjs` 在服务器上起不来 | 默认探测的是 Edge，且 Chromium **不能以 root 跑** | `export TEMP=/tmp EDGE=/usr/bin/chromium`，并用非 root 用户执行（脚本已自动加 `--no-sandbox`） |
-| ping 通、`probe-ports` 显示 22/80 **OPEN**，但 `ssh` 卡在等 banner、`curl` 一个字节都没有 | **服务器用户态僵死**（盘满 / OOM），与安全组、本机网络**无关** | 见文末「事故处置：服务器『假死』」；只能去控制台重启 |
+| ping 通、`probe-ports` 显示 22/80 **OPEN**，但 `ssh` 卡在等 banner、`curl` 一个字节都没有 | **服务器用户态僵死**：最常见是 **22 端口正被爆破**（sshd 被未认证连接占满 → banner 发不出），其次才是盘满 / OOM，与安全组、本机网络**无关** | 见文末「事故处置：服务器『假死』」；只能去控制台重启，进去先 `journalctl -b -1 \| grep -cE 'sshd\['` 看爆破规模，再按末节 ⑤ 把 **22 收进安全组白名单** |
 
 ### 本机（Windows）侧三个坑（2026-09-21 实测）
 
@@ -707,13 +707,43 @@ Host ocean
 **口径**：前三层都通、banner/HTTP 全无 = **内核活着、用户态进程被卡死或被内核杀光**。
 先在本机 `curl.exe -m 5 http://223.5.5.5/` 做对照，正常就说明**不是你的网络** —— 此时**不要再翻安全组**。
 
-### 那次现场事实与推断
+### 重启后取证：真凶是 **22 端口被爆破**，不是盘满、也不是 OOM（2026-10-09 23:40 核对）
 
-- 19:53 实测 `df -h /` **只剩 3.5 GB（91% 已用）**，而补数 / 离线生成的写入还在继续；
-- 19:5x 的调试日志里，8001 测试实例**起来几秒即被回收**（内存被抢），随后 20:15 起外部彻底断联；
-- 机器 **2 vCPU / 4 GiB / 无 swap**，当时生产 2 worker + 三条队列 + 一个测试实例同时在跑；
-- 20:38、22:21 两次复测仍是「握手 OK、banner 无」。
-  → 高度怀疑 **磁盘写满** 或 **内存耗尽（OOM）**；测试实例可能是压垮的那一根稻草。
+重启（22:52）后把**上一轮启动**的日志翻出来逐条核对，**原推断（盘满/OOM）被推翻**：
+
+```bash
+journalctl -b -1 -k | grep -icE 'out of memory|killed process'   # → 0    ：不是 OOM（dmesg 已被重启清空，必须查 -b -1）
+journalctl -b -1 | grep -cE 'sshd\[[0-9]+\]'                      # → 29411：上一轮启动期间的 sshd 日志行数！
+journalctl -b --no-pager | grep -cE 'sshd\[[0-9]+\]'               # →    84：本次启动同期（对照组）
+journalctl -b -1 | grep -oE 'from [0-9.]+' | awk '{print $2}' | sort | uniq -c | sort -rn | head
+#   5250 223.99.13.153 · 4410 223.80.110.55 · 373 223.80.110.9 · 254 222.206.18.231 · 174 223.99.13.222
+```
+
+- 20:58:32 一秒内上百条 `sshd[…]: banner exchange: Connection from 115.120.234.30 …: invalid format` +
+  `Connection closed by 223.99.13.244 …`；**同一批 IP 也在扫 80 端口**（当日 nginx access.log 的 Top 就是 `115.120.234.30`，40 次）。
+  → **sshd 被大量未认证连接占满，来不及起子进程**：TCP 握手由**内核**完成（所以探测显示 OPEN），
+  但 banner 永远发不出来 —— 这就是我们看到的「假死」。
+- 同期事实：`systemd-resolved: Under memory pressure` 出现 4 次（20:56–20:58）、生产 uvicorn 的两个 worker
+  `Child process died`（20:58:31 / 20:58:36）、之后日志中断。→ **内存确实吃紧**（4 GiB 无 swap，
+  当时有队列 + 测试实例），但它只是**帮凶**；让用户态停止服务的直接原因是爆破把 sshd 打爆。
+- 现成条件（都在放大风险）：22 对全网开放、`permitrootlogin yes`、`passwordauthentication no`、
+  `maxstartups 10:30:100`、**没装 fail2ban**、本机 `ufw` 也是 **inactive**（安全组是唯一防线，而它对 22 没限源）。
+- **磁盘 91%（余 3.5 GB）是下一颗定时炸弹，但不是本次死因**（`raw` 26 GB + `/root/.vscode-server` 3.9 GB）。
+- 口径修正：**「内核活着、用户态不响应」不只有盘满/OOM 一种解释 —— 先看 sshd 日志量**（判读三层表照旧用）。
+
+### 这次实际怎么处置的（可照抄，含结果）
+
+| 步 | 动作 | 结果 |
+|---|---|---|
+| ① | 控制台**重启**（**不要用「停止」**，会丢公网 IP） | 22:52 起来，`free -m` 内存回到 999 M / 3627 M |
+| ② | 先断后路：确认**没有队列在跑**（本轮两条服务器队列已于 06:06 / 12:26 `队列跑完`） | 没有惊群重跑，`load 0.01` |
+| ③ | 清盘：`rm -rf /root/.vscode-server/{cli,bin}`（VS Code Remote 可再生产物，**3.9 GB**）+ `journalctl --vacuum-size=50M`（45 MB）+ `rm -rf /srv/ocean/data/cache/*`（17 MB）+ `apt-get clean` | **91% → 80%，可用 3.6 GB → 7.6 GB** |
+| ④ | 只补**唯一**数据缺口：单起渔场补缺队列（海温 8158 / 锋面 15706 已满，渔场 2019 缺 12 天） | 补齐后三口径全满 |
+| ⑤ | 真机复测 `tools/ops/start-test-instance.sh`（start→health→stop，含「接管道」场景） | 全通过；`start` 修前接管道 40 s 卡死 → 修后 4.4 s 返回，8001 每次干净释放 |
+
+> 取证结论一句话：**这是一台对全网开放 SSH 的 4 GiB 小机器，被国内几个 IP 持续爆破（峰值上百连接/秒）打到 sshd 不响应**；
+> 磁盘紧张与内存吃紧是背景条件，不是触发器。**对策的第一优先级是把 22 收进白名单（见 ⑤「被爆破」），而不是删数据。**
+
 
 ### 处置（按顺序，别跳步）
 
@@ -729,7 +759,8 @@ Host ocean
 
 ```bash
 df -h /; free -m; uptime
-dmesg -T | grep -iE 'out of memory|killed process' | tail -5   # OOM 会写 "Killed process ... python"
+journalctl -b -1 -k | grep -iE 'out of memory|killed process' | tail -5   # OOM 只能查上一轮 journal！
+                                                                          # （dmesg 重启后就被清空了，别用它查旧事）
 journalctl -b -1 -n 40 --no-pager | tail -40                   # 上一次启动的最后遗言
 systemctl --no-pager status nginx ocean-api | head -20
 bash /opt/ocean/tools/ops/start-test-instance.sh status        # 8001 若有残留实例，先 stop
@@ -739,15 +770,21 @@ du -sh /srv/ocean/data/* 2>/dev/null | sort -h | tail -8       # 谁把盘吃掉
 **④ 急救清理（都是可重建的，删了会自动重算）**
 
 ```bash
-journalctl --vacuum-size=100M
-rm -rf /srv/ocean/data/cache/*    # raster / frontend_payload 缓存，安全（见「数据铺满」一节）
+journalctl --vacuum-size=50M
+rm -rf /srv/ocean/data/cache/*          # raster / frontend_payload 缓存，安全（见「数据铺满」一节）
+rm -rf /root/.vscode-server/{cli,bin}   # VS Code Remote 的运行时（可再生产物，2026-10-09 实测 3.9 GB），重连会自动重装
+apt-get clean
 : > /var/log/ocean-sst-pipeline.log; : > /var/log/ocean-gfw-pipeline.log; : > /var/log/ocean-api-test.log
-df -h /                           # 目标：回到 5 GB 以上
+df -h /                                 # 目标：≥ 7 GB（2026-10-09 实测 3.6 GB → 7.6 GB）
 ```
 
 **⑤ 对症下药**
 - **盘满**：清完仍紧就扩盘（控制台扩容后 `growpart /dev/vda 1 && resize2fs /dev/vda1`）。`raw`（26 GB）是正资产**别删**，要定期清的是 `cache`。
 - **OOM**：队列 `--workers` 降到 2；给 `ocean-api.service` 加 `MemoryMax=`；**队列在跑时不要起 8001 测试实例**（见 `deploy/COLLAB.md` §3.4）。
+- **被爆破（2026-10-09 的真凶，最高优先级）**：
+  1. 控制台 → 安全组 → 入方向：**22 只放行你和同伴的出口 IP/32**（顺序：先加新规则 → 验证还能登 → 再删 `0.0.0.0/0`；否则把自己锁在门外）；
+  2. 可选加固：`apt-get install -y fail2ban`（自动封爆破 IP）；
+  3. 可选抗爆破：`/etc/ssh/sshd_config` 里 `MaxStartups 4:50:10`、`LoginGraceTime 20` → 先 `sshd -t` 校验 → `systemctl reload ssh`（**reload 不断已建连接，别 restart**）。
 
 **⑥ 恢复业务（顺序别反：先服务 → 健康检查 → 最后才拉队列）**
 
@@ -760,4 +797,5 @@ ocean-ops health     # 顺便看有没有 PPID=1 的孤儿 fetch_*
 
 **⑦ 复盘**：把控制台看到的峰值更新回 `deploy/COLLAB.md` §1.1 资源表（磁盘 / 内存两行）。
 
-> **预防线**：磁盘 85%、内存 80% 就停手清理。僵死期间**全部**外部访问（ssh、页面、接口）同时不可用，只能靠控制台重启 —— 代价远高于提前清一次缓存。
+> **预防线**：磁盘 85%、内存 80% 就停手清理；`journalctl -b | grep -cE 'sshd\['` 每小时上百行就说明 22 正在被爆破（本次事故上一轮启动累计 **29,411 行**）→ 立刻按 ⑤「被爆破」收紧安全组。
+> 僵死期间**全部**外部访问（ssh、页面、接口）同时不可用，只能靠控制台重启 —— 代价远高于提前清一次缓存、加一条安全组规则。

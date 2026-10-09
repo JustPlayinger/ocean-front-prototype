@@ -77,14 +77,20 @@ cmd_start() {
   [ "${FREE_GB:-99}" -ge 2 ] || warn "根分区只剩 ${FREE_GB} GB，建议先清理再测试"
 
   # 与 ocean-api.service 完全对齐的启动方式，只改端口/worker 数/数据目录
-  ( cd "$APP_DIR/backend" && \
-    setsid nohup runuser -u "$RUN_AS" -- env \
+  # ⚠️ 重定向必须落在**整个后台子 shell** 上（见下面 `) >> "$LOG" 2>&1 < /dev/null &`）：
+  #    若只把重定向写在最后一条命令上，调用方一旦把 start 的输出接进管道
+  #    （`start | tail -3`、`start | grep ...`），子进程会一直握着管道写端，
+  #    管道等不到 EOF → 看起来像「start 卡死」。
+  #    实测（2026-10-09）：重定向到文件 2.2 秒返回；接管道 40 秒仍未返回（被 timeout 杀掉）。
+  (
+    cd "$APP_DIR/backend" || exit 1
+    exec setsid nohup runuser -u "$RUN_AS" -- env \
       OCEAN_RAW_DATA_DIR="$TEST_ROOT/raw" \
       OCEAN_CACHE_DIR="$TEST_ROOT/cache" \
       PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-      "$VENV_PY" -m uvicorn app.main:app --host 127.0.0.1 --port "$PORT" --workers 1 \
-      >> "$LOG" 2>&1 < /dev/null & \
-    echo $! > "$PIDFILE" )
+      "$VENV_PY" -m uvicorn app.main:app --host 127.0.0.1 --port "$PORT" --workers 1
+  ) >> "$LOG" 2>&1 < /dev/null &
+  echo $! > "$PIDFILE"
   sleep 2
 
   # 等健康检查（xarray 首次按需读数据，给 60 秒）
