@@ -4,7 +4,7 @@
 
 | 文件 | 生成者 | 内容 |
 |---|---|---|
-| `meta.js` | `Ocean/backend/scripts/export_prototype_data.py` | 数据产品 / 许可 / 可用日期 / 缺什么 |
+| `meta.js` | `backend/scripts/export_prototype_data.py` | 数据产品 / 许可 / 可用日期 / 缺什么 |
 | `days.js` | 同上（每次导出都会重写） | 清单：已导出的锋面/海温日期（页面按它注入 `<script>`，加日期不用改 HTML） |
 | `day/<日期>.js` | 同上（扫描 `data/raw/front/`，`--dates` 可指定） | 真实锋面：对象中心线、锋面带、冷暖侧、缺测掩码、质量统计 |
 | `sst/<日期>.js` | 同上（扫描 `data/raw/sst/`，`--no-sst` 可跳过） | 真实海温：NOAA GHRSST 0.05° 逐日，按 0.5 °C 分箱的逐行游程 |
@@ -14,18 +14,19 @@
 | `base/world.js` | 同上（`--set world`） | Natural Earth 1:110m 全球档（球面视图用；跨 ±180° 的环已切开） |
 
 ```powershell
-# 重新生成（在 Ocean/backend 下）
+# 重新生成（在产品仓 backend 下；先 cd backend）
 # ① 拉数据（Zenodo 按日期抽单日文件；海温走 NOAA CoastWatch ERDDAP 子集，免账号）
 .\.venv\Scripts\python.exe scripts\fetch_zenodo_front_samples.py 2024-08-05 2024-08-06
 .\.venv\Scripts\python.exe scripts\fetch_sst_samples.py 2024-08-05 2024-08-06
 # ② 导出（扫 raw 目录里所有日期；海温自动跟着导出）
 .\.venv\Scripts\python.exe scripts\export_prototype_data.py
 .\.venv\Scripts\python.exe scripts\export_prototype_data.py --mode clim
-# 底图（三级 LOD，在本仓根目录）
+# 底图（三级 LOD，先返回本仓根目录）
+cd ..
 node tools\build-basemap.mjs                 # 默认 all：world + asia + donghai
 node tools\build-basemap.mjs --set world     # 只重生成球面档
 # 校验
 node tools\data-check.mjs
 ```
 
-完整结构说明、字段含义、来源与许可见 [`../docs/data-schema.md`](../docs/data-schema.md)。
+完整结构说明、字段含义、来源与许可见 [`../../../docs/data-schema.md`](../../../docs/data-schema.md)。

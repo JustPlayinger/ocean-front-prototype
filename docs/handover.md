@@ -200,10 +200,10 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy.ps1 -ServerIp <公网IP
 
 ### 6.3 数据更新流程（照这个顺序做）
 
-1. `fetch_zenodo_front_samples.py <日期…>` 拉到 `Ocean/data/raw/front/`；水温用 `fetch_sst_samples.py` 拉到 `Ocean/data/raw/sst/`。
+1. 在产品仓 `backend/` 下运行 `scripts/fetch_zenodo_front_samples.py <日期…>`，默认拉到仓根 `data/raw/front/`；水温用 `scripts/fetch_sst_samples.py` 拉到仓根 `data/raw/sst/`。服务器设置 `OCEAN_RAW_DATA_DIR` 时按该配置存储。
 2. 跑 `export_prototype_data.py`（可加 `--dates` 只导指定日期；`--no-sst` 跳过水温）。
 3. 跑三项检查；`data-check` 会验证新日期的结构与自洽，`e2e-check` 会验证页面确实用上了新数据（日期范围、对象数与文件一致）。
-4. 提交 `data/**` 与（如改了）`docs/**`、`tools/**`；`data/**` 一律由脚本产出，不要在编辑器里改。
+4. 提交 `frontend/prototype/data/**` 与（如改了）`docs/**`、`tools/**`；前端数据由脚本产出，不要手改。仓根 `data/raw`、`data/processed`、`data/cache` 不提交。
 
 ### 6.4 四条硬约束（改代码前先接受）
 
