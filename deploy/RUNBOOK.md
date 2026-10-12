@@ -345,6 +345,15 @@ https://www.star.nesdis.noaa.gov/pub/socd/mecb/crw/data/5km/v3.1_op/nc/v1.0/dail
   低于 P60 的格子不画 —— 这是「可写覆盖内无作业不渲染」，**不是**把缺失当 0。
   ⚠️ 边界：界面与图例必须写「表观捕捞活动（fishing hours），不等于渔获量 / 产量」（`docs/data-governance-gfw-ais.md`）。
   离线（`file://`）没有该数据源，图层开关可点但无渲染，属预期。
+  取数是**按需**的：`loadFishing()` 只在图层打开（点图例）/ 换日期 / 点日期播放时调 `OFData.ensureFishing(iso)`，
+  一天一个文件（实测 2024-08-05：2412 格 / 97 371.81 h，取数约 0.2 s），到位后只重画地图，不阻塞主图。
+  自检（浏览器控制台）：点开图层后 `document.querySelectorAll('#mapSvg [data-layer="ground"]').length` 应 > 0。
+  ⚠️ **2026-10-12 修**：`ensureFishing()` 此前只有定义、**没有任何调用点** → 图层开关打开也是空白
+  （现象＝「渔场数据已落盘，界面却看不到」）。同时修掉 `retryable()` 的比较方向：
+  原写法是「失败后 20 s **内**才允许重试」，等于一次抖动就把某天永久钉成空白，现与注释一致（失败满 20 s 后可重试）。
+  ⚠️ 若 `/api/fishing/availability` 里**老日期汇总全是 0**（只剩最后一次抓取的日期）：manifest 与文件不同步，
+  重建即可（只读 `effort-*.json`、不联网、不需要 token；实测 2922 天 13 s，重建前先 `cp` 备份）：
+  `ssh ocean 'cd /opt/ocean && OCEAN_RAW_DATA_DIR=/srv/ocean/data/raw /opt/ocean/venv/bin/python tools/pipeline/fetch_gfw_effort.py --rebuild-manifest'`
 - **锋面强度**：口径＝**跨锋面 SST 温差 / 梯度**（数据集自带的 `frontal_intensity` 未下载，约 90 GB；
   需求文档 §6.2 把「`frontal_intensity` 与局地温度梯度」并列，故用温度差作口径，界面始终写明）。
   实现见 `frontend/prototype/prototype-data.js` 的 `frontIntensity()`：把锋面折线投影到局部 km 平面 →
