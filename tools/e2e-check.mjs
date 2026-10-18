@@ -264,9 +264,9 @@ const tabs = await evalJS(`var bs = [].slice.call(document.querySelectorAll("#ta
     secondary: bs.filter(function(b){ return b.classList.contains("secondary"); }).map(function(b){ return b.textContent.trim(); }),
     active: document.querySelector("#tabs button.active").dataset.pane,
     paneNow: document.getElementById("pane-now").classList.contains("active") };`);
-check("页签 = 当前 / 历史 / 预测 / AI 分析",
-  tabs.n === 4 && tabs.primary.join(",") === "now,clim,future,ai" &&
-  tabs.labels.join("/") === "当前/历史/预测/AI 分析" && tabs.secondary.length === 0, JSON.stringify(tabs));
+check("主模块 = 当前 / 历史 / 未来",
+  tabs.n === 3 && tabs.primary.join(",") === "now,clim,future" &&
+  tabs.labels.join("/") === "当前/历史/未来" && tabs.secondary.length === 0, JSON.stringify(tabs));
 check("默认落在「当前」页", tabs.active === "now" && tabs.paneNow === true, tabs.active);
 
 // ===== 3.1) 历史 AIS 响应：Front Response Table 契约入口 =====
@@ -375,8 +375,8 @@ const aisMissing = await evalJS(`window.__frFns = { r: OFData.frontResponse };
 check("AIS/GFW 覆盖不足时显示不可用，不输出增强/无增强结论（缺测不按 0 处理）",
   aisMissing.date === "2024-08-07" && aisMissing.range === 20 && aisMissing.response.available === false &&
   aisMissing.response.status === "missing_coverage" && /不可用/.test(aisMissing.tag) &&
-  /missing_coverage/.test(aisMissing.list) &&
-  /不把缺失解释成 0 fishing hours/.test(aisMissing.list) &&
+  /暂无响应记录/.test(aisMissing.list) &&
+  /缺测不代表零活动/.test(aisMissing.list) &&
   !/响应增强|未见明确增强|无明显增强/.test(aisMissing.tag),
   aisMissing.tag + " · " + aisMissing.list.slice(0, 70));
 await evalJS(`setDate("2024-08-05"); document.querySelector('#rangeSeg button[data-range="20"]').click(); return state.range;`);
@@ -394,9 +394,9 @@ check("结论块在「当前」页内，不再有常驻 hero 与首选点位卡"
   hero.inNow === true && hero.legacy === false, "inNow=" + hero.inNow + " · legacy=" + hero.legacy);
 check("结论块给出三档结论之一（值得去 / 可以看看 / 线索不足）",
   ["值得去", "可以看看", "线索不足"].indexOf(hero.verdict) >= 0, hero.verdict);
-check("结论行含范围内锋面区数量 / 把握度 / 方位 / 距离（已无航时·油耗）",
-  /作业范围 20 km 内/.test(hero.line) && /(个锋面区|暂无锋面区)/.test(hero.line) &&
-  /把握度 \d+%/.test(hero.line) && /(正北|东北|正东|东南|正南|西南|正西|西北)/.test(hero.line) &&
+check("结论行只给目标 / 方位 / 距离，数量和评分由指标区承载",
+  /优先查看：锋面区/.test(hero.line) && !/把握度/.test(hero.line) &&
+  /(正北|东北|正东|东南|正南|西南|正西|西北)/.test(hero.line) &&
   /km/.test(hero.line) && !/小时|油耗/.test(hero.line), hero.line.slice(0, 70));
 check("结论卡写明看的是哪一天、数据是实况观测",
   /（今天）|（\+\d 天）|（-\d 天）/.test(hero.when) && /观测/.test(hero.when), hero.when);
@@ -410,7 +410,7 @@ check("「评分依据」列出分项与合计，并说明未参与评分的项"
 const now = await evalJS(`var ms = [].slice.call(document.querySelectorAll("#nowMetrics .m")).map(function(n){ return n.textContent; });
   return { ms: ms, scope: document.getElementById("nowScopeTag").textContent,
     sea: document.getElementById("seaList").textContent, seaTag: document.getElementById("seaTag").textContent,
-    cards: document.querySelectorAll("#pane-now > .card").length,
+    cards: document.querySelectorAll("#pane-now > div.card").length,
     leadRows: document.querySelectorAll("#nowLead .row").length,
     leadClickable: document.querySelectorAll("#nowLead .row.clickable").length,
     detailsText: (document.querySelector("#nowFrontDetails summary") || {}).textContent || "",
@@ -418,14 +418,14 @@ const now = await evalJS(`var ms = [].slice.call(document.querySelectorAll("#now
     dataObjects: OFData.objects(document.getElementById("timeDate").value).length,
     coverage: 100 - OFData.quality(document.getElementById("timeDate").value).nodata_percent,
     bodyText: document.body.innerText };`);
-check("现在页 4 个指标格（锋面区 / 最近锋面 / 所处侧 / 把握度）",
-  now.ms.length === 4 && /锋面区/.test(now.ms[0]) && /把握/.test(now.ms[3]), now.ms.length + " 格");
+check("现在页 4 个观测指标（锋面区 / 最近锋面 / 所处侧 / 选点水温）",
+  now.ms.length === 4 && /范围内锋面/.test(now.ms[0]) && /选点水温/.test(now.ms[3]), now.ms.length + " 格");
 check("现在页的范围标签跟着「作业范围」走，并标出数据覆盖",
   /20 km/.test(now.scope) && new RegExp(now.coverage.toFixed(1) + "%").test(now.scope), now.scope);
 check("海况安全提示标成「示例数据 · 仅供参考」，并提示以官方预报为准",
   /示例数据/.test(now.seaTag) && /仅供参考/.test(now.seaTag) && /官方海洋预报/.test(now.sea), now.seaTag);
-check("当前页默认三张信息卡（当前观测 / 历史 AIS 响应 / 展开细节），海况仍作为展开项",
-  now.cards === 3 && /全部锋面区/.test(now.detailsText), "cards=" + now.cards + " · " + now.detailsText);
+check("当前页两张主卡，历史响应与海况默认折叠",
+  now.cards === 2 && /全部锋面区/.test(now.detailsText), "cards=" + now.cards + " · " + now.detailsText);
 check("当前页默认作业线索不超过 3 条，完整清单保留在展开项",
   now.leadRows >= 1 && now.leadRows <= 3 && now.fronts === now.dataObjects,
   "lead=" + now.leadRows + " / all=" + now.fronts + " / data=" + now.dataObjects);
@@ -437,11 +437,11 @@ check("数据覆盖数与数据文件一致（缺测率来自真实掩码）",
 const sstNow = await evalJS(`var iso = document.getElementById("timeDate").value;
   var day = OFData.sst(iso);
   var bins = {}; ((day || {}).runs || []).forEach(function (r) { bins[r[3]] = 1; });
-  return { tag: document.getElementById("nowScopeTag").textContent,
+  return { tag: document.querySelector("#nowMetrics .m:last-child .v").textContent,
     cell: OFData.sstCell(iso, 124.5, 30.2), stats: OFData.sstStats(iso),
     bins: Object.keys(bins).length,
     paths: document.querySelectorAll('#mapSvg path[data-layer="sst"]').length };`);
-const shownTemp = (sstNow.tag.match(/定位点水温 ([\d.]+) °C/) || [])[1];
+const shownTemp = (sstNow.tag.match(/([\d.]+)\s*°C/) || [])[1];
 check("页面上的水温与数据文件一致（定位点档位，不是编造值）",
   sstNow.cell && sstNow.cell.valueC !== null ? shownTemp === sstNow.cell.valueC.toFixed(1)
     : shownTemp === undefined,
@@ -525,9 +525,9 @@ const clim = await evalJS(`var data = OFData.clim;
       return Object.keys(data.by_year).some(function (y) { return yearsOfDay.indexOf(y) < 0; });
     })(),
     missingMarked: [].slice.call(document.querySelectorAll("#climBars i")).some(function(b){ return /缺测/.test(b.getAttribute("title") || ""); }),
-    note: (document.querySelector("#pane-clim .hint") || {}).textContent || "" };`);
-check("历史页没有任何日期输入框（锚点跟着顶栏出海日）",
-  clim.inputs === 0 && /出海日/.test(clim.note), "inputs=" + clim.inputs);
+    note: document.getElementById("timeDate").value === state.date };`);
+check("补充历史浏览不引入第二个地图日期输入框",
+  clim.inputs === 0 && clim.note === true, "inputs=" + clim.inputs);
 check("历史尺度有 6 个按钮：当日 / 3日 / 7日 / 15日 / 当月 / 整年",
   clim.btns.join("/") === "当日/3 日/7 日/15 日/当月/整年", clim.btns.join("/"));
 check("「这一天」柱数 = 数据里覆盖的全部年份（有缺样本的年份才标「缺测」）",
@@ -576,24 +576,23 @@ check("「整年」展示样例年，并说明不是完整全年统计",
 await evalJS(`document.querySelector('#climPeriod button[data-period="day"]').click(); return 1;`);
 
 // ===== 8) AI 分析 + 数据说明 =====
-await click('#tabs button[data-pane="ai"]');
-const ai = await evalJS(`return {
-  tag: document.getElementById("aiTag").textContent,
-  summary: document.getElementById("aiSummary").textContent,
-  plan: document.getElementById("aiPlan").textContent,
-  next: document.getElementById("aiNext").textContent,
-  evidence: document.getElementById("aiEvidenceBody").textContent,
-  cards: document.querySelectorAll("#pane-ai > .card").length,
-  planBox: !!document.getElementById("aiPlanBox") };`);
-check("AI 分析只做证据组织与任务编排（AIS 证据随真实数据，不冒充渔获量）",
-  /证据驱动/.test(ai.tag) && /解析任务/.test(ai.plan) && /证据边界/.test(ai.plan) &&
-  /AI 只组织证据/.test(ai.plan) && /查看规则预测参考/.test(ai.next) &&
-  /当前证据/.test(ai.evidence) && /预测证据/.test(ai.evidence) && /AIS 响应/.test(ai.evidence) &&
-  /post1-3=[\d.]+ h/.test(ai.evidence) && /pre7=[\d.]+ h/.test(ai.evidence) &&
-  /不等于渔获量/.test(ai.evidence),
-  ai.tag + " · " + ai.plan.slice(0, 36));
-check("AI 页合并为一张复核卡，任务编排放入展开项",
-  ai.cards === 1 && ai.planBox === true, "cards=" + ai.cards);
+await click('#tabs button[data-pane="clim"]');
+const aiWaiting = await evalJS(`return {text: document.getElementById("aiConclusion").textContent};`);
+check("历史结论在统计前显示等待状态", /完成统计后/.test(aiWaiting.text), aiWaiting.text);
+await evalJS(`runStats(); return 1;`);
+const ai = await evalJS(`return {tag: document.getElementById("aiTag").textContent,
+  conclusion: document.getElementById("aiConclusion").textContent,
+  inHistory: !!document.querySelector("#pane-clim #aiConclusion")};`);
+check("同期结论并入历史模块，并保留证据边界",
+  /规则整理/.test(ai.tag) && ai.inHistory && /暂不能推荐作业区段/.test(ai.conclusion), ai.conclusion);
+const statsChanges = await evalJS(`state.stats.month = "10"; renderStats(); renderAI();
+  var stale = currentStats() === null && /完成统计后/.test(document.getElementById("aiConclusion").textContent) &&
+    /条件已变化/.test(document.getElementById("statsStatus").textContent);
+  runStats();
+  var missing = currentStats().rows.length === 0 && /缺测不代表零/.test(document.getElementById("statsResults").textContent);
+  state.stats.month = "08"; renderStats(); renderAI();
+  return {stale: stale, missing: missing};`);
+check("统计条件变化收起旧结论；无覆盖不当作零", statsChanges.stale && statsChanges.missing, JSON.stringify(statsChanges));
 await evalJS(`switchTab("basis"); return 1;`);
 const basis = await evalJS(`return {
   data: document.querySelectorAll("#basisData .tr").length,
@@ -621,7 +620,7 @@ check("数据说明写清 AIS response 的 source、metric、unit、公开边界
 const unsupportedClaims = await evalJS(`var re = new RegExp(${JSON.stringify(unsupportedClaimPattern)}, "ig");
   var areas = {
     page: document.body.textContent,
-    ai: document.getElementById("pane-ai").textContent,
+    ai: document.getElementById("aiConclusion").textContent,
     basis: document.getElementById("pane-basis").textContent
   };
   return Object.keys(areas).map(function(name){
@@ -840,9 +839,10 @@ check("「依据」页写明冷暖侧只展示、不加分",
 // ===== 13) 找鱼范围 =====
 const r10 = await evalJS(`document.querySelector('#rangeSeg button[data-range="10"]').click();
   return { scope: document.getElementById("nowScopeTag").textContent, line: document.getElementById("heroLine").textContent,
+    range: state.range,
     tag: document.getElementById("nowFrontTag").textContent };`);
 check("找鱼范围 10 km 生效（真源驱动，清单也跟着变）",
-  /10 km/.test(r10.scope) && /10 km/.test(r10.line) && /范围内/.test(r10.tag), r10.tag.slice(0, 30));
+  /10 km/.test(r10.scope) && r10.range === 10 && /范围内/.test(r10.tag), r10.tag.slice(0, 30));
 await shot("shot-9-range10.png");
 await evalJS(`document.querySelector('#rangeSeg button[data-range="30"]').click(); return 1;`);
 const r30 = await evalJS(`return document.getElementById("nowScopeTag").textContent;`);

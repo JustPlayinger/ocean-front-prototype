@@ -50,6 +50,7 @@ const state = {
   select: null,                            // 被选中的对象 {type, id}
   probe: null,                             // 钉住的地图点 {lon, lat}
   tab: "now",
+  stats: { month: "08", from: null, to: null, result: null, organizedKey: null },
   climMode: "day",                         // 历史页：day / period / month / year
   predWindow: 3,                            // 预测页：1 / 3 / 7 天窗口
   pickOrigin: false,                        // 地图点选出发地模式
@@ -1076,16 +1077,14 @@ function renderHero() {
   v.className = "verdict " + verdict.cls;
 
   const t = heroTarget();
-  const inRangeCount = snap.inRange.filter((f) => f.isObject).length;
-  let line = "作业范围 " + state.range + " km 内 <b>" +
-    (inRangeCount ? inRangeCount + " 个锋面区" : "暂无锋面区") + "</b> · 把握度 <b>" + snap.score + "%</b>。";
+  let line = "";
   // 首选（或回退最近）锋面：把强度一并说明，找最近锋面时同样能给强度
   if (t) {
     const target = (snap.fronts || []).find((f) => f.isObject && f.id === t.id);
     const ti = intensityOf(target);
-    line += "首选 <b>" + t.bearing + " " + t.km.toFixed(1) + " km</b> 的" + t.label +
+    line += (t.fallback ? "范围外最近：" : "优先查看：") + "<b>" + t.label + " · " + t.bearing + " " + t.km.toFixed(1) + " km</b>" +
       (ti ? "（强度 <b>" + ti.label + "</b>）" : "") + "。";   // 温差/梯度等细节放在选中回执卡里，结论行保持简短
-  } else line += "可扩大作业范围或换个日期。";
+  } else line += "暂无线索，可扩大范围或换个日期。";
   l.innerHTML = line;
 
   body.innerHTML =
@@ -1147,6 +1146,7 @@ function renderNow() {
   const snap = snapshot();
   const st = snap.status;
   $("nowScopeTag").textContent = state.range + " km 内";
+  $("nowLocation").textContent = fmtCoord(state.lon, state.lat);
 
   if (!st.ok) {
     $("nowMetrics").innerHTML = "";
@@ -1168,13 +1168,13 @@ function renderNow() {
   const anchorSst = OFData.sstCell(state.date, state.lon, state.lat);
   $("nowScopeTag").textContent = state.range + " km 内" +
     (coverage === null ? "" : " · 数据覆盖 " + coverage.toFixed(1) + "%") +
-    (anchorSst && anchorSst.valueC !== null ? " · 定位点水温 " + anchorSst.valueC.toFixed(1) + " °C" : "");
+    "";
   $("nowMetrics").innerHTML =
-    metricCell("锋面区", String(objects.length), "个") +
+    metricCell("范围内锋面", String(snap.inRange.filter((f) => f.isObject).length), "个") +
     metricCell("最近锋面", nearest ? nearest.km.toFixed(1) : "—", "km", "front",
       nearest && nearest.isObject ? nearest.id : "") +
     metricCell("所处侧", snap.side || "锋区外", "", "coldwarm") +
-    metricCell("把握度", String(snap.score), "%");
+    metricCell("选点水温", anchorSst && anchorSst.valueC !== null ? anchorSst.valueC.toFixed(1) : "—", "°C");
 
   // 海况：示例数据，不参与评分
   const sea = seaState(state.date);
@@ -1189,8 +1189,7 @@ function renderNow() {
   const objectLines = snap.fronts.filter((f) => f.isObject);
   const inRangeObjects = objectLines.filter((f) => f.inRange);
   const shortCount = snap.fronts.length - objectLines.length;
-  $("nowFrontTag").textContent = "共 " + objectLines.length + " 个 · 范围内 " + inRangeObjects.length +
-    (shortCount ? " · 短段 " + shortCount : "");
+  $("nowFrontTag").textContent = "范围内 " + inRangeObjects.length + " 个";
   const leadLines = inRangeObjects.length ? inRangeObjects.slice(0, 3)
     : (nearest && nearest.isObject ? [nearest] : []);
   $("nowLead").innerHTML = leadLines.length
@@ -1234,16 +1233,13 @@ function renderAisResponse(snap) {
     tag.textContent = "待接入";
     tag.className = "tag plain";
     list.innerHTML =
-      '<div class="row"><span class="i">1</span><span class="grow"><b>暂不参与当前把握度</b><small>真实 AIS/GFW 表观捕捞活动样例尚未接入，不生成响应增强结论</small></span></div>' +
-      '<div class="row"><span class="i">2</span><span class="grow"><b>已预留数据入口</b><small>后续接入 data/front_response/events.js 后展示 fishing hours、前后窗口变化和对照区结果</small></span></div>';
+      '<div class="row"><span class="i">!</span><span class="grow"><b>真实 AIS 响应待接入</b><small>暂不参与把握度评分</small></span></div>';
   } else if (response.available === false) {
     tag.textContent = "不可用";
     tag.className = "tag plain";
     list.innerHTML =
-      '<div class="row"><span class="i">!</span><span class="grow"><b>当前日期/范围暂无响应表记录</b><small>状态：' +
-      response.status + '；不把缺失解释成 0 fishing hours</small></span></div>' +
-      '<div class="row"><span class="i">2</span><span class="grow"><b>保持空态</b><small>' +
-      aisShortCaveat(meta, response) + "</small></span></div>";
+      '<div class="row"><span class="i">!</span><span class="grow"><b>该日期与范围暂无响应记录</b><small>' +
+      aisShortCaveat(meta, response) + ' · 缺测不代表零活动</small></span></div>';
   } else {
     const enhanced = response.enhanced ? "响应增强" : "未见明确增强";
     tag.textContent = meta && meta.isSynthetic ? "夹具 · " + enhanced : enhanced;
@@ -1395,7 +1391,7 @@ function renderFuture() {
   $("futureList").innerHTML =
     '<div class="row"><span class="i">0</span><span class="grow"><b>' + windowDays + " 天窗口首选 " +
     (best ? mdText(best.date) + " · " + best.score + "%" : "暂无") + "</b>" +
-    "<small>点击 1 / 3 / 7 天切换评估窗口；下方仍保留 7 天全貌</small></span></div>" +
+    "<small>规则参考，非业务预报</small></span></div>" +
     '<div class="row"><span class="i">1</span><span class="grow"><b>当前锋面信号 ' + snap.score + "%</b>" +
     "<small>使用范围内锋面区、最近距离、最长锋面区和数据覆盖计算</small></span></div>" +
     '<div class="row"><span class="i">2</span><span class="grow"><b>近几日持续性 ' +
@@ -1450,6 +1446,13 @@ function renderClim() {
   const bars = $("climBars"), heat = $("climHeat"), stat = $("climStat"), years = $("climYears"), hint = $("climHint");
   const clim = OFData.clim;
   heat.innerHTML = "";
+  const anchor = OFData.meta && OFData.meta.region && OFData.meta.region.anchor;
+  if (!anchor || Math.abs(state.lon - anchor[0]) > 1e-6 || Math.abs(state.lat - anchor[1]) > 1e-6) {
+    hint.textContent = "固定样点限定"; hint.className = "tag warn";
+    bars.innerHTML = ""; years.innerHTML = "";
+    stat.textContent = "此处没有对应的多年样本，不能沿用原固定样点的统计。";
+    return;
+  }
 
   if (!clim) {
     hint.textContent = "统计未导出"; hint.className = "tag warn";
@@ -1690,77 +1693,98 @@ function renderBasis() {
 }
 
 // ==================== L2-AI 分析（证据组织，不直接生成科学数值） ====================
-function renderAI() {
-  const snap = snapshot();
-  const summary = $("aiSummary"), plan = $("aiPlan"), next = $("aiNext");
-  if (!snap.ok) {
-    $("aiTag").textContent = "等待数据";
-    $("aiPlanTag").textContent = "未执行";
-    $("aiNextTag").textContent = "换日期";
-    summary.innerHTML = '<div class="row"><span class="i">!</span><span class="grow"><b>' + snap.status.title +
-      "</b><small>" + snap.status.desc + "</small></span></div>";
-    plan.innerHTML = "";
-    $("aiEvidenceBody").innerHTML = "";
-    next.innerHTML = '<div class="row"><span class="i">1</span><span class="grow"><b>切换出海日</b><small>当前可选 ' +
-      DATE_MIN + " ~ " + DATE_MAX + "</small></span></div>";
+// 统计条件与地图日期分离；结果只属于计算时的区域、半径、月份和年份。
+function statsQuery() {
+  return { lon: state.lon, lat: state.lat, range: state.range,
+    month: state.stats.month, from: state.stats.from, to: state.stats.to };
+}
+function statsKey(query) { return JSON.stringify(query); }
+function currentStats() {
+  const result = state.stats.result;
+  return result && result.key === statsKey(statsQuery()) ? result : null;
+}
+function initStats() {
+  const rows = OFData.clim && OFData.clim.rows || [];
+  const years = [...new Set(rows.map((r) => r.date.slice(0, 4)))].sort();
+  // 无样本时仍可设定条件，但不能生成数值。
+  if (!years.length) years.push(state.date.slice(0, 4));
+  state.stats.from = years[0];
+  state.stats.to = years[years.length - 1];
+  ["statsYearFrom", "statsYearTo"].forEach((id) => {
+    $(id).innerHTML = years.map((year) => '<option value="' + year + '">' + year + '</option>').join("");
+  });
+  $("statsYearFrom").value = state.stats.from;
+  $("statsYearTo").value = state.stats.to;
+}
+function runStats() {
+  const query = statsQuery();
+  if (query.from > query.to) return;
+  const anchor = OFData.meta && OFData.meta.region && OFData.meta.region.anchor;
+  // 历史表是固定样点的预计算结果，绝不能跟随地图选点挪用。
+  const matches = !!anchor && Math.abs(query.lon - anchor[0]) < 1e-6 && Math.abs(query.lat - anchor[1]) < 1e-6;
+  const source = matches && OFData.clim ? (OFData.clim.rows || []) : [];
+  const samples = source.filter((r) => r.date.slice(5, 7) === query.month &&
+    r.date.slice(0, 4) >= query.from && r.date.slice(0, 4) <= query.to);
+  const rows = samples.map((r) => ({ date: r.date, bucket: r.by_range[String(query.range)] }))
+    .filter((r) => r.bucket && r.bucket.status === "ok" && r.bucket.valid_cells > 0);
+  const present = rows.filter((r) => r.bucket.front_present === true).length;
+  state.stats.result = { key: statsKey(query), query, matches, rows, present,
+    loaded: samples.length, missing: samples.length - rows.length };
+  state.stats.organizedKey = null;
+  renderStats();
+  renderAI();
+}
+function statsCard(number, title, status, body) {
+  return '<section class="card"><h3><span>' + number + ' / ' + title + '</span><span class="tag plain">' +
+    status + '</span></h3>' + body + '</section>';
+}
+function renderStats() {
+  const query = statsQuery(), result = currentStats();
+  const invalid = query.from > query.to;
+  const stale = !!state.stats.result && !result;
+  $("statsScope").textContent = fmtCoord(query.lon, query.lat) + " · 半径 " + query.range + " km";
+  $("statsRun").disabled = invalid;
+  $("statsRun").textContent = stale ? "更新统计" : result ? "重新统计" : "开始统计";
+  $("statsStatus").className = "stats-status" + (stale || invalid ? " stale" : "");
+  $("statsStatus").textContent = invalid ? "起始年份不能晚于结束年份。" : stale ?
+    "条件已变化，请更新统计。旧结果已收起。" : result ?
+    query.from + "—" + query.to + " 年 · " + Number(query.month) + " 月 · " + (result.rows.length ? "部分证据可用" : "证据不足") :
+    "先确认海域与参考月份，再开始统计。";
+  if (!result) {
+    $("statsResults").innerHTML = '<div class="card"><p class="stats-placeholder">' +
+      (stale ? '条件已变化，更新后查看结果。' : '选择同期条件，查看锋面与捕鱼活动。') + '</p></div>';
     return;
   }
-  const verdict = verdictOf(snap.score);
-  const target = heroTarget();
-  const recent = aggregateObservationDates(recentObservationDates(state.date, 4));
-  const month = aggregateObservationDates(datesInMonth(state.date));
-  const base = baselineSeries();
-  const bestBase = base.reduce((m, r) => (!m || r.score > m.score ? r : m), null);
-  const climRate = climRateFor(state.date.slice(5), state.range);
-  const sea = seaState(state.date);
-  const responseMeta = OFData.frontResponseMeta();
-  const response = OFData.frontResponse(state.date, state.range);
-  const responseReady = OFData.frontResponseAvailable() && response;
-
-  $("aiTag").textContent = "证据驱动";
-  $("aiPlanTag").textContent = "本地规则";
-  $("aiNextTag").textContent = target ? "继续验证" : "扩大范围";
-  summary.innerHTML =
-    '<div class="row"><span class="i">1</span><span class="grow"><b>' + verdict.text + " · 把握度 " + snap.score +
-    "%</b><small>结论由当前锋面区、距离、长度和数据覆盖计算</small></span></div>" +
-    '<div class="row"><span class="i">2</span><span class="grow"><b>' +
-    (target ? target.label + " · " + target.bearing + " " + target.km.toFixed(1) + " km" : "作业范围内暂无明确锋面区") +
-    "</b><small>" + (target ? (target.fallback ? "范围内暂无线索，展示最近的一条" : "范围内首选，已在地图标出") :
-      "可放大作业范围或换相邻日期复核") + "</small></span></div>" +
-    '<div class="row"><span class="i">3</span><span class="grow"><b>历史参照 ' +
-    (climRate == null ? "样本不足" : Math.round(climRate * 100) + "%") +
-    "</b><small>当前月样例 " + month.present + "/" + month.valid + " 天在范围内有锋面</small></span></div>" +
-    '<div class="row"><span class="i">4</span><span class="grow"><b>' + aisEvidenceLine(response) +
-    "</b><small>AIS response 只作为证据来源，不改变当前把握度评分</small></span></div>";
-
-  plan.innerHTML =
-    '<div class="row"><span class="i">A</span><span class="grow"><b>解析任务</b><small>' +
-    mdText(state.date) + "，" + fmtCoord(state.lon, state.lat) + "，作业范围 " + state.range + " km</small></span></div>" +
-    '<div class="row"><span class="i">B</span><span class="grow"><b>调用工具</b><small>当前查询 → 历史同期 → AIS response → 规则预测参考 → 限制检查</small></span></div>' +
-    '<div class="row"><span class="i">C</span><span class="grow"><b>证据边界</b><small>海况为示例值（风力 ' +
-    sea.wind + " 级、浪高 " + sea.wave + " m），AI 只组织证据，不生成 fishing hours 或科学数值</small></span></div>";
-
-  $("aiEvidenceBody").innerHTML =
-    '<div class="line"><span class="k">当前证据</span> → <b>当前页</b>：锋面区数量、最近距离、所处侧和数据覆盖</div>' +
-    '<div class="line"><span class="k">历史证据</span> → <b>历史页</b>：当日 / 3 日 / 7 日 / 15 日 / 当月 / 整年的可用样例与同期统计</div>' +
-    '<div class="line"><span class="k">AIS 响应</span> → <b>当前页</b>：' +
-    (responseReady ? aisEvidenceLine(response) : "已预留数据入口，真实 apparent fishing effort 样例待接入") +
-    (responseMeta && responseMeta.note ? "；" + responseMeta.note : "") + "</div>" +
-    '<div class="line"><span class="k">预测证据</span> → <b>预测页</b>：' + state.predWindow + " 天规则预测参考，首选 " +
-    (bestBase ? mdText(bestBase.date) + " · " + bestBase.score + "%" : "暂无") + "</div>" +
-    '<div class="line"><span class="k">限制证据</span> → <b>数据说明</b>：强度、真实海况、真实预报尚未接入；' +
-    (responseMeta && responseMeta.isSynthetic
-      ? "AIS fixture 不是真实 GFW/AIS 证据"
-      : "AIS 响应为 GFW 表观捕捞活动聚合，不等于渔获量 / 产量 / 收益") + "</div>";
-
-  next.innerHTML =
-    '<div class="row clickable" data-pane-jump="future"><span class="i">1</span><span class="grow"><b>查看规则预测参考</b><small>' +
-    (bestBase ? "当前规则建议优先看第 " + bestBase.offset + " 天，规则参考 " + bestBase.score + "%" : "当前日期暂无规则参考") +
-    "</small></span></div>" +
-    '<div class="row clickable" data-pane-jump="clim"><span class="i">2</span><span class="grow"><b>切到历史尺度</b><small>对照当日、近三日、当月和整年样例</small></span></div>' +
-    '<div class="row clickable" data-pane-jump="basis"><span class="i">3</span><span class="grow"><b>核对数据说明</b><small>确认哪些数据真实接入，哪些仍是示例或未接入</small></span></div>';
-  next.querySelectorAll("[data-pane-jump]").forEach((node) =>
-    node.addEventListener("click", () => switchTab(node.dataset.paneJump)));
+  const rate = result.rows.length ? Math.round(result.present / result.rows.length * 100) + '%' : '暂无';
+  const metric = (value, label, pending) => '<div class="stat"><span class="value' + (pending ? ' pending' : '') + '">' + value +
+    '</span><span class="label">' + label + '</span></div>';
+  let body = '<div class="history-metrics">' + metric(rate, '锋面出现率', !result.rows.length) +
+    metric('待接入', '捕捞时长', true) + metric('待计算', '近锋面占比', true) + '</div>';
+  body += '<p class="hint">' + (result.rows.length ? result.present + '/' + result.rows.length +
+    ' 个有效日 · 8 月 5—7 日抽样，非整月' : !result.matches ? '此选点无对应历史样本' : '该时段无有效样本，缺测不代表零') + '</p>';
+  if (result.rows.length) {
+    const years = [...new Set(result.rows.map((r) => r.date.slice(0, 4)))].sort();
+    body += '<details class="why"><summary>各年对比与样本覆盖</summary><div class="why-body">' + years.map((year) => {
+      const rows = result.rows.filter((r) => r.date.startsWith(year)), n = rows.filter((r) => r.bucket.front_present).length;
+      return '<div class="stats-year"><span>' + year + '</span><div class="stats-track"><span style="width:' +
+        n / rows.length * 100 + '%"></span></div><span>' + n + '/' + rows.length + ' 天</span></div>';
+    }).join('') + '<p class="hint">有锋面日 / 有效日。已加载 ' + result.loaded + ' 天；其中无效 ' + result.missing +
+      ' 天。未加载日期不进入分母。锋面常见位置待统计。</p></div></details>';
+  }
+  body += '<details class="why"><summary>待接入的数据</summary><div class="why-body">同期捕捞时长、活动集中位置、近锋面占比及冷暖侧分布。地图图层不代替区域统计；需逐日匹配活动与当天锋面。</div></details>';
+  $("statsResults").innerHTML = '<section class="card"><h3>同期概览<span class="tag plain">' +
+    (result.rows.length ? '部分可用' : '样本不足') + '</span></h3>' + body + '</section>';
+}
+function renderAI() {
+  const result = currentStats();
+  $("aiTag").textContent = result ? "规则整理" : "等待统计";
+  $("aiSummary").textContent = result ? "锋面有效样本 " + result.rows.length + " 天" : "先完成同期统计";
+  $("aiConclusion").hidden = false;
+  $("aiConclusion").innerHTML = !result ? '<p class="stats-placeholder">完成统计后，在这里查看结论。</p>' :
+    '<p>' + (result.rows.length ? '样本中有 <b>' + result.present + '/' + result.rows.length +
+      ' 天</b>出现锋面；仅供同期抽样参考。' : '样本不足，暂不能判断同期锋面规律。') +
+    '</p><p class="stats-placeholder">缺少活动与锋面的匹配统计，暂不能推荐作业区段。</p><details class="why"><summary>结论依据与下一步</summary>' +
+    '<div class="why-body">本地规则整理，未调用在线 AI。现有锋面样本只覆盖固定点位每年 8 月 5—7 日，不代表整月。补齐同期活动并逐日匹配，再核对各年差异。</div></details>';
 }
 
 // ==================== 提示条（只用于确认操作，不播报结论） ====================
@@ -1878,6 +1902,7 @@ function refresh() {
   renderNow();
   renderFuture();
   renderClim();
+  renderStats();
   renderBasis();
   renderAI();
   renderProbe();
@@ -1921,6 +1946,7 @@ function setDrawer(open) {
 
 function switchTab(name) {
   state.tab = name;
+  $("analysisContext").textContent = { now: "选点周围 · 当日观测", clim: "往年同期 · 统计与结论", future: "未来趋势 · 预测参考", basis: "数据来源与使用边界" }[name] || "海域分析";
   document.querySelectorAll("#tabs button").forEach((b) => {
     const on = b.dataset.pane === name;
     b.classList.toggle("active", on);
@@ -2454,6 +2480,19 @@ function bind() {
     });
   });
   $("toBasis").addEventListener("click", () => switchTab("basis"));
+  initStats();
+  [["statsMonth", "month"], ["statsYearFrom", "from"], ["statsYearTo", "to"]].forEach(([id, key]) => {
+    $(id).addEventListener("change", () => {
+      state.stats[key] = $(id).value;
+      state.stats.organizedKey = null;
+      renderStats(); renderAI();
+    });
+  });
+  $("statsRun").addEventListener("click", runStats);
+  $("statsPick").addEventListener("click", () => {
+    $("pickOriginBtn").click();
+    $("map").scrollIntoView({ block: "center", behavior: "smooth" });
+  });
 
   // 图层抽屉：靠近左边缘自动呼出；固定展开后不随鼠标自动收起
   const mapEl = $("map");
