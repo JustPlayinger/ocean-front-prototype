@@ -64,8 +64,12 @@ const GEO = `var tb=document.getElementById("topbar"), concl=document.querySelec
   panes=document.getElementById("panes"), side=document.querySelector(".side"), footer=document.querySelector(".footer"),
   aisCard=document.getElementById("aisResponseList").closest(".card");
   var r=function(n){return n.getBoundingClientRect();};
+  // 2026-10-18 起 AIS 响应卡被包进默认折叠的 <details id="responseDetails">（折叠态只露 ~55px 摘要行）。
+  // 断言的原意是「展开后内容完整可见、文案不裁切」，所以这里临时展开测量，返回前还原。
+  var aisWasOpen = aisCard.tagName === "DETAILS" ? aisCard.open : null;
+  if (aisCard.tagName === "DETAILS") aisCard.open = true;
   var aisR=r(aisCard), paneR=r(panes);
-  return {
+  var geo = {
     vw: window.innerWidth, vh: window.innerHeight,
     docScrollW: document.documentElement.scrollWidth,
     topbarH: Math.round(r(tb).height),
@@ -98,7 +102,9 @@ const GEO = `var tb=document.getElementById("topbar"), concl=document.querySelec
     drawerOpacity: getComputedStyle(document.querySelector(".map-legend")).opacity,
     drawerBottom: Math.round(document.querySelector(".map-legend").getBoundingClientRect().bottom),
     drawerLeft: Math.round(document.querySelector(".map-legend").getBoundingClientRect().left)
-  };`;
+  };
+  if (aisWasOpen !== null) aisCard.open = aisWasOpen;
+  return geo;`;
 
 const results = [];
 const check = (l, c, d) => results.push(`${c ? "PASS" : "FAIL"}  ${l}${d ? "  → " + d : ""}`);
